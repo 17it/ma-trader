@@ -1,0 +1,712 @@
+/**
+ * app.js — MA 自动交易系统主控制器 (AppController)
+ * 协调图表、设置、回测、统计、实时行情与 WebSocket 通信
+ */
+
+const AppController = (() => {
+  // ─── State ─────────────────────────────────────────────────────────
+  const state = {
+    currentSymbol: 'BTCUSDT',
+    currentTimeframe: '1m',
+    currentPrice: null,
+    symbols: [],
+    trades: [],
+    botRunning: false,
+    ws: null,
+    wsPingInterval: null,
+    wsReconnectTimeout: null,
+    klinesData: []
+  };
+
+  // ─── Initialization ────────────────────────────────────────────────
+  async function init() {
+    console.log('[App] Initializing MA Trader App...');
+
+    // 1. Init Sub-managers
+    if (typeof ChartManager !== 'undefined') ChartManager.init();
+    if (typeof SettingsManager !== 'undefined') SettingsManager.init();
+    if (typeof BacktestManager !== 'undefined') BacktestManager.init();
+
+    // 2. Setup DOM Event Listeners
+    setupEventListeners();
+
+    // 3. Start Clock
+    updateClock();
+    setInterval(updateClock, 1000);
+
+    // 4. Initial HTTP Data Load
+    await loadSettings();
+    await loadSymbols();
+    await checkBotStatus();
+    await loadTrades();
+    await loadStats();
+
+    // 5. Connect WebSocket
+    connectWS();
+  }
+
+  // ─── DOM Event Listeners ───────────────────────────────────────────
+  function setupEventListeners() {
+    // Timeframe buttons
+    document.querySelectorAll('#tfBtns .tf-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const tf = e.currentTarget.dataset.tf;
+        switchTimeframe(tf);
+      });
+    });
+
+    // Bot Start / Stop
+    const btnStart = document.getElementById('btnStart');
+    const btnStop  = document.getElementById('btnStop');
+    if (btnStart) btnStart.addEventListener('click', startBot);
+    if (btnStop)  btnStop.addEventListener('click', stopBot);
+
+    // Refresh symbols
+    const btnRefSym = document.getElementById('btnRefreshSymbols');
+    if (btnRefSym) btnRefSym.addEventListener('click', loadSymbols);
+
+    // Refresh stats
+    const btnRefStats = document.getElementById('btnRefreshStats');
+    if (btnRefStats) btnRefStats.addEventListener('click', loadStats);
+
+    // Stats filters change
+    ['statsSymbol', 'statsDays', 'statsMode'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', loadStats);
+    });
+
+    // Tab switch triggers
+    const tabStatsLink = document.querySelector('a[href="#tabStats"]');
+    if (tabStatsLink) {
+      tabStatsLink.addEventListener('shown.bs.tab', loadStats);
+    }
+    const tabTradesLink = document.querySelector('a[href="#tabTrades"]');
+    if (tabTradesLink) {
+      tabTradesLink.addEventListener('shown.bs.tab', loadTrades);
+    }
+
+    // Simulate Trade Buttons (if present in DOM)
+    const btnSimLong = document.getElementById('btnSimLong');
+    const btnSimShort = document.getElementById('btnSimShort');
+    if (btnSimLong) btnSimLong.addEventListener('click', () => simulateTrade('long'));
+    if (btnSimShort) btnSimShort.addEventListener('click', () => simulateTrade('short'));
+  }
+
+  // ─── Clock ─────────────────────────────────────────────────────────
+  function updateClock() {
+    const el = document.getElementById('clockDisplay');
+    if (!el) return;
+    const now = new Date();
+    el.textContent = now.toTimeString().split(' ')[0] + ' UTC';
+  }
+
+  // ─── Navigation & Switching ────────────────────────────────────────
+  function switchSymbol(symbol) {
+    if (!symbol) return;
+    symbol = symbol.toUpperCase();
+    state.currentSymbol = symbol;
+
+    const label = document.getElementById('chartSymbolLabel');
+    if (label) label.textContent = symbol;
+
+    // Update active class in sidebar
+    document.querySelectorAll('#symbolList .symbol-item').forEach(item => {
+      if (item.dataset.symbol === symbol) {
+        item.classList.add('active');
+      } else {
+        item.classList.remove('active');
+      }
+    });
+
+    // Update simulation price placeholder
+    const simInput = document.getElementById('simEntryPrice');
+    if (simInput && state.currentPrice) {
+      simInput.placeholder = state.currentPrice.toFixed(2);
+    }
+
+    // Reset indicator displays
+    resetSignalDisplay();
+
+    // Reload Klines
+    loadKlines();
+  }
+
+  function switchTimeframe(tf) {
+    if (!tf) return;
+    state.currentTimeframe = tf;
+
+    document.querySelectorAll('#tfBtns .tf-btn').forEach(btn => {
+      if (btn.dataset.tf === tf) {
+        btn.classList.add('active');
+      } else {
+        btn.classList.remove('active');
+      }
+    });
+
+    loadKlines();
+  }
+
+  // ─── HTTP API Calls ────────────────────────────────────────────────
+  async function loadSettings() {
+    try {
+      const res = await fetch('/api/settings');
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof SettingsManager !== 'undefined') {
+          SettingsManager.loadGlobalSettings(data);
+        }
+      }
+    } catch (err) {
+      console.warn('[App] Load settings error:', err);
+    }
+  }
+
+  async function loadSymbols() {
+    try {
+      const res = await fetch('/api/symbols');
+      if (!res.ok) return;
+      const symbols = await res.json();
+      state.symbols = symbols;
+
+      if (typeof SettingsManager !== 'undefined') {
+        SettingsManager.loadSymbols(symbols);
+      }
+
+      // If active symbol not in list or default, select first
+      if (symbols.length > 0) {
+        const found = symbols.find(s => s.symbol === state.currentSymbol);
+        if (!found) {
+          switchSymbol(symbols[0].symbol);
+        } else {
+          switchSymbol(state.currentSymbol);
+        }
+      }
+    } catch (err) {
+      console.warn('[App] Load symbols error:', err);
+    }
+  }
+
+  async function loadKlines() {
+    if (!state.currentSymbol) return;
+    try {
+      const url = `/api/klines/${state.currentSymbol}?timeframe=${state.currentTimeframe}&limit=200`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const body = await res.json();
+      state.klinesData = body.data || [];
+
+      // Pass matching trades to chart
+      const symbolTrades = state.trades.filter(t => t.symbol === state.currentSymbol);
+      if (typeof ChartManager !== 'undefined') {
+        ChartManager.render(state.klinesData, symbolTrades);
+      }
+
+      // Update current price from latest candle if available
+      if (state.klinesData.length > 0) {
+        const lastCandle = state.klinesData[state.klinesData.length - 1];
+        const lastClose = Array.isArray(lastCandle) ? lastCandle[4] : lastCandle.c;
+        if (lastClose) {
+          updateCurrentPrice(lastClose);
+        }
+      }
+    } catch (err) {
+      console.warn('[App] Load klines error:', err);
+    }
+  }
+
+  async function loadTrades() {
+    try {
+      const res = await fetch('/api/trades?limit=100');
+      if (!res.ok) return;
+      const trades = await res.json();
+      state.trades = trades;
+
+      renderTradesTable(trades);
+
+      const countEl = document.getElementById('tradeCount');
+      if (countEl) countEl.textContent = trades.length;
+
+      // Update chart markers if on chart tab
+      if (typeof ChartManager !== 'undefined' && state.klinesData.length > 0) {
+        const symbolTrades = trades.filter(t => t.symbol === state.currentSymbol);
+        ChartManager.render(state.klinesData, symbolTrades);
+      }
+    } catch (err) {
+      console.warn('[App] Load trades error:', err);
+    }
+  }
+
+  async function loadStats() {
+    try {
+      const sym = document.getElementById('statsSymbol')?.value || '';
+      const days = document.getElementById('statsDays')?.value || '30';
+      const mode = document.getElementById('statsMode')?.value || '';
+
+      let url = `/api/stats?days=${days}`;
+      if (sym) url += `&symbol=${encodeURIComponent(sym)}`;
+      if (mode) url += `&is_paper=${mode === 'paper'}`;
+
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const stats = await res.json();
+
+      // Update Stat Cards
+      const totalEl = document.getElementById('statTotal');
+      const wrEl    = document.getElementById('statWinrate');
+      const pnlEl   = document.getElementById('statPnl');
+      const pfEl    = document.getElementById('statPF');
+
+      if (totalEl) totalEl.textContent = stats.total_trades ?? 0;
+      if (wrEl)    wrEl.textContent = `${(stats.win_rate ?? 0).toFixed(1)}%`;
+      if (pnlEl) {
+        const pnl = stats.total_pnl ?? 0;
+        const sign = pnl >= 0 ? '+' : '';
+        pnlEl.textContent = `${sign}$${pnl.toFixed(2)}`;
+        pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'text-success' : 'text-danger');
+      }
+      if (pfEl) {
+        const pf = stats.profit_factor;
+        pfEl.textContent = (pf === null || pf === undefined) ? '—' : pf.toFixed(2);
+      }
+
+      // Render Charts
+      if (typeof StatsCharts !== 'undefined') {
+        const daily = stats.daily_pnl || [];
+        const dates = daily.map(d => d.date);
+        const pnls  = daily.map(d => d.pnl);
+        StatsCharts.renderDaily(dates, pnls);
+
+        const bySym = stats.by_symbol || {};
+        const symNames = Object.keys(bySym);
+        const symPnls  = symNames.map(k => bySym[k].pnl);
+        StatsCharts.renderSymbol(symNames, symPnls);
+      }
+    } catch (err) {
+      console.warn('[App] Load stats error:', err);
+    }
+  }
+
+  async function checkBotStatus() {
+    try {
+      const res = await fetch('/api/trading/status');
+      if (res.ok) {
+        const status = await res.json();
+        updateBotUI(status.running);
+      }
+    } catch (err) {
+      console.warn('[App] Check bot status error:', err);
+    }
+  }
+
+  async function startBot() {
+    try {
+      const res = await fetch('/api/trading/start', { method: 'POST' });
+      if (res.ok) {
+        updateBotUI(true);
+        appendLog('交易监控已启动', 'info');
+      } else {
+        const err = await res.json();
+        alert('启动失败: ' + (err.detail || '未知错误'));
+      }
+    } catch (err) {
+      console.error('启动交易失败', err);
+    }
+  }
+
+  async function stopBot() {
+    try {
+      const res = await fetch('/api/trading/stop', { method: 'POST' });
+      if (res.ok) {
+        updateBotUI(false);
+        appendLog('交易监控已停止', 'warning');
+      }
+    } catch (err) {
+      console.error('停止交易失败', err);
+    }
+  }
+
+  async function simulateTrade(direction) {
+    const priceInput = document.getElementById('simEntryPrice');
+    let entryPrice = priceInput ? parseFloat(priceInput.value) : NaN;
+    if (isNaN(entryPrice) || entryPrice <= 0) {
+      entryPrice = state.currentPrice;
+    }
+
+    if (!entryPrice || entryPrice <= 0) {
+      alert('请等待当前价格加载，或手动输入入场价格！');
+      return;
+    }
+
+    const payload = {
+      symbol: state.currentSymbol,
+      direction: direction,
+      entry_price: entryPrice
+    };
+
+    try {
+      const res = await fetch('/api/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const trade = await res.json();
+        appendLog(`[模拟开仓] ${direction.toUpperCase()} ${state.currentSymbol} 价格: ${entryPrice}`, 'success');
+        await loadTrades();
+      } else {
+        const err = await res.json();
+        alert('模拟开仓失败: ' + (err.detail || '未知错误'));
+      }
+    } catch (err) {
+      console.error('模拟开仓请求失败', err);
+    }
+  }
+
+  async function closeTrade(tradeId) {
+    if (!confirm(`确定要平仓该笔交易 (ID: ${tradeId}) 吗？`)) return;
+    try {
+      const res = await fetch(`/api/trades/${tradeId}/close`, { method: 'POST' });
+      if (res.ok) {
+        appendLog(`[手动平仓] 订单 #${tradeId} 平仓成功`, 'info');
+        await loadTrades();
+        await loadStats();
+      } else {
+        const err = await res.json();
+        alert('平仓失败: ' + (err.detail || '未知错误'));
+      }
+    } catch (err) {
+      console.error('平仓失败', err);
+    }
+  }
+
+  function highlightTrade(tradeId) {
+    if (typeof ChartManager !== 'undefined') {
+      ChartManager.highlightTrade(tradeId);
+      // Switch to Chart Tab
+      const tabLink = document.querySelector('a[href="#tabChart"]');
+      if (tabLink) {
+        bootstrap.Tab.getOrCreateInstance(tabLink).show();
+      }
+    }
+  }
+
+  // ─── UI Rendering ──────────────────────────────────────────────────
+  function updateBotUI(running) {
+    state.botRunning = running;
+    const dot   = document.getElementById('statusDot');
+    const label = document.getElementById('statusLabel');
+    const bStart = document.getElementById('btnStart');
+    const bStop  = document.getElementById('btnStop');
+
+    if (dot)   dot.className = 'status-dot ' + (running ? 'running' : 'stopped');
+    if (label) label.textContent = running ? '运行中' : '已停止';
+    if (bStart) bStart.disabled = running;
+    if (bStop)  bStop.disabled  = !running;
+  }
+
+  function updateCurrentPrice(price) {
+    if (!price) return;
+    state.currentPrice = price;
+
+    const el = document.getElementById('currentPrice');
+    if (el) {
+      el.textContent = price.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+    }
+
+    const simInput = document.getElementById('simEntryPrice');
+    if (simInput && !simInput.value) {
+      simInput.placeholder = price.toFixed(2);
+    }
+  }
+
+  function resetSignalDisplay() {
+    const info = document.getElementById('signalInfo');
+    const wrap = document.getElementById('signalProgressWrap');
+    const bar  = document.getElementById('signalProgressBar');
+    if (info) info.textContent = '无信号';
+    if (wrap) wrap.style.setProperty('display', 'none', 'important');
+    if (bar)  bar.style.width = '0%';
+  }
+
+  function renderTradesTable(trades) {
+    const tbody = document.getElementById('tradesTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (!trades || trades.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="12" class="text-center text-secondary py-4">暂无交易记录</td></tr>';
+      return;
+    }
+
+    trades.forEach(t => {
+      const tr = document.createElement('tr');
+      tr.style.cursor = 'pointer';
+      tr.addEventListener('click', (e) => {
+        // avoid trigger when clicking action buttons
+        if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+        highlightTrade(t.id);
+      });
+
+      const isLong = (t.direction || '').toLowerCase() === 'long';
+      const dirBadge = isLong
+        ? '<span class="badge bg-success-subtle text-success border border-success-subtle">多</span>'
+        : '<span class="badge bg-danger-subtle text-danger border border-danger-subtle">空</span>';
+
+      let statusBadge = '<span class="badge bg-secondary">未知</span>';
+      if (t.status === 'open') {
+        statusBadge = '<span class="badge bg-primary">持仓中</span>';
+      } else if (t.status === 'closed') {
+        statusBadge = '<span class="badge bg-success">已平仓</span>';
+      } else if (t.status === 'stopped') {
+        statusBadge = '<span class="badge bg-danger">止损平仓</span>';
+      }
+
+      let pnlText = '—';
+      if (t.pnl !== null && t.pnl !== undefined) {
+        const sign = t.pnl >= 0 ? '+' : '';
+        const color = t.pnl >= 0 ? 'text-success' : 'text-danger';
+        const pct = t.pnl_pct ? ` (${(t.pnl_pct * 100).toFixed(1)}%)` : '';
+        pnlText = `<span class="${color} fw-bold">${sign}$${t.pnl.toFixed(2)}${pct}</span>`;
+      }
+
+      const typeBadge = t.is_paper
+        ? '<span class="badge bg-secondary-subtle text-light border border-secondary" title="Paper Trading">模拟</span>'
+        : '<span class="badge bg-danger-subtle text-danger border border-danger" title="Live Trading">实盘</span>';
+
+      const timeStr = t.open_time ? t.open_time.replace('T', ' ').slice(5, 16) : '—';
+
+      // Action column
+      let actionBtn = `
+        <button class="btn btn-xs btn-outline-secondary" onclick="AppController.highlightTrade(${t.id})">
+          <i class="fa-solid fa-crosshairs"></i>
+        </button>
+      `;
+      if (t.status === 'open') {
+        actionBtn = `
+          <button class="btn btn-xs btn-danger me-1" onclick="AppController.closeTrade(${t.id})" title="平仓">
+            平仓
+          </button>
+          ${actionBtn}
+        `;
+      }
+
+      tr.innerHTML = `
+        <td><span class="text-secondary small">#${t.id}</span></td>
+        <td><strong>${t.symbol}</strong></td>
+        <td>${dirBadge}</td>
+        <td>${t.entry_price?.toFixed(2) ?? '—'}</td>
+        <td>${t.exit_price ? t.exit_price.toFixed(2) : '—'}</td>
+        <td class="text-secondary small">${t.stop_loss?.toFixed(2) ?? '—'}</td>
+        <td class="text-secondary small">${t.take_profit?.toFixed(2) ?? '—'}</td>
+        <td>${pnlText}</td>
+        <td>${statusBadge}</td>
+        <td class="small text-secondary">${timeStr}</td>
+        <td>${typeBadge}</td>
+        <td class="text-end text-nowrap">${actionBtn}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function appendLog(msg, level = 'info') {
+    const box = document.getElementById('logBox');
+    if (!box) return;
+    const time = new Date().toTimeString().split(' ')[0];
+    const line = document.createElement('div');
+    line.className = 'log-line ' + level;
+    line.innerHTML = `<span class="text-secondary">[${time}]</span> ${msg}`;
+    box.appendChild(line);
+
+    // Keep max 100 lines
+    while (box.children.length > 100) {
+      box.removeChild(box.firstChild);
+    }
+    box.scrollTop = box.scrollHeight;
+  }
+
+  // ─── WebSocket ─────────────────────────────────────────────────────
+  function connectWS() {
+    if (state.ws) {
+      try { state.ws.close(); } catch (_) {}
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const badge = document.getElementById('wsBadge');
+
+    try {
+      const ws = new WebSocket(wsUrl);
+      state.ws = ws;
+
+      ws.onopen = () => {
+        console.log('[WS] Connected to MA Trader stream');
+        if (badge) {
+          badge.className = 'badge bg-success-subtle text-success border border-success-subtle connected';
+          badge.textContent = '已连接';
+        }
+
+        // Heartbeat ping
+        clearInterval(state.wsPingInterval);
+        state.wsPingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 20000);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          handleWSMessage(msg);
+        } catch (err) {
+          console.warn('[WS] Parse message error:', err, event.data);
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.warn('[WS] Connection error:', err);
+      };
+
+      ws.onclose = () => {
+        console.log('[WS] Disconnected. Reconnecting in 3s...');
+        if (badge) {
+          badge.className = 'badge bg-warning-subtle text-warning border border-warning-subtle';
+          badge.textContent = '重连中…';
+        }
+        clearInterval(state.wsPingInterval);
+        clearTimeout(state.wsReconnectTimeout);
+        state.wsReconnectTimeout = setTimeout(connectWS, 3000);
+      };
+    } catch (e) {
+      console.error('[WS] Setup failed:', e);
+      clearTimeout(state.wsReconnectTimeout);
+      state.wsReconnectTimeout = setTimeout(connectWS, 5000);
+    }
+  }
+
+  function handleWSMessage(msg) {
+    if (!msg || !msg.type) return;
+
+    switch (msg.type) {
+      case 'ticker': {
+        // Update sidebar
+        if (typeof SettingsManager !== 'undefined' && SettingsManager.updateSymbolPrice) {
+          SettingsManager.updateSymbolPrice(msg.symbol, msg.price);
+        }
+        // If current symbol, update price
+        if (msg.symbol === state.currentSymbol) {
+          updateCurrentPrice(msg.price);
+        }
+        break;
+      }
+
+      case 'ma_update': {
+        if (typeof SettingsManager !== 'undefined' && SettingsManager.updateSymbolDirection) {
+          SettingsManager.updateSymbolDirection(msg.symbol, msg.direction);
+        }
+        if (msg.symbol === state.currentSymbol) {
+          const m7  = document.getElementById('ma7Val');
+          const m25 = document.getElementById('ma25Val');
+          const m60 = document.getElementById('ma60Val');
+          const dir = document.getElementById('maDirection');
+
+          if (m7)  m7.textContent  = msg.ma7?.toFixed(1)  ?? '—';
+          if (m25) m25.textContent = msg.ma25?.toFixed(1) ?? '—';
+          if (m60) m60.textContent = msg.ma60?.toFixed(1) ?? '—';
+
+          if (dir) {
+            if (msg.direction === 'long_aligned') {
+              dir.textContent = '▲ 多头排列';
+              dir.className = 'direction-badge long';
+            } else if (msg.direction === 'short_aligned') {
+              dir.textContent = '▼ 空头排列';
+              dir.className = 'direction-badge short';
+            } else {
+              dir.textContent = '— 震荡/无方向';
+              dir.className = 'direction-badge flat';
+            }
+          }
+        }
+        break;
+      }
+
+      case 'signal': {
+        if (msg.symbol === state.currentSymbol) {
+          const info = document.getElementById('signalInfo');
+          const wrap = document.getElementById('signalProgressWrap');
+          const bar  = document.getElementById('signalProgressBar');
+
+          const isLong = msg.direction === 'long';
+          const dirText = isLong ? '多头信号' : '空头信号';
+          const maxConf = msg.max_confirm || 2;
+          const pct = Math.min(100, Math.round((msg.confirm / maxConf) * 100));
+
+          if (info) {
+            info.innerHTML = `<span class="${isLong ? 'text-success' : 'text-danger'} fw-bold">${dirText}</span> 确认 ${msg.confirm}/${maxConf}`;
+          }
+          if (wrap) wrap.style.setProperty('display', 'flex', 'important');
+          if (bar) {
+            bar.style.width = `${pct}%`;
+            bar.className = 'progress-bar signal-progress-bar ' + (isLong ? 'bg-success' : 'bg-danger');
+          }
+        }
+        appendLog(`[信号] ${msg.symbol} ${msg.direction.toUpperCase()} 确认 ${msg.confirm}/${msg.max_confirm}`, 'info');
+        break;
+      }
+
+      case 'signal_reset': {
+        if (msg.symbol === state.currentSymbol) {
+          resetSignalDisplay();
+        }
+        break;
+      }
+
+      case 'trade_opened': {
+        const trade = msg.trade;
+        appendLog(`[开仓通知] ${trade.direction.toUpperCase()} ${trade.symbol} 价格:${trade.entry_price} 止损:${trade.stop_loss} 止盈:${trade.take_profit}`, 'success');
+        loadTrades();
+        break;
+      }
+
+      case 'trade_closed': {
+        const trade = msg.trade;
+        const pnl = trade.pnl ? `${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}` : '';
+        appendLog(`[平仓通知] ${trade.symbol} (${trade.close_reason || '平仓'}) 盈亏:${pnl}`, trade.pnl >= 0 ? 'success' : 'danger');
+        loadTrades();
+        loadStats();
+        break;
+      }
+
+      case 'bot_status': {
+        updateBotUI(Boolean(msg.running));
+        break;
+      }
+
+      case 'log': {
+        appendLog(msg.message || '', msg.level || 'info');
+        break;
+      }
+    }
+  }
+
+  // ─── Public API ────────────────────────────────────────────────────
+  return {
+    init,
+    switchSymbol,
+    switchTimeframe,
+    startBot,
+    stopBot,
+    simulateTrade,
+    closeTrade,
+    highlightTrade,
+    loadTrades,
+    loadStats,
+    loadSymbols
+  };
+})();
+
+// Auto-run on DOM ready
+document.addEventListener('DOMContentLoaded', () => {
+  AppController.init();
+});

@@ -1,0 +1,134 @@
+"""
+MA Trader - Backtest Router
+Async backtest task management: create, list, and retrieve results.
+"""
+import asyncio
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
+
+from database import get_db, BacktestRun, SettingModel
+from models import BacktestRunCreate, BacktestRunResponse
+from backtester import Backtester
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["backtest"])
+
+
+def _get_exchange(request: Request):
+    """Build exchange from cached config or anonymous ccxt client."""
+    import ccxt
+    cfg = request.app.state.config.get_all_cached()
+    key = cfg.get("binance_key", "")
+    secret = cfg.get("binance_secret", "")
+    try:
+        return ccxt.binance({
+            "apiKey": key or "",
+            "secret": secret or "",
+            "options": {"defaultType": "future"},
+            "enableRateLimit": True,
+        })
+    except Exception:
+        return None
+
+
+async def _run_backtest_task(run_id: int, params: dict, exchange):
+    """Background coroutine that runs the backtest and stores results."""
+    from database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        run = db.query(BacktestRun).filter(BacktestRun.id == run_id).first()
+        if run is None:
+            return
+        run.status = "running"
+        db.commit()
+
+        backtester = Backtester(exchange=exchange)
+        result = backtester.run(
+            symbol=params["symbol"],
+            timeframe=params["timeframe"],
+            htf_timeframe=params["htf_timeframe"],
+            start_date=params["start_date"],
+            end_date=params["end_date"],
+            confirm_candles=params.get("confirm_candles", 2),
+            rr_ratio=params.get("rr_ratio", 1.5),
+            initial_capital=params.get("initial_capital", 10_000.0),
+            risk_per_trade=params.get("risk_per_trade", 0.01),
+        )
+
+        run.results = json.dumps(result, ensure_ascii=False, default=str)
+        run.status = "done"
+        db.commit()
+        logger.info(f"Backtest {run_id} completed: {result['total_trades']} trades")
+    except Exception as exc:
+        logger.error(f"Backtest {run_id} failed: {exc}")
+        db.query(BacktestRun).filter(BacktestRun.id == run_id).update(
+            {"status": "failed", "error_msg": str(exc)[:500]}
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/backtest", response_model=BacktestRunResponse, status_code=202)
+async def create_backtest(
+    body: BacktestRunCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Create a new backtest task.  Runs asynchronously; returns immediately with the run id.
+    """
+    params = body.model_dump()
+    run = BacktestRun(
+        symbol=body.symbol.upper(),
+        timeframe=body.timeframe,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        params=json.dumps(params, ensure_ascii=False),
+        status="pending",
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    exchange = _get_exchange(request)
+    asyncio.create_task(_run_backtest_task(run.id, params, exchange))
+
+    return BacktestRunResponse.model_validate(run)
+
+
+@router.get("/backtest", response_model=list[BacktestRunResponse])
+def list_backtests(
+    db: Session = Depends(get_db),
+    limit: int = 50,
+):
+    """List backtest history, most recent first."""
+    runs = db.query(BacktestRun).order_by(BacktestRun.id.desc()).limit(limit).all()
+    return [BacktestRunResponse.model_validate(r) for r in runs]
+
+
+@router.get("/backtest/{run_id}", response_model=BacktestRunResponse)
+def get_backtest(run_id: int, db: Session = Depends(get_db)):
+    """Get a single backtest result including trades and equity_curve."""
+    run = db.query(BacktestRun).filter(BacktestRun.id == run_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+    return BacktestRunResponse.model_validate(run)
+
+
+@router.delete("/backtest/{run_id}", status_code=204)
+def delete_backtest(run_id: int, db: Session = Depends(get_db)):
+    """Delete a backtest run record."""
+    run = db.query(BacktestRun).filter(BacktestRun.id == run_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+    db.delete(run)
+    db.commit()

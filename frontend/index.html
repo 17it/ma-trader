@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MA Trader — 自动交易系统</title>
+
+  <!-- Bootstrap 5 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" />
+  <!-- FontAwesome 6 -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+  <!-- Custom styles -->
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════ NAVBAR ═══════════════════════════ -->
+<nav class="navbar navbar-dark px-3 py-2 d-flex align-items-center gap-3" id="topNav">
+  <span class="navbar-brand mb-0 fw-bold fs-5 me-2">
+    <i class="fa-solid fa-chart-line me-2 text-accent-blue"></i>MA Trader
+  </span>
+
+  <div class="d-flex align-items-center gap-2 me-auto">
+    <span class="status-dot" id="statusDot"></span>
+    <span class="status-label" id="statusLabel">未连接</span>
+    <span class="badge badge-ws ms-1" id="wsBadge">WS</span>
+  </div>
+
+  <div class="d-flex align-items-center gap-2">
+    <button class="btn btn-sm btn-success" id="btnStart">
+      <i class="fa-solid fa-play me-1"></i>启动
+    </button>
+    <button class="btn btn-sm btn-danger" id="btnStop" disabled>
+      <i class="fa-solid fa-stop me-1"></i>停止
+    </button>
+    <span class="text-secondary small ms-2" id="clockDisplay"></span>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════ MAIN LAYOUT ═══════════════════════════ -->
+<div class="d-flex" style="height: calc(100vh - 54px); overflow: hidden;">
+
+  <!-- ─── LEFT SIDEBAR ─── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <span class="text-secondary small">交易对</span>
+      <button class="btn btn-xs btn-outline-secondary" id="btnRefreshSymbols" title="刷新">
+        <i class="fa-solid fa-rotate-right fa-xs"></i>
+      </button>
+    </div>
+    <ul class="symbol-list" id="symbolList">
+      <!-- filled by app.js -->
+    </ul>
+  </aside>
+
+  <!-- ─── CONTENT ─── -->
+  <main class="flex-fill d-flex flex-column overflow-hidden">
+    <!-- Tab nav -->
+    <ul class="nav nav-tabs px-3 pt-2 flex-shrink-0" id="mainTabs">
+      <li class="nav-item">
+        <a class="nav-link active" data-bs-toggle="tab" href="#tabChart">
+          <i class="fa-solid fa-chart-candlestick me-1"></i>实时图表
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tabSettings">
+          <i class="fa-solid fa-gear me-1"></i>设置
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tabBacktest">
+          <i class="fa-solid fa-flask me-1"></i>回测
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tabStats">
+          <i class="fa-solid fa-chart-bar me-1"></i>统计
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tabTrades">
+          <i class="fa-solid fa-list me-1"></i>交易记录
+        </a>
+      </li>
+    </ul>
+
+    <div class="tab-content flex-fill overflow-hidden">
+
+      <!-- ══════════ TAB 1: CHART ══════════ -->
+      <div class="tab-pane fade show active h-100" id="tabChart">
+        <div class="d-flex h-100">
+          <!-- chart area -->
+          <div class="flex-fill d-flex flex-column p-2 overflow-hidden">
+            <!-- timeframe buttons -->
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <span class="text-secondary small" id="chartSymbolLabel">BTCUSDT</span>
+              <div class="btn-group btn-group-sm ms-2" id="tfBtns">
+                <button class="btn btn-outline-secondary tf-btn active" data-tf="1m">1m</button>
+                <button class="btn btn-outline-secondary tf-btn" data-tf="5m">5m</button>
+                <button class="btn btn-outline-secondary tf-btn" data-tf="15m">15m</button>
+              </div>
+            </div>
+            <!-- main kline chart -->
+            <div id="klineChart" class="flex-fill chart-container"></div>
+            <!-- volume chart -->
+            <div id="volumeChart" class="chart-volume mt-1"></div>
+          </div>
+
+          <!-- right info panel -->
+          <div class="info-panel flex-shrink-0 p-3 d-flex flex-column gap-3">
+            <div>
+              <div class="text-secondary small mb-1">当前价格</div>
+              <div class="price-display" id="currentPrice">—</div>
+            </div>
+            <hr class="my-0 border-secondary" />
+            <div>
+              <div class="text-secondary small mb-2">均线</div>
+              <div class="ma-row">
+                <span class="ma-label" style="color:#f0c040">MA7</span>
+                <span class="ma-value" id="ma7Val">—</span>
+              </div>
+              <div class="ma-row">
+                <span class="ma-label" style="color:#e77ab4">MA25</span>
+                <span class="ma-value" id="ma25Val">—</span>
+              </div>
+              <div class="ma-row">
+                <span class="ma-label" style="color:#9b6dd6">MA60</span>
+                <span class="ma-value" id="ma60Val">—</span>
+              </div>
+            </div>
+            <hr class="my-0 border-secondary" />
+            <div>
+              <div class="text-secondary small mb-2">MA排列</div>
+              <div id="maDirection" class="direction-badge">—</div>
+            </div>
+            <hr class="my-0 border-secondary" />
+            <div>
+              <div class="text-secondary small mb-2">信号确认</div>
+              <div id="signalInfo" class="signal-info">无信号</div>
+              <div class="progress mt-2 signal-progress-wrap" id="signalProgressWrap" style="display:none!important">
+                <div class="progress-bar signal-progress-bar" id="signalProgressBar" role="progressbar" style="width:0%"></div>
+              </div>
+            </div>
+            <hr class="my-0 border-secondary" />
+            <div>
+              <div class="text-secondary small mb-2"><i class="fa-solid fa-gamepad me-1"></i>模拟下单</div>
+              <div class="input-group input-group-sm mb-2">
+                <span class="input-group-text bg-dark border-secondary text-secondary">价格</span>
+                <input type="number" step="any" class="form-control bg-dark border-secondary text-light" id="simEntryPrice" placeholder="自动填入最新价" />
+              </div>
+              <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-success flex-fill" id="btnSimLong" title="按当前/设定价格模拟做多">
+                  <i class="fa-solid fa-arrow-trend-up me-1"></i>做多
+                </button>
+                <button class="btn btn-sm btn-danger flex-fill" id="btnSimShort" title="按当前/设定价格模拟做空">
+                  <i class="fa-solid fa-arrow-trend-down me-1"></i>做空
+                </button>
+              </div>
+            </div>
+            <hr class="my-0 border-secondary" />
+            <div class="mt-auto">
+              <div class="text-secondary small mb-1">系统日志</div>
+              <div class="log-box" id="logBox"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════ TAB 2: SETTINGS ══════════ -->
+      <div class="tab-pane fade h-100 overflow-auto" id="tabSettings">
+        <div class="row g-3 p-3">
+          <!-- Global settings -->
+          <div class="col-lg-4">
+            <div class="card card-dark">
+              <div class="card-header">
+                <i class="fa-solid fa-sliders me-2"></i>全局设置
+              </div>
+              <div class="card-body">
+                <form id="globalSettingsForm">
+                  <div class="mb-3">
+                    <label class="form-label small">Binance API Key</label>
+                    <input type="password" class="form-control form-control-sm" id="binanceKey" placeholder="••••••••" />
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small">Binance Secret</label>
+                    <input type="password" class="form-control form-control-sm" id="binanceSecret" placeholder="••••••••" />
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small">Telegram Token</label>
+                    <input type="text" class="form-control form-control-sm" id="telegramToken" placeholder="bot token" />
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small">Telegram Chat ID</label>
+                    <input type="text" class="form-control form-control-sm" id="telegramChatId" placeholder="-100xxxxxxx" />
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small">交易模式</label>
+                    <div class="d-flex gap-3">
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="tradingMode" id="modePaper" value="paper" checked />
+                        <label class="form-check-label" for="modePaper">
+                          <span class="badge bg-secondary">P</span> 模拟
+                        </label>
+                      </div>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="tradingMode" id="modeLive" value="live" />
+                        <label class="form-check-label" for="modeLive">
+                          <span class="badge bg-danger">L</span> 实盘
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small">每日最大亏损 (%)</label>
+                    <input type="number" class="form-control form-control-sm" id="maxDailyLoss" min="0.1" max="100" step="0.1" value="5" />
+                  </div>
+                  <button type="submit" class="btn btn-primary btn-sm w-100">
+                    <i class="fa-solid fa-floppy-disk me-1"></i>保存设置
+                  </button>
+                  <div id="settingsSaveMsg" class="mt-2 text-success small" style="display:none">✓ 已保存</div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Symbol management -->
+          <div class="col-lg-8">
+            <div class="card card-dark">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="fa-solid fa-coins me-2"></i>交易对管理</span>
+                <button class="btn btn-sm btn-success" id="btnAddSymbol">
+                  <i class="fa-solid fa-plus me-1"></i>添加交易对
+                </button>
+              </div>
+              <div class="card-body p-0">
+                <div class="table-responsive">
+                  <table class="table table-dark table-hover table-sm mb-0" id="symbolTable">
+                    <thead>
+                      <tr>
+                        <th>交易对</th>
+                        <th>时间框架</th>
+                        <th>高级框架</th>
+                        <th>确认K线</th>
+                        <th>杠杆</th>
+                        <th>风险%</th>
+                        <th>盈亏比</th>
+                        <th>状态</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="symbolTableBody">
+                      <!-- filled by settings.js -->
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════ TAB 3: BACKTEST ══════════ -->
+      <div class="tab-pane fade h-100 overflow-auto" id="tabBacktest">
+        <div class="p-3" id="backtestPanel">
+          <!-- params -->
+          <div class="card card-dark mb-3">
+            <div class="card-header"><i class="fa-solid fa-flask me-2"></i>回测参数</div>
+            <div class="card-body">
+              <div class="row g-2 align-items-end">
+                <div class="col-md-2">
+                  <label class="form-label small">交易对</label>
+                  <select class="form-select form-select-sm" id="btSymbol">
+                    <option>BTCUSDT</option>
+                    <option>ETHUSDT</option>
+                  </select>
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label small">时间框架</label>
+                  <select class="form-select form-select-sm" id="btTimeframe">
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                    <option value="15m">15m</option>
+                  </select>
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label small">高级框架</label>
+                  <select class="form-select form-select-sm" id="btHtf">
+                    <option value="15m">15m</option>
+                    <option value="1h">1h</option>
+                    <option value="4h">4h</option>
+                  </select>
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label small">开始日期</label>
+                  <input type="date" class="form-control form-control-sm" id="btStartDate" value="2024-01-01" />
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label small">结束日期</label>
+                  <input type="date" class="form-control form-control-sm" id="btEndDate" value="2024-12-31" />
+                </div>
+              </div>
+              <div class="row g-2 align-items-end mt-1">
+                <div class="col-md-2">
+                  <label class="form-label small">确认K线 <span id="btConfirmLabel">2</span></label>
+                  <input type="range" class="form-range" id="btConfirm" min="1" max="10" value="2" />
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label small">盈亏比</label>
+                  <input type="number" class="form-control form-control-sm" id="btRR" min="0.5" max="10" step="0.1" value="1.5" />
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label small">初始资金 (USDT)</label>
+                  <input type="number" class="form-control form-control-sm" id="btCapital" value="10000" />
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                  <button class="btn btn-primary btn-sm w-100" id="btnRunBacktest">
+                    <i class="fa-solid fa-play me-1"></i>开始回测
+                  </button>
+                </div>
+              </div>
+              <div class="mt-2" id="btProgress" style="display:none">
+                <div class="progress">
+                  <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary" style="width:100%">处理中…</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- results -->
+          <div id="btResults" style="display:none">
+            <div class="row g-2 mb-3" id="btMetrics"></div>
+            <div class="row g-2">
+              <div class="col-lg-8">
+                <div class="card card-dark">
+                  <div class="card-header">权益曲线</div>
+                  <div class="card-body p-1">
+                    <div id="btEquityChart" style="height:300px"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="col-lg-4">
+                <div class="card card-dark h-100">
+                  <div class="card-header">交易列表</div>
+                  <div class="card-body p-0" style="max-height:340px;overflow-y:auto">
+                    <table class="table table-dark table-sm mb-0" id="btTradeTable">
+                      <thead><tr><th>方向</th><th>入场</th><th>出场</th><th>盈亏</th></tr></thead>
+                      <tbody id="btTradeBody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- history -->
+          <div class="card card-dark mt-3">
+            <div class="card-header"><i class="fa-solid fa-clock-rotate-left me-2"></i>历史记录</div>
+            <div class="card-body p-0">
+              <table class="table table-dark table-hover table-sm mb-0">
+                <thead><tr><th>ID</th><th>交易对</th><th>框架</th><th>日期范围</th><th>状态</th><th>总盈亏</th><th>胜率</th><th>操作</th></tr></thead>
+                <tbody id="btHistoryBody"><!-- filled by backtest.js --></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════ TAB 4: STATS ══════════ -->
+      <div class="tab-pane fade h-100 overflow-auto" id="tabStats">
+        <div class="p-3">
+          <!-- filters -->
+          <div class="d-flex gap-2 mb-3">
+            <select class="form-select form-select-sm w-auto" id="statsSymbol">
+              <option value="">全部交易对</option>
+            </select>
+            <select class="form-select form-select-sm w-auto" id="statsDays">
+              <option value="7">近7天</option>
+              <option value="30" selected>近30天</option>
+              <option value="90">近90天</option>
+              <option value="365">近1年</option>
+            </select>
+            <select class="form-select form-select-sm w-auto" id="statsMode">
+              <option value="">全部模式</option>
+              <option value="paper">模拟</option>
+              <option value="live">实盘</option>
+            </select>
+            <button class="btn btn-sm btn-outline-secondary" id="btnRefreshStats">
+              <i class="fa-solid fa-rotate-right"></i>
+            </button>
+          </div>
+
+          <!-- metric cards -->
+          <div class="row g-2 mb-3">
+            <div class="col-6 col-md-3">
+              <div class="card card-dark text-center">
+                <div class="card-body py-3">
+                  <div class="text-secondary small">总交易次数</div>
+                  <div class="stat-value" id="statTotal">—</div>
+                </div>
+              </div>
+            </div>
+            <div class="col-6 col-md-3">
+              <div class="card card-dark text-center">
+                <div class="card-body py-3">
+                  <div class="text-secondary small">胜率</div>
+                  <div class="stat-value" id="statWinrate">—</div>
+                </div>
+              </div>
+            </div>
+            <div class="col-6 col-md-3">
+              <div class="card card-dark text-center">
+                <div class="card-body py-3">
+                  <div class="text-secondary small">总盈亏</div>
+                  <div class="stat-value" id="statPnl">—</div>
+                </div>
+              </div>
+            </div>
+            <div class="col-6 col-md-3">
+              <div class="card card-dark text-center">
+                <div class="card-body py-3">
+                  <div class="text-secondary small">利润因子</div>
+                  <div class="stat-value" id="statPF">—</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row g-2">
+            <div class="col-lg-6">
+              <div class="card card-dark">
+                <div class="card-header">每日盈亏</div>
+                <div class="card-body p-1"><div id="dailyPnlChart" style="height:280px"></div></div>
+              </div>
+            </div>
+            <div class="col-lg-6">
+              <div class="card card-dark">
+                <div class="card-header">各交易对盈亏</div>
+                <div class="card-body p-1"><div id="symbolPnlChart" style="height:280px"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════ TAB 5: TRADES ══════════ -->
+      <div class="tab-pane fade h-100 overflow-auto" id="tabTrades">
+        <div class="p-3">
+          <div class="d-flex gap-2 mb-2 align-items-center">
+            <span class="text-secondary small">共 <span id="tradeCount">0</span> 条记录</span>
+            <span class="ms-auto text-secondary small">实时更新 <i class="fa-solid fa-circle-dot text-success blink" id="liveIndicator"></i></span>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-dark table-hover table-sm" id="tradesTable">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>交易对</th>
+                  <th>方向</th>
+                  <th>入场价</th>
+                  <th>出场价</th>
+                  <th>止损</th>
+                  <th>止盈</th>
+                  <th>盈亏</th>
+                  <th>状态</th>
+                  <th>时间</th>
+                  <th>类型</th>
+                  <th class="text-end">操作</th>
+                </tr>
+              </thead>
+              <tbody id="tradesTableBody"><!-- filled by app.js --></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /tab-content -->
+  </main>
+</div>
+
+<!-- ══════════ SYMBOL MODAL ══════════ -->
+<div class="modal fade" id="symbolModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content modal-dark">
+      <div class="modal-header">
+        <h5 class="modal-title" id="symbolModalTitle">添加交易对</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <form id="symbolForm">
+          <input type="hidden" id="symbolId" value="" />
+          <div class="mb-3">
+            <label class="form-label small">交易对</label>
+            <input type="text" class="form-control form-control-sm" id="symSymbol" placeholder="BTCUSDT" required />
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label small">时间框架</label>
+              <select class="form-select form-select-sm" id="symTf">
+                <option value="1m">1m</option>
+                <option value="5m">5m</option>
+                <option value="15m">15m</option>
+              </select>
+            </div>
+            <div class="col">
+              <label class="form-label small">高级框架</label>
+              <select class="form-select form-select-sm" id="symHtf">
+                <option value="15m">15m</option>
+                <option value="1h">1h</option>
+                <option value="4h">4h</option>
+              </select>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small">确认K线数 <span id="symConfirmVal">2</span></label>
+            <input type="range" class="form-range" id="symConfirm" min="1" max="10" value="2" />
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label small">杠杆 (1~20)</label>
+              <input type="number" class="form-control form-control-sm" id="symLeverage" min="1" max="20" value="5" />
+            </div>
+            <div class="col">
+              <label class="form-label small">风险比例 (%)</label>
+              <input type="number" class="form-control form-control-sm" id="symRisk" min="0.1" max="100" step="0.1" value="1" />
+            </div>
+            <div class="col">
+              <label class="form-label small">盈亏比</label>
+              <input type="number" class="form-control form-control-sm" id="symRR" min="0.5" max="20" step="0.1" value="1.5" />
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btnSaveSymbol">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Scripts -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="js/chart.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/backtest.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
