@@ -133,8 +133,8 @@ const BacktestManager = (() => {
     (results.trades || []).forEach(tr => {
       const pnlColor = (tr.pnl || 0) >= 0 ? '#3fb950' : '#f85149';
       const dirIcon  = tr.direction === 'long' ? '<span style="color:#3fb950">▲ 多</span>' : '<span style="color:#f85149">▼ 空</span>';
-      const entryTimeStr = formatTradeTime(tr.entry_time);
-      const exitTimeStr  = formatTradeTime(tr.exit_time);
+      const entryTimeStr = formatTradeTime(tr.entry_time || tr.open_time || tr.time);
+      const exitTimeStr  = formatTradeTime(tr.exit_time || tr.close_time);
       const tr2 = document.createElement('tr');
       tr2.innerHTML = `
         <td>${dirIcon}</td>
