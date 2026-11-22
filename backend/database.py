@@ -6,7 +6,7 @@ Database: SQLite at data/trading.db
 import os
 from datetime import datetime
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, Integer, String,
+    Boolean, Column, DateTime, Float, Integer, String, Index, UniqueConstraint, text,
     create_engine
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -91,6 +91,26 @@ class BacktestRun(Base):
     status = Column(String, default="pending")                 # "pending","running","done","failed"
     created_at = Column(DateTime, default=datetime.utcnow)
     error_msg = Column(String, nullable=True)
+
+
+class CachedKline(Base):
+    """Local SQLite persistent storage for historical OHLCV bars (incremental cache)."""
+    __tablename__ = "cached_klines"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(30), nullable=False)
+    timeframe = Column(String(10), nullable=False)
+    open_time = Column(Integer, nullable=False)  # timestamp in milliseconds
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "timeframe", "open_time", name="uix_kline_sym_tf_ts"),
+        Index("ix_kline_lookup", "symbol", "timeframe", "open_time"),
+    )
 
 
 # ---------------------------------------------------------------------------

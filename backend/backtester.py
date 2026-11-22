@@ -33,66 +33,38 @@ def _is_short_aligned(ma7: float, ma25: float, ma60: float) -> bool:
 
 
 def _fetch_ohlcv_all(exchange, symbol: str, timeframe: str, since_ms: int, until_ms: int) -> list:
-    """Fetch all OHLCV bars in [since_ms, until_ms) using pagination, with synthetic fallback."""
-    if exchange is None:
-        try:
-            import ccxt
-            exchange = ccxt.binance({"options": {"defaultType": "future"}, "enableRateLimit": True})
-        except Exception:
-            exchange = None
+    """Fetch all OHLCV bars in [since_ms, until_ms) using incremental SQLite cache with synthetic fallback."""
+    try:
+        from backtest_cache import load_ohlcv_with_cache
+        result = load_ohlcv_with_cache(exchange, symbol, timeframe, since_ms, until_ms)
+        if len(result) >= 70:
+            return result
+    except Exception as exc:
+        logger.warning(f"[Backtest Cache] Cache/Fetch failed: {exc}")
 
-    limit = 1000
-    all_bars = []
-    current = since_ms
-
-    if exchange is not None:
-        while current < until_ms:
-            try:
-                bars = exchange.fetch_ohlcv(symbol, timeframe, since=current, limit=limit)
-            except Exception as exc:
-                logger.warning(f"fetch_ohlcv error: {exc}")
-                break
-            if not bars:
-                break
-            all_bars.extend(bars)
-            last_ts = bars[-1][0]
-            if last_ts >= until_ms or len(bars) < limit:
-                break
-            current = last_ts + 1
-
-    # deduplicate and filter
-    seen = set()
+    # Fallback only if both network and cache failed to yield sufficient bars
+    import random
+    step_ms = _timeframe_to_ms(timeframe)
+    base_price = 59350.0 if "BTC" in symbol else 3120.0
+    cur = base_price
+    ts = since_ms
+    # Calculate bars needed across date range with multi-phase bull and bear trends
+    total_bars_needed = max(300, min(8000, (until_ms - since_ms) // step_ms))
     result = []
-    for b in all_bars:
-        if b[0] not in seen and b[0] < until_ms:
-            seen.add(b[0])
-            result.append(b)
-    result.sort(key=lambda x: x[0])
-
-    # If insufficient data from network, generate synthetic trending candles
-    if len(result) < 70:
-        import random
-        step_ms = _timeframe_to_ms(timeframe)
-        base_price = 59350.0 if "BTC" in symbol else 3120.0
-        cur = base_price
-        ts = since_ms
-        # Calculate bars needed across date range with multi-phase bull and bear trends
-        total_bars_needed = max(300, min(8000, (until_ms - since_ms) // step_ms))
-        result = []
-        for i in range(total_bars_needed):
-            # Oscillate trends every 150 bars to produce both multi-hour bull and bear markets
-            cycle = (i // 150) % 2
-            trend = 0.0006 if cycle == 0 else -0.0006
-            noise = (random.random() - 0.49) * 0.0006
-            drift = (trend + noise) * base_price
-            o = cur
-            c = cur + drift
-            h = max(o, c) + random.random() * (base_price * 0.0003)
-            l = min(o, c) - random.random() * (base_price * 0.0003)
-            v = random.uniform(50, 400)
-            cur = c
-            result.append([ts, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)])
-            ts += step_ms
+    for i in range(total_bars_needed):
+        # Oscillate trends every 150 bars to produce both multi-hour bull and bear markets
+        cycle = (i // 150) % 2
+        trend = 0.0006 if cycle == 0 else -0.0006
+        noise = (random.random() - 0.49) * 0.0006
+        drift = (trend + noise) * base_price
+        o = cur
+        c = cur + drift
+        h = max(o, c) + random.random() * (base_price * 0.0003)
+        l = min(o, c) - random.random() * (base_price * 0.0003)
+        v = random.uniform(50, 400)
+        cur = c
+        result.append([ts, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)])
+        ts += step_ms
 
     return result
 

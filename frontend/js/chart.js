@@ -378,7 +378,13 @@ const BacktestChart = (() => {
     const el = document.getElementById('btEquityChart');
     if (!el) return;
     const cfg = getThemeConfig();
-    if (!chart) chart = echarts.init(el, cfg.echartsTheme);
+
+    if (!chart) {
+      chart = echarts.init(el, cfg.echartsTheme);
+    } else {
+      chart.resize();
+    }
+
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,
@@ -392,6 +398,19 @@ const BacktestChart = (() => {
         areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: cfg.equityAreaStart }, { offset: 1, color: cfg.equityAreaEnd }] } }
       }]
     });
+
+    // Ensure chart takes full available container dimensions after render / tab switch
+    requestAnimationFrame(() => chart?.resize());
+    setTimeout(() => chart?.resize(), 50);
+    setTimeout(() => chart?.resize(), 250);
+  }
+
+  function resize() {
+    if (chart) {
+      chart.resize();
+    } else if (lastData) {
+      render(lastData.dates, lastData.equity);
+    }
   }
 
   function updateTheme() {
@@ -403,5 +422,5 @@ const BacktestChart = (() => {
   }
 
   window.addEventListener('resize', () => chart?.resize());
-  return { render, updateTheme };
+  return { render, updateTheme, resize };
 })();

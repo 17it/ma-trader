@@ -134,6 +134,13 @@ def get_backtest(run_id: int, db: Session = Depends(get_db)):
     return BacktestRunResponse.model_validate(run)
 
 
+@router.delete("/backtest", status_code=204)
+def clear_all_backtests(db: Session = Depends(get_db)):
+    """Clear all backtest history records."""
+    db.query(BacktestRun).delete()
+    db.commit()
+
+
 @router.delete("/backtest/{run_id}", status_code=204)
 def delete_backtest(run_id: int, db: Session = Depends(get_db)):
     """Delete a backtest run record."""

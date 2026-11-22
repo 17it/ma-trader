@@ -317,8 +317,18 @@ async def get_klines(
     """
     import numpy as np
 
-    app = request.app
-    cfg: dict = app.state.config.get_all_cached()
+    config_mgr = getattr(request.app.state, "config", None)
+    if config_mgr is not None and hasattr(config_mgr, "get_all_cached"):
+        cfg = config_mgr.get_all_cached()
+    else:
+        from database import SessionLocal
+        from config import ConfigManager
+        db_s = SessionLocal()
+        try:
+            cfg = ConfigManager.get_all(db_s)
+        finally:
+            db_s.close()
+
     exchange = _build_exchange(cfg, require_auth=False)
 
     symbol = symbol.upper()
@@ -339,9 +349,40 @@ async def get_klines(
         except Exception as exc:
             logger.warning(f"fetch_ohlcv for {symbol} failed: {exc}")
 
+    # Fallback 1: Query public Binance Vision API (no geo restriction / 451 block)
     if not raw:
-        # Generate graceful demonstration data if exchange is offline
+        clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
+        import httpx
+        endpoints = [
+            f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={limit_val + 60}",
+            f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={limit_val + 60}",
+        ]
+        proxy = (cfg.get("http_proxy") or "").strip()
+        for endpoint in endpoints:
+            for p in [proxy, None]:
+                try:
+                    kwargs = {"timeout": 4.0}
+                    if p:
+                        kwargs["proxy"] = p
+                    resp = httpx.get(endpoint, **kwargs)
+                    if resp.status_code == 200:
+                        items = resp.json()
+                        if items and isinstance(items, list):
+                            raw = [
+                                [row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])]
+                                for row in items
+                            ]
+                            logger.info(f"Loaded {len(raw)} real live Binance candles from {endpoint}")
+                            break
+                except Exception:
+                    pass
+            if raw:
+                break
+
+    # Fallback 2: Generate demonstration data only if completely disconnected
+    if not raw:
         import time, random
+        logger.warning(f"All Binance endpoints unreachable for {symbol}. Using simulated fallback.")
         now_ms = int(time.time() * 1000)
         step_ms = 60 * 1000 if tf_val == "1m" else (300 * 1000 if tf_val == "5m" else 900 * 1000)
         base_price = 59350.0 if "BTC" in symbol else 3120.0

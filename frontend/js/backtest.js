@@ -13,8 +13,20 @@ const BacktestManager = (() => {
     // run backtest
     document.getElementById('btnRunBacktest').addEventListener('click', runBacktest);
 
-    // load history on tab show
-    document.querySelector('a[href="#tabBacktest"]').addEventListener('shown.bs.tab', loadHistory);
+    // load history and resize chart on tab show
+    const tabBacktestLink = document.querySelector('a[href="#tabBacktest"]');
+    if (tabBacktestLink) {
+      tabBacktestLink.addEventListener('shown.bs.tab', () => {
+        loadHistory();
+        setTimeout(() => BacktestChart.resize(), 60);
+      });
+    }
+
+    // clear all history
+    const btnClear = document.getElementById('btnClearBtHistory');
+    if (btnClear) {
+      btnClear.addEventListener('click', clearAllHistory);
+    }
   }
 
   // ─── Run backtest ─────────────────────────────────────────────────────
@@ -115,11 +127,16 @@ const BacktestManager = (() => {
       </div>
     `;
 
+    // Display results container FIRST so chart dimensions are properly computed
+    document.getElementById('btResults').style.display = 'block';
+
     // Equity curve
     if (results.equity_curve && results.equity_curve.length) {
       const dates  = results.equity_curve.map(e => e.time || e.date || e.t || '');
       const equity = results.equity_curve.map(e => e.equity ?? e.v ?? 0);
       BacktestChart.render(dates, equity);
+      setTimeout(() => BacktestChart.resize(), 50);
+      setTimeout(() => BacktestChart.resize(), 200);
     }
 
     // Trade list
@@ -146,8 +163,6 @@ const BacktestManager = (() => {
       `;
       tbody.appendChild(tr2);
     });
-
-    document.getElementById('btResults').style.display = 'block';
   }
 
   function formatTradeTime(tStr) {
@@ -168,7 +183,7 @@ const BacktestManager = (() => {
   // ─── History ──────────────────────────────────────────────────────────
   async function loadHistory() {
     try {
-      const res = await fetch('/api/backtest?limit=20');
+      const res = await fetch('/api/backtest?limit=50');
       if (!res.ok) return;
       const runs = await res.json();
       renderHistory(runs);
@@ -210,10 +225,44 @@ const BacktestManager = (() => {
         <td>${statusBadge}</td>
         <td>${pnlStr}</td>
         <td>${wrStr}</td>
-        <td><button class="btn btn-xs btn-outline-secondary" onclick="BacktestManager.viewRun(${run.id})">查看</button></td>
+        <td class="text-end pe-3">
+          <div class="d-inline-flex gap-1">
+            <button class="btn btn-xs btn-outline-primary" onclick="BacktestManager.viewRun(${run.id})">查看</button>
+            <button class="btn btn-xs btn-outline-danger" onclick="BacktestManager.deleteRun(event, ${run.id})" title="删除此记录">
+              <i class="fa-solid fa-trash-can"></i>
+            </button>
+          </div>
+        </td>
       `;
       tbody.appendChild(tr);
     });
+  }
+
+  async function deleteRun(event, id) {
+    if (event) event.stopPropagation();
+    if (!confirm(`确定要删除回测记录 #${id} 吗？`)) return;
+    try {
+      const res = await fetch(`/api/backtest/${id}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 204) throw new Error('删除失败');
+      await loadHistory();
+    } catch (err) {
+      console.error('删除回测记录失败', err);
+      alert('删除失败: ' + err.message);
+    }
+  }
+
+  async function clearAllHistory() {
+    if (!confirm('确定要清空所有回测历史记录吗？此操作不可恢复。')) return;
+    try {
+      const res = await fetch('/api/backtest', { method: 'DELETE' });
+      if (!res.ok && res.status !== 204) throw new Error('清空失败');
+      await loadHistory();
+      // Hide results panel if cleared
+      document.getElementById('btResults').style.display = 'none';
+    } catch (err) {
+      console.error('清空历史记录失败', err);
+      alert('清空失败: ' + err.message);
+    }
   }
 
   async function viewRun(id) {
@@ -223,10 +272,12 @@ const BacktestManager = (() => {
       const run = await res.json();
       displayResults(run);
       document.getElementById('btResults').scrollIntoView({ behavior: 'smooth' });
+      setTimeout(() => BacktestChart.resize(), 80);
+      setTimeout(() => BacktestChart.resize(), 300);
     } catch (err) {
       console.error('加载回测详情失败', err);
     }
   }
 
-  return { init, loadHistory, viewRun };
+  return { init, loadHistory, viewRun, deleteRun, clearAllHistory };
 })();

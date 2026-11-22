@@ -52,6 +52,7 @@ class DataFeed:
             self._exchange = ccxt.binance(params)
             self._authenticated = bool(api_key and secret)
             self._use_futures = use_futures
+            self._proxy = active_proxy
             logger.info(
                 "DataFeed initialised (futures=%s, auth=%s, proxy=%s)",
                 use_futures,
@@ -62,6 +63,66 @@ class DataFeed:
             logger.error("DataFeed init failed: %s", exc)
             self._exchange = None
             self._authenticated = False
+            self._proxy = None
+
+    # ------------------------------------------------------------------
+    # Public Binance Vision Fallback (No Geo/451 Restriction)
+    # ------------------------------------------------------------------
+    def _fetch_fallback_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 200) -> Optional[pd.DataFrame]:
+        clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
+        urls = [
+            f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={timeframe}&limit={limit}",
+            f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={timeframe}&limit={limit}",
+        ]
+        import httpx
+        for url in urls:
+            for proxy in [getattr(self, "_proxy", None), None]:
+                try:
+                    kwargs = {"timeout": 4.0}
+                    if proxy:
+                        kwargs["proxy"] = proxy
+                    resp = httpx.get(url, **kwargs)
+                    if resp.status_code == 200:
+                        raw = resp.json()
+                        if raw and isinstance(raw, list):
+                            parsed = []
+                            for row in raw:
+                                parsed.append([
+                                    row[0],
+                                    float(row[1]),
+                                    float(row[2]),
+                                    float(row[3]),
+                                    float(row[4]),
+                                    float(row[5]),
+                                ])
+                            df = pd.DataFrame(parsed, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+                            return df
+                except Exception:
+                    pass
+        return None
+
+    def _fetch_fallback_ticker(self, symbol: str) -> Optional[float]:
+        clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
+        urls = [
+            f"https://data-api.binance.vision/api/v3/ticker/price?symbol={clean_symbol}",
+            f"https://api.binance.com/api/v3/ticker/price?symbol={clean_symbol}",
+        ]
+        import httpx
+        for url in urls:
+            for proxy in [getattr(self, "_proxy", None), None]:
+                try:
+                    kwargs = {"timeout": 3.0}
+                    if proxy:
+                        kwargs["proxy"] = proxy
+                    resp = httpx.get(url, **kwargs)
+                    if resp.status_code == 200:
+                        p = float(resp.json().get("price") or 0)
+                        if p > 0:
+                            return p
+                except Exception:
+                    pass
+        return None
 
     # ------------------------------------------------------------------
     # OHLCV
@@ -77,45 +138,48 @@ class DataFeed:
 
         Returns None on failure.
         """
-        if self._exchange is None:
-            logger.error("Exchange not initialised, cannot fetch OHLCV")
-            return None
-        try:
-            raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            if not raw:
-                logger.warning("No OHLCV data returned for %s %s", symbol, timeframe)
-                return None
+        if self._exchange is not None:
+            try:
+                raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+                if raw:
+                    df = pd.DataFrame(
+                        raw, columns=["timestamp", "open", "high", "low", "close", "volume"]
+                    )
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+                    for col in ("open", "high", "low", "close", "volume"):
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                    df = df.dropna(subset=["close"])
+                    df = df.reset_index(drop=True)
+                    return df
+            except Exception as exc:
+                logger.warning("get_ohlcv ccxt error (%s): %s. Trying public Binance Vision endpoint...", symbol, exc)
 
-            df = pd.DataFrame(
-                raw, columns=["timestamp", "open", "high", "low", "close", "volume"]
-            )
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-            for col in ("open", "high", "low", "close", "volume"):
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            df = df.dropna(subset=["close"])
-            df = df.reset_index(drop=True)
-            return df
-        except Exception as exc:
-            logger.warning("get_ohlcv(%s, %s) network error: %s. Using simulated fallback.", symbol, timeframe, exc)
-            import time, random
-            now_ms = int(time.time() * 1000)
-            step_ms = 60 * 1000 if timeframe == "1m" else (300 * 1000 if timeframe == "5m" else 900 * 1000)
-            base_price = 59350.0 if "BTC" in symbol else 3120.0
-            cur = base_price
-            raw = []
-            for i in range(limit):
-                ts = now_ms - (limit - i) * step_ms
-                drift = (random.random() - 0.48) * (base_price * 0.001)
-                o = cur
-                c = cur + drift
-                h = max(o, c) + random.random() * (base_price * 0.0005)
-                l = min(o, c) - random.random() * (base_price * 0.0005)
-                v = random.uniform(50, 300)
-                cur = c
-                raw.append([ts, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)])
-            df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-            return df
+        # 1. Fallback to real official Binance Vision market data
+        real_df = self._fetch_fallback_ohlcv(symbol, timeframe, limit)
+        if real_df is not None:
+            return real_df
+
+        # 2. Simulated fallback only if completely unreachable
+        logger.warning("All Binance endpoints unreachable for %s. Using simulated fallback.", symbol)
+        import time, random
+        now_ms = int(time.time() * 1000)
+        step_ms = 60 * 1000 if timeframe == "1m" else (300 * 1000 if timeframe == "5m" else 900 * 1000)
+        base_price = 59350.0 if "BTC" in symbol else 3120.0
+        cur = base_price
+        raw = []
+        for i in range(limit):
+            ts = now_ms - (limit - i) * step_ms
+            drift = (random.random() - 0.48) * (base_price * 0.001)
+            o = cur
+            c = cur + drift
+            h = max(o, c) + random.random() * (base_price * 0.0005)
+            l = min(o, c) - random.random() * (base_price * 0.0005)
+            v = random.uniform(50, 300)
+            cur = c
+            raw.append([ts, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)])
+        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        return df
 
     # ------------------------------------------------------------------
     # Ticker
@@ -131,7 +195,11 @@ class DataFeed:
                 if price > 0:
                     return price
             except Exception as exc:
-                logger.warning("get_ticker(%s) network error: %s. Using simulated fallback.", symbol, exc)
+                logger.warning("get_ticker ccxt error (%s): %s. Trying public Binance Vision endpoint...", symbol, exc)
+
+        real_p = self._fetch_fallback_ticker(symbol)
+        if real_p is not None:
+            return real_p
 
         return 59355.6 if "BTC" in symbol else 3120.5
 
