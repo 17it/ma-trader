@@ -76,17 +76,19 @@ def _fetch_ohlcv_all(exchange, symbol: str, timeframe: str, since_ms: int, until
         base_price = 59350.0 if "BTC" in symbol else 3120.0
         cur = base_price
         ts = since_ms
-        # Generate enough bars (at least 200, up to 1500)
-        num_bars = min(1500, max(200, (until_ms - since_ms) // step_ms))
+        # Calculate bars needed across date range with multi-phase bull and bear trends
+        total_bars_needed = max(300, min(8000, (until_ms - since_ms) // step_ms))
         result = []
-        for i in range(num_bars):
-            # simulate cyclical trends
-            trend = 0.0008 if (i // 30) % 2 == 0 else -0.0008
-            drift = (random.random() - 0.49 + trend) * (base_price * 0.002)
+        for i in range(total_bars_needed):
+            # Oscillate trends every 150 bars to produce both multi-hour bull and bear markets
+            cycle = (i // 150) % 2
+            trend = 0.0006 if cycle == 0 else -0.0006
+            noise = (random.random() - 0.49) * 0.0006
+            drift = (trend + noise) * base_price
             o = cur
             c = cur + drift
-            h = max(o, c) + random.random() * (base_price * 0.001)
-            l = min(o, c) - random.random() * (base_price * 0.001)
+            h = max(o, c) + random.random() * (base_price * 0.0003)
+            l = min(o, c) - random.random() * (base_price * 0.0003)
             v = random.uniform(50, 400)
             cur = c
             result.append([ts, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)])
@@ -166,6 +168,15 @@ class Backtester:
         df_ltf = pd.DataFrame(raw_ltf, columns=["ts", "open", "high", "low", "close", "volume"])
         df_htf = pd.DataFrame(raw_htf, columns=["ts", "open", "high", "low", "close", "volume"])
 
+        # If HTF is empty or too short, resample directly from LTF for perfect synchronization
+        if len(df_htf) < 70 and len(df_ltf) >= 70:
+            df_tmp = df_ltf.copy()
+            df_tmp["dt"] = pd.to_datetime(df_tmp["ts"], unit="ms")
+            rule = htf_timeframe.replace("m", "min")
+            df_htf = df_tmp.set_index("dt").resample(rule).agg({
+                "ts": "first", "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+            }).dropna().reset_index(drop=True)
+
         # Compute MAs
         df_ltf["ma7"], df_ltf["ma25"], df_ltf["ma60"] = _compute_mas(df_ltf["close"])
         df_htf["ma7"], df_htf["ma25"], df_htf["ma60"] = _compute_mas(df_htf["close"])
@@ -175,8 +186,10 @@ class Backtester:
 
         def get_htf_row(ts_ms: int):
             """Return the most recent HTF row whose ts <= ts_ms."""
+            if len(htf_arr) == 0:
+                return None
             idx = np.searchsorted(htf_arr[:, 0], ts_ms, side="right") - 1
-            if idx < 60:
+            if idx < 0 or idx >= len(htf_arr):
                 return None
             return htf_arr[idx]
 
@@ -319,7 +332,8 @@ class Backtester:
                     trade_entry_time = ts
 
                     if trade_direction == "long":
-                        trade_sl = l
+                        sl_candidate = ma60 if not math.isnan(ma60) and ma60 < trade_entry else l
+                        trade_sl = min(sl_candidate, trade_entry * 0.997)
                         price_risk = trade_entry - trade_sl
                         if price_risk <= 0:
                             pending_direction = None
@@ -328,7 +342,8 @@ class Backtester:
                             continue
                         trade_tp = trade_entry + price_risk * rr_ratio
                     else:
-                        trade_sl = h
+                        sl_candidate = ma60 if not math.isnan(ma60) and ma60 > trade_entry else h
+                        trade_sl = max(sl_candidate, trade_entry * 1.003)
                         price_risk = trade_sl - trade_entry
                         if price_risk <= 0:
                             pending_direction = None
@@ -337,7 +352,7 @@ class Backtester:
                             continue
                         trade_tp = trade_entry - price_risk * rr_ratio
 
-                    risk_amount = capital * risk_per_trade
+                    risk_amount = initial_capital * risk_per_trade
                     trade_qty = risk_amount / price_risk if price_risk > 0 else 0
 
                     if trade_qty > 0:
@@ -376,9 +391,14 @@ class Backtester:
         ltf_ts = df_ltf["ts"].values
         equity_curve = []
         for idx in range(0, len(equity_history), step):
-            ts_val = int(ltf_ts[min_idx + idx]) if (min_idx + idx) < len(ltf_ts) else 0
-            dt_str = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc).isoformat()
-            equity_curve.append({"time": dt_str, "equity": round(equity_history[idx], 2)})
+            ts_val = int(ltf_ts[min_idx + idx]) if (min_idx + idx) < len(ltf_ts) else int(ltf_ts[-1])
+            dt_str = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc).strftime("%m-%d %H:%M")
+            equity_curve.append({
+                "time": dt_str,
+                "date": dt_str,
+                "t": dt_str,
+                "equity": round(equity_history[idx], 2),
+            })
 
         return {
             "total_trades": total,

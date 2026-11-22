@@ -22,6 +22,9 @@ const AppController = (() => {
   async function init() {
     console.log('[App] Initializing MA Trader App...');
 
+    // 0. Setup Theme (Day / Night mode)
+    setupTheme();
+
     // 1. Init Sub-managers
     if (typeof ChartManager !== 'undefined') ChartManager.init();
     if (typeof SettingsManager !== 'undefined') SettingsManager.init();
@@ -34,12 +37,17 @@ const AppController = (() => {
     updateClock();
     setInterval(updateClock, 1000);
 
-    // 4. Initial HTTP Data Load
-    await loadSettings();
-    await loadSymbols();
-    await checkBotStatus();
-    await loadTrades();
-    await loadStats();
+    // 4. Initial HTTP Data Load (isolated so one failure does not block the chart)
+    try { await loadSettings(); } catch (e) { console.warn(e); }
+    try { await loadSymbols(); } catch (e) { console.warn(e); }
+    try { await checkBotStatus(); } catch (e) { console.warn(e); }
+    try { await loadTrades(); } catch (e) { console.warn(e); }
+    try { await loadStats(); } catch (e) { console.warn(e); }
+
+    // Ensure chart is loaded
+    if (!state.klinesData || state.klinesData.length === 0) {
+      try { await loadKlines(); } catch (e) { console.warn(e); }
+    }
 
     // 5. Connect WebSocket
     connectWS();
@@ -85,11 +93,55 @@ const AppController = (() => {
       tabTradesLink.addEventListener('shown.bs.tab', loadTrades);
     }
 
+    // Theme toggle (Day / Night mode)
+    const btnThemeToggle = document.getElementById('btnThemeToggle');
+    if (btnThemeToggle) {
+      btnThemeToggle.addEventListener('click', toggleTheme);
+    }
+
     // Simulate Trade Buttons (if present in DOM)
     const btnSimLong = document.getElementById('btnSimLong');
     const btnSimShort = document.getElementById('btnSimShort');
     if (btnSimLong) btnSimLong.addEventListener('click', () => simulateTrade('long'));
     if (btnSimShort) btnSimShort.addEventListener('click', () => simulateTrade('short'));
+  }
+
+  // ─── Theme Management (Day / Night Mode) ────────────────────────────
+  function setupTheme() {
+    const savedTheme = localStorage.getItem('ma_trader_theme') || 'dark';
+    applyTheme(savedTheme, false);
+  }
+
+  function toggleTheme() {
+    const active = document.documentElement.getAttribute('data-bs-theme') || 'dark';
+    const next = active === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('ma_trader_theme', next);
+    applyTheme(next, true);
+  }
+
+  function applyTheme(theme, notifyCharts = true) {
+    document.documentElement.setAttribute('data-bs-theme', theme);
+    const icon = document.getElementById('themeIcon');
+    const label = document.getElementById('themeLabel');
+    if (theme === 'light') {
+      if (icon) icon.className = 'fa-solid fa-moon';
+      if (label) label.textContent = '夜间模式';
+    } else {
+      if (icon) icon.className = 'fa-solid fa-sun';
+      if (label) label.textContent = '日间模式';
+    }
+
+    if (notifyCharts) {
+      if (typeof ChartManager !== 'undefined' && ChartManager.updateTheme) {
+        ChartManager.updateTheme();
+      }
+      if (typeof StatsCharts !== 'undefined' && StatsCharts.updateTheme) {
+        StatsCharts.updateTheme();
+      }
+      if (typeof BacktestChart !== 'undefined' && BacktestChart.updateTheme) {
+        BacktestChart.updateTheme();
+      }
+    }
   }
 
   // ─── Clock ─────────────────────────────────────────────────────────
@@ -180,6 +232,8 @@ const AppController = (() => {
         } else {
           switchSymbol(state.currentSymbol);
         }
+      } else {
+        switchSymbol(state.currentSymbol || 'BTCUSDT');
       }
     } catch (err) {
       console.warn('[App] Load symbols error:', err);
@@ -201,12 +255,36 @@ const AppController = (() => {
         ChartManager.render(state.klinesData, symbolTrades);
       }
 
-      // Update current price from latest candle if available
+      // Update current price & indicators from latest candle if available
       if (state.klinesData.length > 0) {
         const lastCandle = state.klinesData[state.klinesData.length - 1];
-        const lastClose = Array.isArray(lastCandle) ? lastCandle[4] : lastCandle.c;
+        const lastClose = Array.isArray(lastCandle) ? lastCandle[4] : (lastCandle.close ?? lastCandle.c);
         if (lastClose) {
-          updateCurrentPrice(lastClose);
+          updateCurrentPrice(Number(lastClose));
+        }
+
+        // Also update initial MA readings from candle
+        if (lastCandle && !Array.isArray(lastCandle)) {
+          const m7  = lastCandle.ma7;
+          const m25 = lastCandle.ma25;
+          const m60 = lastCandle.ma60;
+          if (m7 != null)  document.getElementById('ma7Val').textContent  = Number(m7).toFixed(1);
+          if (m25 != null) document.getElementById('ma25Val').textContent = Number(m25).toFixed(1);
+          if (m60 != null) document.getElementById('ma60Val').textContent = Number(m60).toFixed(1);
+
+          const dir = document.getElementById('maDirection');
+          if (dir && m7 != null && m25 != null && m60 != null) {
+            if (m7 > m25 && m25 > m60) {
+              dir.textContent = '▲ 多头排列';
+              dir.className = 'direction-badge long';
+            } else if (m7 < m25 && m25 < m60) {
+              dir.textContent = '▼ 空头排列';
+              dir.className = 'direction-badge short';
+            } else {
+              dir.textContent = '— 震荡/整理';
+              dir.className = 'direction-badge flat';
+            }
+          }
         }
       }
     } catch (err) {

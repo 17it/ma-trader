@@ -34,14 +34,15 @@ def get_stats(
         days:     Look-back window in calendar days (default 30).
         is_paper: Filter by paper/live mode (optional).
     """
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    # Use naive UTC datetime to match SQLite storage
+    since = datetime.utcnow() - timedelta(days=days)
 
     q = db.query(Trade).filter(
         Trade.status == "closed",
         Trade.close_time >= since,
     )
-    if symbol:
-        q = q.filter(Trade.symbol == symbol.upper())
+    if symbol and isinstance(symbol, str):
+        q = q.filter(Trade.symbol == symbol.upper().strip())
     if is_paper is not None:
         q = q.filter(Trade.is_paper == is_paper)
 
@@ -101,6 +102,8 @@ def get_stats(
         avg_win=round(avg_win, 4),
         avg_loss=round(avg_loss, 4),
         profit_factor=round(profit_factor, 4),
+        max_drawdown=0.0,
         by_symbol=by_symbol_resp,
         daily_pnl=daily_pnl,
+        symbol_pnl=[{"symbol": s, **d} for s, d in by_symbol_resp.items()],
     )

@@ -21,18 +21,23 @@ router = APIRouter(tags=["backtest"])
 
 
 def _get_exchange(request: Request):
-    """Build exchange from cached config or anonymous ccxt client."""
-    import ccxt
+    """Build exchange from cached config or anonymous ccxt client with proxy support."""
+    import ccxt, os
     cfg = request.app.state.config.get_all_cached()
     key = cfg.get("binance_key", "")
     secret = cfg.get("binance_secret", "")
     try:
-        return ccxt.binance({
+        options = {
             "apiKey": key or "",
             "secret": secret or "",
             "options": {"defaultType": "future"},
             "enableRateLimit": True,
-        })
+            "timeout": 5000,
+        }
+        proxy = (cfg.get("http_proxy") or "").strip() or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+        if proxy:
+            options["proxies"] = {"http": proxy, "https": proxy}
+        return ccxt.binance(options)
     except Exception:
         return None
 
@@ -53,7 +58,7 @@ async def _run_backtest_task(run_id: int, params: dict, exchange):
         result = backtester.run(
             symbol=params["symbol"],
             timeframe=params["timeframe"],
-            htf_timeframe=params["htf_timeframe"],
+            htf_timeframe=params.get("htf_timeframe", "15m"),
             start_date=params["start_date"],
             end_date=params["end_date"],
             confirm_candles=params.get("confirm_candles", 2),
@@ -86,6 +91,11 @@ async def create_backtest(
     Create a new backtest task.  Runs asynchronously; returns immediately with the run id.
     """
     params = body.model_dump()
+    if "params" in params and isinstance(params["params"], dict):
+        for k, v in params["params"].items():
+            if k not in params or params[k] is None:
+                params[k] = v
+
     run = BacktestRun(
         symbol=body.symbol.upper(),
         timeframe=body.timeframe,
@@ -93,7 +103,7 @@ async def create_backtest(
         end_date=body.end_date,
         params=json.dumps(params, ensure_ascii=False),
         status="pending",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.utcnow(),
     )
     db.add(run)
     db.commit()

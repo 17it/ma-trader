@@ -102,6 +102,7 @@ DEFAULT_SETTINGS = {
     "telegram_chat_id": "",
     "binance_key": "",
     "binance_secret": "",
+    "http_proxy": "",
     "trading_mode": "paper",
     "max_daily_loss": "0.05",  # 5%
 }

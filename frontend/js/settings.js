@@ -29,6 +29,7 @@ const SettingsManager = (() => {
     if (!data) return;
     document.getElementById('binanceKey').value       = data.binance_key      || '';
     document.getElementById('binanceSecret').value    = data.binance_secret   || '';
+    document.getElementById('httpProxy').value        = data.http_proxy       || '';
     document.getElementById('telegramToken').value    = data.telegram_token   || '';
     document.getElementById('telegramChatId').value   = data.telegram_chat_id || '';
     document.getElementById('maxDailyLoss').value     = data.max_daily_loss   || 5;
@@ -42,6 +43,7 @@ const SettingsManager = (() => {
     const payload = {
       binance_key:      document.getElementById('binanceKey').value,
       binance_secret:   document.getElementById('binanceSecret').value,
+      http_proxy:       (document.getElementById('httpProxy')?.value || '').trim(),
       telegram_token:   document.getElementById('telegramToken').value,
       telegram_chat_id: document.getElementById('telegramChatId').value,
       trading_mode:     document.querySelector('input[name="tradingMode"]:checked').value,

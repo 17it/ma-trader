@@ -1,8 +1,8 @@
 /* ═══════════════════════════════════════════
-   MA Trader — Dark Theme (TradingView-style)
+   MA Trader — Multi-Theme (Dark / Light)
    ═══════════════════════════════════════════ */
 
-:root {
+:root, [data-bs-theme="dark"] {
   --bg-primary:   #0d1117;
   --bg-card:      #161b22;
   --bg-hover:     #1c2128;
@@ -15,15 +15,45 @@
   --accent-yellow:#f0c040;
   --accent-pink:  #e77ab4;
   --accent-purple:#9b6dd6;
+  --card-header-bg: rgba(255,255,255,0.03);
+  --log-bg:       #0d1117;
+  --input-bg:     #0d1117;
+  --input-group-bg: #161b22;
+  --modal-bg:     #161b22;
+  --badge-paper-bg: #30363d;
+  --item-active-bg: rgba(88,166,255,0.08);
+}
+
+[data-bs-theme="light"] {
+  --bg-primary:   #f4f6f8;
+  --bg-card:      #ffffff;
+  --bg-hover:     #f0f2f5;
+  --border:       #d0d7de;
+  --text-primary: #1f2328;
+  --text-muted:   #656d76;
+  --accent-green: #1a7f37;
+  --accent-red:   #cf222e;
+  --accent-blue:  #0969da;
+  --accent-yellow:#9a6700;
+  --accent-pink:  #bf3989;
+  --accent-purple:#8250df;
+  --card-header-bg: #f6f8fa;
+  --log-bg:       #f8fafc;
+  --input-bg:     #ffffff;
+  --input-group-bg: #f6f8fa;
+  --modal-bg:     #ffffff;
+  --badge-paper-bg: #eaeef2;
+  --item-active-bg: rgba(9,105,218,0.08);
 }
 
 /* ─── Base ─── */
 html, body {
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, system-ui, sans-serif;
   font-size: 13px;
   overflow: hidden;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 /* ─── Scrollbar ─── */
@@ -37,8 +67,27 @@ html, body {
   border-bottom: 1px solid var(--border);
   height: 54px;
 }
+#topNav .navbar-brand {
+  color: var(--text-primary);
+}
 
 .text-accent-blue { color: var(--accent-blue) !important; }
+
+/* ─── Theme toggle button ─── */
+#btnThemeToggle {
+  border-color: var(--border);
+  color: var(--text-primary);
+  background: var(--bg-card);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.2s ease;
+}
+#btnThemeToggle:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
 
 /* ─── Status dot ─── */
 .status-dot {
@@ -117,7 +166,7 @@ html, body {
 }
 .symbol-item:hover  { background: var(--bg-hover); }
 .symbol-item.active {
-  background: rgba(88,166,255,0.08);
+  background: var(--item-active-bg);
   border-left-color: var(--accent-blue);
 }
 
@@ -214,7 +263,7 @@ html, body {
 .log-box {
   height: 120px;
   overflow-y: auto;
-  background: var(--bg-primary);
+  background: var(--log-bg);
   border-radius: 4px;
   padding: 6px 8px;
   font-size: 11px;
@@ -233,56 +282,57 @@ html, body {
   border-radius: 8px;
 }
 .card-dark .card-header {
-  background: rgba(255,255,255,0.03);
+  background: var(--card-header-bg);
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-muted);
+  color: var(--text-primary);
   padding: 10px 16px;
 }
 .card-dark .card-body { color: var(--text-primary); }
 
 /* ─── Tables ─── */
-.table-dark {
-  --bs-table-bg: transparent;
-  --bs-table-color: var(--text-primary);
-  --bs-table-border-color: var(--border);
-  --bs-table-hover-bg: var(--bg-hover);
+.table-custom, .table-dark {
+  --bs-table-bg: transparent !important;
+  --bs-table-color: var(--text-primary) !important;
+  --bs-table-border-color: var(--border) !important;
+  --bs-table-hover-bg: var(--bg-hover) !important;
+  --bs-table-hover-color: var(--text-primary) !important;
   font-size: 12px;
 }
-.table-dark thead th {
+.table-custom thead th, .table-dark thead th {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-muted);
+  color: var(--text-muted) !important;
   font-weight: 600;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border) !important;
 }
-
-/* ─── Status badges ─── */
-.badge-open    { background: rgba(88,166,255,0.2); color: var(--accent-blue); padding: 2px 8px; border-radius: 10px; }
-.badge-closed  { background: rgba(63,185,80,0.2);  color: var(--accent-green); padding: 2px 8px; border-radius: 10px; }
-.badge-stopped { background: rgba(248,81,73,0.2);  color: var(--accent-red);  padding: 2px 8px; border-radius: 10px; }
-.badge-paper   { background: var(--border); color: var(--text-muted); padding: 1px 5px; border-radius: 3px; font-size: 10px; }
 
 /* ─── Form controls ─── */
 .form-control, .form-select {
-  background: var(--bg-primary);
+  background: var(--input-bg);
   border: 1px solid var(--border);
   color: var(--text-primary);
   font-size: 12px;
 }
 .form-control:focus, .form-select:focus {
-  background: var(--bg-primary);
+  background: var(--input-bg);
   border-color: var(--accent-blue);
   color: var(--text-primary);
   box-shadow: 0 0 0 2px rgba(88,166,255,0.2);
 }
 .form-control::placeholder { color: var(--text-muted); }
 
+.input-group-text {
+  background: var(--input-group-bg);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
 /* ─── Modal ─── */
 .modal-dark {
-  background: var(--bg-card);
+  background: var(--modal-bg);
   border: 1px solid var(--border);
   color: var(--text-primary);
 }
@@ -291,6 +341,12 @@ html, body {
   padding: 12px 16px;
 }
 .modal-dark .modal-footer { border-top: 1px solid var(--border); }
+
+/* ─── HR ─── */
+hr {
+  border-color: var(--border) !important;
+  opacity: 0.6;
+}
 
 /* ─── Stats ─── */
 .stat-value {

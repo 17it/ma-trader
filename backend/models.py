@@ -105,8 +105,13 @@ class TradeResponse(BaseModel):
 class BacktestRunCreate(BaseModel):
     symbol: str = Field(..., example="BTCUSDT")
     timeframe: str = Field("1m", example="1m")
+    htf_timeframe: str = Field("15m", example="15m")
     start_date: str = Field(..., example="2024-01-01")
     end_date: str = Field(..., example="2024-12-31")
+    confirm_candles: int = 2
+    rr_ratio: float = 1.5
+    initial_capital: float = 10000.0
+    risk_per_trade: float = 0.01
     params: Dict[str, Any] = Field(
         default_factory=dict,
         example={
@@ -137,15 +142,18 @@ class BacktestRunResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class StatsResponse(BaseModel):
-    total_trades: int
-    win_rate: float                    # 0.0 – 1.0
-    total_pnl: float
-    total_pnl_pct: float
-    profit_factor: float
-    max_drawdown: float
-    avg_win: float
-    avg_loss: float
+    total_trades: int = 0
+    win_trades: int = 0
+    loss_trades: int = 0
+    win_rate: float = 0.0
+    total_pnl: float = 0.0
+    total_pnl_pct: float = 0.0
+    profit_factor: float = 0.0
+    max_drawdown: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
     best_symbol: Optional[str] = None
+    by_symbol: Dict[str, Any] = Field(default_factory=dict)
     daily_pnl: List[Dict[str, Any]] = Field(default_factory=list)
     symbol_pnl: List[Dict[str, Any]] = Field(default_factory=list)
 

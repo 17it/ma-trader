@@ -77,8 +77,14 @@ const BacktestManager = (() => {
 
     // Metric cards
     const metricsEl = document.getElementById('btMetrics');
-    const pnlColor  = results.total_pnl >= 0 ? 'text-green' : 'text-red';
+    const pnlColor  = (results.total_pnl ?? 0) >= 0 ? 'text-green' : 'text-red';
     const ddColor   = 'text-red';
+
+    const wr = results.win_rate;
+    const wrVal = wr != null ? (wr > 1 ? wr : wr * 100).toFixed(1) : '—';
+
+    const pnlPct = results.total_pnl_pct ?? results.pnl_pct;
+    const pnlPctStr = pnlPct != null ? `(${(pnlPct >= 0 ? '+' : '')}${Number(pnlPct).toFixed(1)}%)` : '';
 
     metricsEl.innerHTML = `
       <div class="col-6 col-md-3">
@@ -90,49 +96,73 @@ const BacktestManager = (() => {
       <div class="col-6 col-md-3">
         <div class="bt-metric-card">
           <div class="bt-metric-label">胜率</div>
-          <div class="bt-metric-value text-green">${results.win_rate != null ? (results.win_rate * 100).toFixed(1) + '%' : '—'}</div>
+          <div class="bt-metric-value text-green">${wrVal}%</div>
         </div>
       </div>
       <div class="col-6 col-md-3">
         <div class="bt-metric-card">
           <div class="bt-metric-label">总盈亏</div>
-          <div class="bt-metric-value ${pnlColor}">${results.total_pnl != null ? (results.total_pnl >= 0 ? '+' : '') + '$' + results.total_pnl.toFixed(2) : '—'}
-            <small style="font-size:12px">(${results.pnl_pct != null ? (results.pnl_pct >= 0 ? '+' : '') + results.pnl_pct.toFixed(1) + '%' : ''})</small>
+          <div class="bt-metric-value ${pnlColor}">${results.total_pnl != null ? (results.total_pnl >= 0 ? '+' : '') + '$' + Number(results.total_pnl).toFixed(2) : '—'}
+            <small style="font-size:12px">${pnlPctStr}</small>
           </div>
         </div>
       </div>
       <div class="col-6 col-md-3">
         <div class="bt-metric-card">
           <div class="bt-metric-label">最大回撤</div>
-          <div class="bt-metric-value ${ddColor}">${results.max_drawdown != null ? results.max_drawdown.toFixed(1) + '%' : '—'}</div>
+          <div class="bt-metric-value ${ddColor}">${results.max_drawdown != null ? Number(results.max_drawdown).toFixed(1) + '%' : '—'}</div>
         </div>
       </div>
     `;
 
     // Equity curve
     if (results.equity_curve && results.equity_curve.length) {
-      const dates  = results.equity_curve.map(e => e.date || e.t);
-      const equity = results.equity_curve.map(e => e.equity || e.v);
+      const dates  = results.equity_curve.map(e => e.time || e.date || e.t || '');
+      const equity = results.equity_curve.map(e => e.equity ?? e.v ?? 0);
       BacktestChart.render(dates, equity);
     }
 
     // Trade list
     const tbody = document.getElementById('btTradeBody');
     tbody.innerHTML = '';
+    const tradeCountEl = document.getElementById('btTradeCount');
+    if (tradeCountEl) {
+      tradeCountEl.textContent = `共 ${(results.trades || []).length} 笔`;
+    }
+
     (results.trades || []).forEach(tr => {
       const pnlColor = (tr.pnl || 0) >= 0 ? '#3fb950' : '#f85149';
       const dirIcon  = tr.direction === 'long' ? '<span style="color:#3fb950">▲ 多</span>' : '<span style="color:#f85149">▼ 空</span>';
+      const entryTimeStr = formatTradeTime(tr.entry_time);
+      const exitTimeStr  = formatTradeTime(tr.exit_time);
       const tr2 = document.createElement('tr');
       tr2.innerHTML = `
         <td>${dirIcon}</td>
+        <td class="text-secondary">${entryTimeStr}</td>
         <td>${tr.entry_price?.toFixed(4) ?? '—'}</td>
+        <td class="text-secondary">${exitTimeStr}</td>
         <td>${tr.exit_price?.toFixed(4) ?? '—'}</td>
-        <td style="color:${pnlColor}">${tr.pnl != null ? (tr.pnl >= 0 ? '+' : '') + tr.pnl.toFixed(2) : '—'}</td>
+        <td style="color:${pnlColor};font-weight:600">${tr.pnl != null ? (tr.pnl >= 0 ? '+' : '') + tr.pnl.toFixed(2) : '—'}</td>
       `;
       tbody.appendChild(tr2);
     });
 
     document.getElementById('btResults').style.display = 'block';
+  }
+
+  function formatTradeTime(tStr) {
+    if (!tStr) return '—';
+    try {
+      const d = new Date(tStr);
+      if (isNaN(d.getTime())) return String(tStr);
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const h = String(d.getHours()).padStart(2, '0');
+      const min = String(d.getMinutes()).padStart(2, '0');
+      return `${m}-${day} ${h}:${min}`;
+    } catch {
+      return String(tStr);
+    }
   }
 
   // ─── History ──────────────────────────────────────────────────────────
@@ -167,7 +197,8 @@ const BacktestManager = (() => {
       const pnl    = results?.total_pnl;
       const pnlStr = pnl != null ? `<span style="color:${pnl >= 0 ? '#3fb950' : '#f85149'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>` : '—';
       const wr     = results?.win_rate;
-      const wrStr  = wr != null ? (wr * 100).toFixed(1) + '%' : '—';
+      const wrVal  = wr != null ? (wr > 1 ? wr : wr * 100).toFixed(1) : '—';
+      const wrStr  = wrVal !== '—' ? `${wrVal}%` : '—';
 
       const tr = document.createElement('tr');
       tr.style.cursor = 'pointer';

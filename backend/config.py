@@ -37,6 +37,16 @@ class ConfigManager:
         finally:
             db.close()
 
+    def get_all(self, db: Optional[Session] = None) -> Dict[str, str]:
+        """Alias for get_all_settings with optional injected db session."""
+        if db is not None:
+            return get_all_settings(db)
+        return self.all()
+
+    def get_all_cached(self) -> Dict[str, str]:
+        """Return all settings as a dict."""
+        return self.all()
+
 
 # ---------------------------------------------------------------------------
 # Public helpers

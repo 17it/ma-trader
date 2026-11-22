@@ -34,15 +34,26 @@ router = APIRouter()
 # Settings routes
 # ---------------------------------------------------------------------------
 
-@router.get("/settings", response_model=SettingResponse, summary="Get all settings")
+@router.get("/settings", summary="Get all settings")
 def read_settings(db: Session = Depends(get_db)):
-    return SettingResponse(settings=get_all_settings(db))
+    all_settings = get_all_settings(db)
+    resp = dict(all_settings)
+    resp["settings"] = all_settings
+    return resp
 
 
-@router.put("/settings", response_model=SettingResponse, summary="Bulk update settings")
-def write_settings(body: SettingUpdate, db: Session = Depends(get_db)):
-    updated = update_settings(db, body.settings)
-    return SettingResponse(settings=updated)
+@router.put("/settings", summary="Bulk update settings")
+def write_settings(body: dict, db: Session = Depends(get_db)):
+    # Support both flat JSON object and {"settings": {...}}
+    if "settings" in body and isinstance(body["settings"], dict):
+        updates = {str(k): str(v) for k, v in body["settings"].items()}
+    else:
+        updates = {str(k): str(v) for k, v in body.items() if k != "settings"}
+
+    updated = update_settings(db, updates)
+    resp = dict(updated)
+    resp["settings"] = updated
+    return resp
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,29 @@
 /**
- * chart.js — ECharts K线图 + MA均线 + 成交量 + 交易标注
+ * chart.js — ECharts K线图 + MA均线 + 成交量 + 交易标注 (支持日间/夜间模式)
  */
+
+function getThemeConfig() {
+  const isLight = document.documentElement.getAttribute('data-bs-theme') === 'light';
+  return {
+    isLight,
+    echartsTheme: isLight ? null : 'dark',
+    bg: isLight ? '#ffffff' : '#0d1117',
+    tooltipBg: isLight ? '#ffffff' : '#161b22',
+    tooltipBorder: isLight ? '#d0d7de' : '#30363d',
+    tooltipText: isLight ? '#1f2328' : '#e6edf3',
+    axisLine: isLight ? '#d0d7de' : '#30363d',
+    axisLabel: isLight ? '#656d76' : '#8b949e',
+    splitLine: isLight ? '#eaeef2' : '#1c2128',
+    sliderBorder: isLight ? '#d0d7de' : '#30363d',
+    sliderFiller: isLight ? 'rgba(9,105,218,0.1)' : 'rgba(88,166,255,0.1)',
+    sliderHandle: isLight ? '#0969da' : '#58a6ff',
+    bullish: isLight ? '#1a7f37' : '#3fb950',
+    bearish: isLight ? '#cf222e' : '#f85149',
+    equityAreaStart: isLight ? 'rgba(9,105,218,0.25)' : 'rgba(88,166,255,0.3)',
+    equityAreaEnd: isLight ? 'rgba(9,105,218,0.02)' : 'rgba(88,166,255,0.02)',
+    equityLine: isLight ? '#0969da' : '#58a6ff'
+  };
+}
 
 const ChartManager = (() => {
   let klineChart = null;
@@ -13,12 +36,22 @@ const ChartManager = (() => {
     const volEl    = document.getElementById('volumeChart');
     if (!klineEl || !volEl) return;
 
-    klineChart  = echarts.init(klineEl,  'dark', { renderer: 'canvas' });
-    volumeChart = echarts.init(volEl,    'dark', { renderer: 'canvas' });
+    const cfg = getThemeConfig();
+    if (klineChart) {
+      try { echarts.dispose(klineChart); } catch {}
+      klineChart = null;
+    }
+    if (volumeChart) {
+      try { echarts.dispose(volumeChart); } catch {}
+      volumeChart = null;
+    }
+
+    klineChart  = echarts.init(klineEl,  cfg.echartsTheme, { renderer: 'canvas' });
+    volumeChart = echarts.init(volEl,    cfg.echartsTheme, { renderer: 'canvas' });
 
     // Link zoom between charts
     klineChart.on('datazoom', (evt) => {
-      volumeChart.dispatchAction({ type: 'dataZoom', ...evt });
+      volumeChart?.dispatchAction({ type: 'dataZoom', ...evt });
     });
 
     window.addEventListener('resize', () => {
@@ -39,12 +72,30 @@ const ChartManager = (() => {
   // ─── Render klines ──────────────────────────────────────────────────
   function render(klines, trades = []) {
     if (!klineChart) init();
-    currentData = { klines, trades };
+    currentData = { klines: klines || [], trades: trades || [] };
 
-    // klines = [{t, o, h, l, c, v}, ...]  OR  [[t,o,h,l,c,v], ...]
-    const norm = klines.map(k => Array.isArray(k) ? k : [k.t, k.o, k.h, k.l, k.c, k.v]);
+    if (!klines || !klines.length) {
+      if (klineChart) klineChart.clear();
+      if (volumeChart) volumeChart.clear();
+      return;
+    }
 
-    const times  = norm.map(k => new Date(k[0]).toLocaleString('zh-CN', { hour12: false }));
+    // Support all candle formats: [t,o,h,l,c,v] or {time,open,high,low,close,volume} or {t,o,h,l,c,v}
+    const norm = klines.map(k => {
+      if (Array.isArray(k)) return k;
+      const t = k.time ?? k.t ?? k.timestamp ?? 0;
+      const o = k.open ?? k.o ?? 0;
+      const h = k.high ?? k.h ?? 0;
+      const l = k.low ?? k.l ?? 0;
+      const c = k.close ?? k.c ?? 0;
+      const v = k.volume ?? k.v ?? 0;
+      return [t, o, h, l, c, v];
+    });
+
+    const times  = norm.map(k => {
+      const d = new Date(k[0]);
+      return isNaN(d.getTime()) ? String(k[0]) : d.toLocaleString('zh-CN', { hour12: false });
+    });
     const ohlc   = norm.map(k => [+k[1], +k[4], +k[3], +k[2]]);  // ECharts: [o,c,l,h]
     const vols   = norm.map(k => +k[5]);
     const closes = norm.map(k => +k[4]);
@@ -101,20 +152,21 @@ const ChartManager = (() => {
     }
 
     // ── Tooltip formatter ─────────────────────────────────────────────
+    const cfg = getThemeConfig();
     const tooltip = {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
-      backgroundColor: '#161b22',
-      borderColor: '#30363d',
-      textStyle: { color: '#e6edf3', fontSize: 12 },
+      backgroundColor: cfg.tooltipBg,
+      borderColor: cfg.tooltipBorder,
+      textStyle: { color: cfg.tooltipText, fontSize: 12 },
       formatter(params) {
         const i = params[0]?.dataIndex;
         if (i === undefined) return '';
         const k = norm[i];
         const o = +k[1], h = +k[2], l = +k[3], c = +k[4], v = +k[5];
-        const pnl = c >= o ? `<span style="color:#3fb950">+${(c-o).toFixed(2)}</span>` : `<span style="color:#f85149">${(c-o).toFixed(2)}</span>`;
+        const pnl = c >= o ? `<span style="color:${cfg.bullish}">+${(c-o).toFixed(2)}</span>` : `<span style="color:${cfg.bearish}">${(c-o).toFixed(2)}</span>`;
         return `<div>
-          <div style="color:#8b949e;margin-bottom:4px">${times[i]}</div>
+          <div style="color:${cfg.axisLabel};margin-bottom:4px">${times[i]}</div>
           <div>开 <b>${o}</b>  高 <b>${h}</b>  低 <b>${l}</b>  收 <b>${c}</b> ${pnl}</div>
           <div>量 <b>${v.toFixed(2)}</b></div>
           <div style="margin-top:4px">
@@ -128,29 +180,29 @@ const ChartManager = (() => {
 
     // ── Kline chart option ────────────────────────────────────────────
     klineChart.setOption({
-      backgroundColor: '#0d1117',
+      backgroundColor: cfg.bg,
       animation: false,
       tooltip,
       grid: { left: 60, right: 10, top: 10, bottom: 60 },
       xAxis: {
         type: 'category',
         data: times,
-        axisLine: { lineStyle: { color: '#30363d' } },
-        axisLabel: { color: '#8b949e', fontSize: 10, interval: Math.floor(norm.length / 8) },
+        axisLine: { lineStyle: { color: cfg.axisLine } },
+        axisLabel: { color: cfg.axisLabel, fontSize: 10, interval: Math.floor(norm.length / 8) },
         splitLine: { show: false }
       },
       yAxis: {
         type: 'value',
         scale: true,
-        axisLine: { lineStyle: { color: '#30363d' } },
-        axisLabel: { color: '#8b949e', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#1c2128' } }
+        axisLine: { lineStyle: { color: cfg.axisLine } },
+        axisLabel: { color: cfg.axisLabel, fontSize: 10 },
+        splitLine: { lineStyle: { color: cfg.splitLine } }
       },
       dataZoom: [
         { type: 'inside', start: Math.max(0, 100 - 10000 / norm.length), end: 100 },
-        { type: 'slider', height: 20, bottom: 0, borderColor: '#30363d',
-          fillerColor: 'rgba(88,166,255,0.1)', handleStyle: { color: '#58a6ff' },
-          textStyle: { color: '#8b949e', fontSize: 10 }, labelFormatter: () => '' }
+        { type: 'slider', height: 20, bottom: 0, borderColor: cfg.sliderBorder,
+          fillerColor: cfg.sliderFiller, handleStyle: { color: cfg.sliderHandle },
+          textStyle: { color: cfg.axisLabel, fontSize: 10 }, labelFormatter: () => '' }
       ],
       series: [
         {
@@ -158,10 +210,10 @@ const ChartManager = (() => {
           type: 'candlestick',
           data: ohlc,
           itemStyle: {
-            color: '#3fb950',       // bullish
-            color0: '#f85149',      // bearish
-            borderColor: '#3fb950',
-            borderColor0: '#f85149'
+            color: cfg.bullish,       // bullish
+            color0: cfg.bearish,      // bearish
+            borderColor: cfg.bullish,
+            borderColor0: cfg.bearish
           },
           markPoint: markPoints
         },
@@ -181,11 +233,11 @@ const ChartManager = (() => {
     }, true);
 
     // ── Volume chart ──────────────────────────────────────────────────
-    const volColors = norm.map(k => +k[4] >= +k[1] ? '#3fb950' : '#f85149');
+    const volColors = norm.map(k => +k[4] >= +k[1] ? cfg.bullish : cfg.bearish);
     volumeChart.setOption({
-      backgroundColor: '#0d1117',
+      backgroundColor: cfg.bg,
       animation: false,
-      tooltip: { trigger: 'axis', backgroundColor: '#161b22', borderColor: '#30363d', textStyle: { color: '#e6edf3', fontSize: 12 } },
+      tooltip: { trigger: 'axis', backgroundColor: cfg.tooltipBg, borderColor: cfg.tooltipBorder, textStyle: { color: cfg.tooltipText, fontSize: 12 } },
       grid: { left: 60, right: 10, top: 4, bottom: 4 },
       xAxis: { type: 'category', data: times, show: false },
       yAxis: { type: 'value', show: false, scale: false },
@@ -200,10 +252,19 @@ const ChartManager = (() => {
   }
 
   // ─── Highlight a trade's candle ─────────────────────────────────────
-  function highlightTrade(trade) {
+  function highlightTrade(tradeOrId) {
     if (!klineChart) return;
-    const { klines } = currentData;
-    const norm = klines.map(k => Array.isArray(k) ? k : [k.t, k.o, k.h, k.l, k.c, k.v]);
+    const { klines, trades } = currentData;
+    let trade = tradeOrId;
+    if (typeof tradeOrId === 'number' || typeof tradeOrId === 'string') {
+      trade = (trades || []).find(t => t.id == tradeOrId);
+    }
+    if (!trade || !trade.open_time) return;
+
+    const norm = klines.map(k => {
+      if (Array.isArray(k)) return k;
+      return [k.time ?? k.t ?? 0, k.open ?? k.o ?? 0, k.high ?? k.h ?? 0, k.low ?? k.l ?? 0, k.close ?? k.c ?? 0, k.volume ?? k.v ?? 0];
+    });
     const entryTime = new Date(trade.open_time).getTime();
     const idx = norm.findIndex(k => Math.abs(k[0] - entryTime) < 90000);
     if (idx < 0) return;
@@ -225,46 +286,77 @@ const ChartManager = (() => {
     render(klines, currentData.trades);
   }
 
-  return { init, render, highlightTrade, appendCandle };
+  // ─── Update theme ──────────────────────────────────────────────────
+  function updateTheme() {
+    init();
+    if (currentData.klines && currentData.klines.length) {
+      render(currentData.klines, currentData.trades);
+    }
+  }
+
+  return { init, render, highlightTrade, appendCandle, updateTheme };
 })();
 
 // ─── Stats charts ─────────────────────────────────────────────────────
 const StatsCharts = (() => {
   let dailyChart = null;
   let symbolChart = null;
+  let lastDaily = null;
+  let lastSymbol = null;
 
   function renderDaily(dates, pnls) {
-    if (!dailyChart) dailyChart = echarts.init(document.getElementById('dailyPnlChart'), 'dark');
+    lastDaily = { dates, pnls };
+    const el = document.getElementById('dailyPnlChart');
+    if (!el) return;
+    const cfg = getThemeConfig();
+    if (!dailyChart) dailyChart = echarts.init(el, cfg.echartsTheme);
     dailyChart.setOption({
       backgroundColor: 'transparent',
       animation: false,
-      tooltip: { trigger: 'axis', backgroundColor: '#161b22', borderColor: '#30363d', textStyle: { color: '#e6edf3' } },
+      tooltip: { trigger: 'axis', backgroundColor: cfg.tooltipBg, borderColor: cfg.tooltipBorder, textStyle: { color: cfg.tooltipText } },
       grid: { left: 50, right: 10, top: 10, bottom: 40 },
-      xAxis: { type: 'category', data: dates, axisLabel: { color: '#8b949e', fontSize: 10, rotate: 30 }, axisLine: { lineStyle: { color: '#30363d' } } },
-      yAxis: { type: 'value', axisLabel: { color: '#8b949e', fontSize: 10 }, splitLine: { lineStyle: { color: '#1c2128' } } },
+      xAxis: { type: 'category', data: dates, axisLabel: { color: cfg.axisLabel, fontSize: 10, rotate: 30 }, axisLine: { lineStyle: { color: cfg.axisLine } } },
+      yAxis: { type: 'value', axisLabel: { color: cfg.axisLabel, fontSize: 10 }, splitLine: { lineStyle: { color: cfg.splitLine } } },
       series: [{
         type: 'bar',
-        data: pnls.map(v => ({ value: v, itemStyle: { color: v >= 0 ? '#3fb950' : '#f85149' } })),
+        data: pnls.map(v => ({ value: v, itemStyle: { color: v >= 0 ? cfg.bullish : cfg.bearish } })),
         barMaxWidth: 20
       }]
     });
   }
 
   function renderSymbol(symbols, pnls) {
-    if (!symbolChart) symbolChart = echarts.init(document.getElementById('symbolPnlChart'), 'dark');
+    lastSymbol = { symbols, pnls };
+    const el = document.getElementById('symbolPnlChart');
+    if (!el) return;
+    const cfg = getThemeConfig();
+    if (!symbolChart) symbolChart = echarts.init(el, cfg.echartsTheme);
     symbolChart.setOption({
       backgroundColor: 'transparent',
       animation: false,
-      tooltip: { trigger: 'axis', backgroundColor: '#161b22', borderColor: '#30363d', textStyle: { color: '#e6edf3' } },
+      tooltip: { trigger: 'axis', backgroundColor: cfg.tooltipBg, borderColor: cfg.tooltipBorder, textStyle: { color: cfg.tooltipText } },
       grid: { left: 60, right: 10, top: 10, bottom: 40 },
-      xAxis: { type: 'value', axisLabel: { color: '#8b949e', fontSize: 10 }, splitLine: { lineStyle: { color: '#1c2128' } } },
-      yAxis: { type: 'category', data: symbols, axisLabel: { color: '#8b949e', fontSize: 10 } },
+      xAxis: { type: 'value', axisLabel: { color: cfg.axisLabel, fontSize: 10 }, splitLine: { lineStyle: { color: cfg.splitLine } } },
+      yAxis: { type: 'category', data: symbols, axisLabel: { color: cfg.axisLabel, fontSize: 10 } },
       series: [{
         type: 'bar',
-        data: pnls.map(v => ({ value: v, itemStyle: { color: v >= 0 ? '#3fb950' : '#f85149' } })),
+        data: pnls.map(v => ({ value: v, itemStyle: { color: v >= 0 ? cfg.bullish : cfg.bearish } })),
         barMaxWidth: 20
       }]
     });
+  }
+
+  function updateTheme() {
+    if (dailyChart) {
+      try { echarts.dispose(dailyChart); } catch {}
+      dailyChart = null;
+    }
+    if (symbolChart) {
+      try { echarts.dispose(symbolChart); } catch {}
+      symbolChart = null;
+    }
+    if (lastDaily) renderDaily(lastDaily.dates, lastDaily.pnls);
+    if (lastSymbol) renderSymbol(lastSymbol.symbols, lastSymbol.pnls);
   }
 
   function resize() {
@@ -273,30 +365,43 @@ const StatsCharts = (() => {
   }
 
   window.addEventListener('resize', resize);
-  return { renderDaily, renderSymbol };
+  return { renderDaily, renderSymbol, updateTheme };
 })();
 
 // ─── Backtest equity chart ─────────────────────────────────────────────
 const BacktestChart = (() => {
   let chart = null;
+  let lastData = null;
 
   function render(dates, equity) {
-    if (!chart) chart = echarts.init(document.getElementById('btEquityChart'), 'dark');
+    lastData = { dates, equity };
+    const el = document.getElementById('btEquityChart');
+    if (!el) return;
+    const cfg = getThemeConfig();
+    if (!chart) chart = echarts.init(el, cfg.echartsTheme);
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,
-      tooltip: { trigger: 'axis', backgroundColor: '#161b22', borderColor: '#30363d', textStyle: { color: '#e6edf3' } },
+      tooltip: { trigger: 'axis', backgroundColor: cfg.tooltipBg, borderColor: cfg.tooltipBorder, textStyle: { color: cfg.tooltipText } },
       grid: { left: 60, right: 10, top: 10, bottom: 40 },
-      xAxis: { type: 'category', data: dates, axisLabel: { color: '#8b949e', fontSize: 10, rotate: 30 }, axisLine: { lineStyle: { color: '#30363d' } } },
-      yAxis: { type: 'value', axisLabel: { color: '#8b949e', fontSize: 10 }, splitLine: { lineStyle: { color: '#1c2128' } } },
+      xAxis: { type: 'category', data: dates, axisLabel: { color: cfg.axisLabel, fontSize: 10, rotate: 30 }, axisLine: { lineStyle: { color: cfg.axisLine } } },
+      yAxis: { type: 'value', axisLabel: { color: cfg.axisLabel, fontSize: 10 }, splitLine: { lineStyle: { color: cfg.splitLine } } },
       series: [{
         type: 'line', data: equity, smooth: true, symbol: 'none',
-        lineStyle: { color: '#58a6ff', width: 2 },
-        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(88,166,255,0.3)' }, { offset: 1, color: 'rgba(88,166,255,0.02)' }] } }
+        lineStyle: { color: cfg.equityLine, width: 2 },
+        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: cfg.equityAreaStart }, { offset: 1, color: cfg.equityAreaEnd }] } }
       }]
     });
   }
 
+  function updateTheme() {
+    if (chart) {
+      try { echarts.dispose(chart); } catch {}
+      chart = null;
+    }
+    if (lastData) render(lastData.dates, lastData.equity);
+  }
+
   window.addEventListener('resize', () => chart?.resize());
-  return { render };
+  return { render, updateTheme };
 })();

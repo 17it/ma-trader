@@ -25,30 +25,36 @@ router = APIRouter(tags=["trading"])
 # ---------------------------------------------------------------------------
 
 def _get_bot(request: Request):
-    return request.app.state.bot
+    return getattr(request.app.state, "bot", None)
 
 
 def _get_ws_manager(request: Request):
-    return request.app.state.ws_manager
+    return getattr(request.app.state, "ws_manager", None)
 
 
 def _get_config(request: Request):
-    return request.app.state.config
+    return getattr(request.app.state, "config", None)
 
 
 def _build_exchange(settings: dict, require_auth: bool = False) -> Optional[object]:
-    """Build a ccxt Binance Futures instance from settings dict."""
+    """Build a ccxt Binance Futures instance from settings dict with proxy support."""
+    import os
     key = settings.get("binance_key", "")
     secret = settings.get("binance_secret", "")
     if require_auth and (not key or not secret):
         return None
     try:
-        exchange = ccxt.binance({
+        cfg = {
             "apiKey": key or "",
             "secret": secret or "",
             "options": {"defaultType": "future"},
             "enableRateLimit": True,
-        })
+            "timeout": 5000,
+        }
+        proxy = (settings.get("http_proxy") or "").strip() or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+        if proxy:
+            cfg["proxies"] = {"http": proxy, "https": proxy}
+        exchange = ccxt.binance(cfg)
         return exchange
     except Exception as exc:
         logger.warning(f"Failed to build exchange: {exc}")
@@ -83,6 +89,7 @@ async def start_trading(request: Request, db: Session = Depends(get_db)):
         api_key=cfg.get("binance_key") if not is_paper else None,
         secret=cfg.get("binance_secret") if not is_paper else None,
         use_futures=True,
+        proxy=cfg.get("http_proxy"),
     )
 
     executor = Executor(exchange=exchange, config=cfg)
@@ -134,7 +141,8 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
     bot = _get_bot(request)
     running = bot is not None and bot.running
 
-    cfg = _get_config(request).get_all(db)
+    cfg_mgr = _get_config(request)
+    cfg = cfg_mgr.get_all(db) if cfg_mgr else {}
     mode = cfg.get("trading_mode", "paper")
 
     active_symbols = []
@@ -314,11 +322,20 @@ async def get_klines(
     exchange = _build_exchange(cfg, require_auth=False)
 
     symbol = symbol.upper()
+    try:
+        limit_val = int(getattr(limit, "default", limit) or 200)
+    except Exception:
+        limit_val = 200
+
+    try:
+        tf_val = str(getattr(timeframe, "default", timeframe) or "1m")
+    except Exception:
+        tf_val = "1m"
 
     raw = []
     if exchange is not None:
         try:
-            raw = exchange.fetch_ohlcv(symbol, timeframe, limit=limit + 60)
+            raw = exchange.fetch_ohlcv(symbol, tf_val, limit=limit_val + 60)
         except Exception as exc:
             logger.warning(f"fetch_ohlcv for {symbol} failed: {exc}")
 
@@ -326,11 +343,11 @@ async def get_klines(
         # Generate graceful demonstration data if exchange is offline
         import time, random
         now_ms = int(time.time() * 1000)
-        step_ms = 60 * 1000 if timeframe == "1m" else (300 * 1000 if timeframe == "5m" else 900 * 1000)
+        step_ms = 60 * 1000 if tf_val == "1m" else (300 * 1000 if tf_val == "5m" else 900 * 1000)
         base_price = 59350.0 if "BTC" in symbol else 3120.0
         cur = base_price
-        for i in range(limit + 60):
-            ts = now_ms - (limit + 60 - i) * step_ms
+        for i in range(limit_val + 60):
+            ts = now_ms - (limit_val + 60 - i) * step_ms
             drift = (random.random() - 0.48) * (base_price * 0.0012)
             o = cur
             c = cur + drift
@@ -368,4 +385,4 @@ async def get_klines(
         })
 
     # Return only the last `limit` bars
-    return {"symbol": symbol, "timeframe": timeframe, "data": data[-limit:]}
+    return {"symbol": symbol, "timeframe": tf_val, "data": data[-limit_val:]}
