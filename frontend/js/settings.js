@@ -84,28 +84,53 @@ const SettingsManager = (() => {
   // ─── Save global settings ────────────────────────────────────────────
   async function saveGlobalSettings(e) {
     e.preventDefault();
+    const btn = document.querySelector('#globalSettingsForm button[type="submit"]');
+    const originalText = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>保存中…';
+    }
+
     const payload = {
-      binance_key:      document.getElementById('binanceKey').value,
-      binance_secret:   document.getElementById('binanceSecret').value,
+      binance_key:      document.getElementById('binanceKey').value.trim(),
+      binance_secret:   document.getElementById('binanceSecret').value.trim(),
       http_proxy:       (document.getElementById('httpProxy')?.value || '').trim(),
-      telegram_token:   document.getElementById('telegramToken').value,
-      telegram_chat_id: document.getElementById('telegramChatId').value,
-      trading_mode:     document.querySelector('input[name="tradingMode"]:checked').value,
-      max_daily_loss:   document.getElementById('maxDailyLoss').value
+      telegram_token:   document.getElementById('telegramToken').value.trim(),
+      telegram_chat_id: document.getElementById('telegramChatId').value.trim(),
+      trading_mode:     document.querySelector('input[name="tradingMode"]:checked')?.value || 'paper',
+      max_daily_loss:   document.getElementById('maxDailyLoss').value.trim() || '5'
     };
+
     try {
       const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (res.ok) {
-        const msg = document.getElementById('settingsSaveMsg');
-        msg.style.display = 'block';
-        setTimeout(() => { msg.style.display = 'none'; }, 3000);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || `HTTP ${res.status}: 数据库写入失败`);
       }
+
+      // 重新加载回填确认
+      loadGlobalSettings(data.settings || data);
+
+      const msg = document.getElementById('settingsSaveMsg');
+      if (msg) {
+        msg.className = 'mt-2 text-success small fw-bold';
+        msg.textContent = '✓ 设置已成功保存并持久化至数据库！';
+        msg.style.display = 'block';
+        setTimeout(() => { msg.style.display = 'none'; }, 4000);
+      }
+      alert('✅ 全局设置已成功保存！\n刷新页面或重启服务均会持久生效。');
     } catch (err) {
       console.error('保存设置失败', err);
+      alert('❌ 保存设置失败:\n' + err.message + '\n\n提示：如果是在 Ubuntu 服务器上，请检查 ma-trader/data 目录的读写权限：\nsudo chown -R $USER:$USER data && chmod -R 775 data');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
     }
   }
 

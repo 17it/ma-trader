@@ -125,8 +125,32 @@ DEFAULT_SETTINGS = {
     "binance_secret": "",
     "http_proxy": "",
     "trading_mode": "paper",
-    "max_daily_loss": "0.05",  # 5%
+    "max_daily_loss": "5",
 }
+
+
+def _get_env_fallback(key: str) -> str:
+    """Helper to read setting default from environment variables (.env)."""
+    mapping = {
+        "telegram_token": "TELEGRAM_TOKEN",
+        "telegram_chat_id": "TELEGRAM_CHAT_ID",
+        "binance_key": ["BINANCE_API_KEY", "BINANCE_KEY"],
+        "binance_secret": "BINANCE_SECRET",
+        "http_proxy": ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"],
+        "trading_mode": "TRADING_MODE",
+        "max_daily_loss": "MAX_DAILY_LOSS",
+    }
+    target = mapping.get(key)
+    if isinstance(target, list):
+        for t in target:
+            val = os.environ.get(t)
+            if val:
+                return str(val).strip()
+    elif isinstance(target, str):
+        val = os.environ.get(target)
+        if val:
+            return str(val).strip()
+    return ""
 
 
 def init_db() -> None:
@@ -141,10 +165,15 @@ def create_tables() -> None:
 
     db = SessionLocal()
     try:
-        for key, value in DEFAULT_SETTINGS.items():
+        for key, default_val in DEFAULT_SETTINGS.items():
             existing = db.query(SettingModel).filter(SettingModel.key == key).first()
+            env_val = _get_env_fallback(key)
             if not existing:
-                db.add(SettingModel(key=key, value=value))
+                init_val = env_val if env_val else default_val
+                db.add(SettingModel(key=key, value=init_val))
+            elif not existing.value and env_val:
+                # If database setting is empty, populate from .env environment variable
+                existing.value = env_val
 
         # Seed default symbols if empty
         if not db.query(SymbolConfig).first():

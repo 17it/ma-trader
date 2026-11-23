@@ -102,6 +102,10 @@ const AppController = (() => {
     if (tabTradesLink) {
       tabTradesLink.addEventListener('shown.bs.tab', loadTrades);
     }
+    const tabSettingsLink = document.querySelector('a[href="#tabSettings"]');
+    if (tabSettingsLink) {
+      tabSettingsLink.addEventListener('shown.bs.tab', loadSettings);
+    }
 
     // Theme toggle (Day / Night mode)
     const btnThemeToggle = document.getElementById('btnThemeToggle');

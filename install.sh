@@ -58,6 +58,12 @@ echo -e "\n${GREEN}[4/6] 初始化配置文件与数据目录...${NC}"
 mkdir -p "$SCRIPT_DIR/data"
 mkdir -p "$SCRIPT_DIR/logs"
 
+# 严格保证 data 目录及其中的 SQLite 数据库对当前用户具备读写权限
+sudo chmod 777 "$SCRIPT_DIR/data"
+if [ -f "$SCRIPT_DIR/data/trading.db" ]; then
+    sudo chmod 666 "$SCRIPT_DIR/data/trading.db"
+fi
+
 if [ ! -f "$SCRIPT_DIR/.env" ]; then
     echo "未找到 .env 文件，已从 .env.example 自动生成默认配置..."
     cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
