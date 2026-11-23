@@ -125,10 +125,31 @@ def find_missing_intervals(
 
     # Check if end is missing (do not request future candles beyond now_ms)
     last_ts = cached_bars[-1][0]
-    if last_ts + step_ms * 2 < effective_until:
+    # If the gap at the end is smaller than 2 hours or within recent time, don't stall backtest
+    if last_ts + max(step_ms * 4, 3600_000) < effective_until:
         missing.append((last_ts + step_ms, effective_until))
 
     return missing
+
+
+def _get_active_proxy() -> Optional[str]:
+    """Auto-detect working proxy from env or local xray proxy."""
+    import os
+    env_p = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
+    if env_p:
+        return env_p
+    # Test local xray proxy at 10808
+    for candidate in ["socks5://127.0.0.1:10808", "http://127.0.0.1:10808"]:
+        try:
+            import socket
+            s = socket.socket()
+            s.settimeout(0.2)
+            s.connect(("127.0.0.1", 10808))
+            s.close()
+            return candidate
+        except Exception:
+            pass
+    return None
 
 
 def _fetch_interval_from_network(
@@ -138,45 +159,36 @@ def _fetch_interval_from_network(
     start_ms: int,
     end_ms: int
 ) -> List[list]:
-    """Fetch candles for [start_ms, end_ms) via CCXT or Binance Vision API with pagination."""
+    """
+    Fetch candles for [start_ms, end_ms) with retry, proxy support,
+    and progressive saving to SQLite for robust resumable fetching.
+    """
+    import httpx
     bars_fetched = []
     curr = start_ms
     limit = 1000
+    proxy_url = _get_active_proxy()
 
-    # 1. Try CCXT first if available
-    ccxt_failed = False
-    if exchange is not None:
-        while curr < end_ms:
+    while curr < end_ms:
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={timeframe}&startTime={curr}&limit={limit}"
+        success = False
+        for attempt in range(4):
             try:
-                raw = exchange.fetch_ohlcv(clean_symbol, timeframe, since=curr, limit=limit)
-                if not raw:
-                    break
-                bars_fetched.extend(raw)
-                last_ts = raw[-1][0]
-                if last_ts >= end_ms or len(raw) < limit:
-                    break
-                curr = last_ts + 1
-            except Exception as exc:
-                logger.warning(f"[Cache] CCXT fetch error for {clean_symbol}: {exc}")
-                ccxt_failed = True
-                break
-
-    # 2. If CCXT failed or returned insufficient bars, try official public Binance Vision API
-    if ccxt_failed or not bars_fetched:
-        import httpx
-        curr = start_ms
-        while curr < end_ms:
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={timeframe}&startTime={curr}&limit={limit}"
-            try:
-                r = httpx.get(url, timeout=5.0)
+                client_kwargs = {"timeout": 15.0}
+                if proxy_url:
+                    client_kwargs["proxy"] = proxy_url
+                with httpx.Client(**client_kwargs) as client:
+                    r = client.get(url)
                 if r.status_code == 200:
                     raw = r.json()
                     if not raw or not isinstance(raw, list):
+                        success = True
                         break
+                    batch = []
                     for row in raw:
                         ts = int(row[0])
                         if ts < end_ms:
-                            bars_fetched.append([
+                            batch.append([
                                 ts,
                                 float(row[1]),
                                 float(row[2]),
@@ -184,18 +196,63 @@ def _fetch_interval_from_network(
                                 float(row[4]),
                                 float(row[5]),
                             ])
+                    if batch:
+                        bars_fetched.extend(batch)
+                        # Progressive save to avoid losing data on disconnect
+                        save_klines_to_cache(clean_symbol, timeframe, batch)
+
                     last_ts = int(raw[-1][0])
                     if len(raw) < limit or last_ts >= end_ms:
-                        break
-                    curr = last_ts + 1
-                else:
-                    logger.warning(f"[Cache] Binance Vision returned {r.status_code} for {clean_symbol}")
+                        curr = end_ms
+                    else:
+                        curr = last_ts + 1
+                    success = True
                     break
+                elif r.status_code == 429:
+                    # Rate limit, wait a bit
+                    time.sleep(1.0 * (attempt + 1))
+                else:
+                    logger.warning(f"[Cache] Binance Vision returned {r.status_code} for {clean_symbol} (attempt {attempt+1})")
+                    time.sleep(0.5)
             except Exception as e:
-                logger.warning(f"[Cache] Binance Vision request error: {e}")
-                break
+                logger.warning(f"[Cache] Binance Vision error on {clean_symbol} (attempt {attempt+1}): {e}")
+                time.sleep(1.0 * (attempt + 1))
+
+        if not success:
+            logger.error(f"[Cache] Failed to fetch interval starting at {curr} after 4 attempts. Halting pagination.")
+            break
 
     return bars_fetched
+
+
+def _resample_from_1m_cache(symbol: str, target_timeframe: str, since_ms: int, until_ms: int) -> List[list]:
+    """Attempt to synthesize target_timeframe bars from existing 1m local cached bars."""
+    import pandas as pd
+    bars_1m = get_cached_klines(symbol, "1m", since_ms, until_ms)
+    if len(bars_1m) < 10:
+        return []
+    try:
+        df = pd.DataFrame(bars_1m, columns=["ts", "open", "high", "low", "close", "volume"])
+        df["dt"] = pd.to_datetime(df["ts"], unit="ms")
+        rule = target_timeframe.replace("m", "min")
+        resampled = df.set_index("dt").resample(rule).agg({
+            "ts": "first",
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum"
+        }).dropna().reset_index(drop=True)
+        res_list = [
+            [int(r["ts"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r["volume"])]
+            for _, r in resampled.iterrows()
+        ]
+        if res_list:
+            save_klines_to_cache(symbol, target_timeframe, res_list)
+        return res_list
+    except Exception as exc:
+        logger.warning(f"[Cache] Resample from 1m failed: {exc}")
+        return []
 
 
 def load_ohlcv_with_cache(
@@ -210,7 +267,8 @@ def load_ohlcv_with_cache(
     1. Checks local SQLite database for existing cached bars.
     2. Identifies missing intervals.
     3. Fetches ONLY missing intervals from Binance and saves them to SQLite.
-    4. Returns complete dataset sorted chronologically.
+    4. If network fails and timeframe != '1m', falls back to resampling from 1m cache.
+    5. Returns complete dataset sorted chronologically.
     """
     create_tables()  # Ensure cached_klines table exists
 
@@ -252,6 +310,18 @@ def load_ohlcv_with_cache(
 
     # 4. Re-query complete dataset from SQLite
     all_bars = get_cached_klines(clean_symbol, timeframe, since_ms, until_ms)
+
+    # 5. Fallback: If still incomplete and target timeframe != '1m', synthesize from 1m cache
+    now_ms = int(time.time() * 1000)
+    effective_until = min(until_ms, now_ms)
+    expected_bars = max(10, (effective_until - since_ms) // step_ms)
+    if len(all_bars) < expected_bars * 0.7 and timeframe != "1m":
+        logger.info(f"[Backtest Cache] Incomplete {timeframe} data ({len(all_bars)}/{expected_bars} bars). Synthesizing from local 1m cache...")
+        resampled = _resample_from_1m_cache(clean_symbol, timeframe, since_ms, until_ms)
+        if len(resampled) > len(all_bars):
+            all_bars = resampled
+            logger.info(f"[Backtest Cache] ✅ Synthesized {len(all_bars):,} {timeframe} bars from 1m cache.")
+
     elapsed = time.time() - t0
     logger.info(
         f"[Backtest Cache] ✅ Finished loading {len(all_bars):,} bars "
