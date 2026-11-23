@@ -13,17 +13,41 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
+def _get_notifier_proxy() -> Optional[str]:
+    """Auto-detect proxy for Telegram API requests, preferring local xray socks5h."""
+    # Test local xray proxy first (socks5h ensures remote DNS resolution)
+    for candidate in ["socks5h://127.0.0.1:10808", "http://127.0.0.1:10808"]:
+        try:
+            import socket
+            s = socket.socket()
+            s.settimeout(0.2)
+            s.connect(("127.0.0.1", 10808))
+            s.close()
+            return candidate
+        except Exception:
+            pass
+
+    import os
+    env_p = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
+    if env_p:
+        if env_p.startswith("socks5://"):
+            return env_p.replace("socks5://", "socks5h://")
+        return env_p
+    return None
+
+
 class TelegramNotifier:
     """
-    Async Telegram notifier.
+    Async Telegram notifier with robust remote DNS socks5h proxy support.
 
     All public methods silently swallow errors when the bot is not
     configured, so callers never need to guard against missing credentials.
     """
 
-    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None):
+    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, proxy: Optional[str] = None):
         self.token = token or ""
         self.chat_id = chat_id or ""
+        self.proxy = proxy or _get_notifier_proxy()
         self._enabled = bool(self.token and self.chat_id)
         if not self._enabled:
             logger.info("TelegramNotifier: token/chat_id not configured — notifications disabled.")
@@ -35,11 +59,15 @@ class TelegramNotifier:
     async def send(self, message: str) -> bool:
         """
         Send a plain-text (Markdown) message to the configured chat.
-
-        Returns True on success, False otherwise.
+        Runs requests in a thread pool for rock-solid socks5h support.
         """
         if not self._enabled:
             return False
+        import asyncio
+        return await asyncio.to_thread(self._send_sync, message)
+
+    def _send_sync(self, message: str) -> bool:
+        import requests
         url = TELEGRAM_API.format(token=self.token)
         payload = {
             "chat_id": self.chat_id,
@@ -47,14 +75,49 @@ class TelegramNotifier:
             "parse_mode": "Markdown",
             "disable_web_page_preview": True,
         }
+        proxies = None
+        if self.proxy:
+            proxies = {"http": self.proxy, "https": self.proxy}
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
+            resp = requests.post(url, json=payload, proxies=proxies, timeout=12)
+            resp.raise_for_status()
             return True
         except Exception as exc:
             logger.warning(f"Telegram send failed: {exc}")
             return False
+
+    async def get_latest_chat_id(self) -> Optional[dict]:
+        """Fetch the most recent incoming message from getUpdates to discover chat_id."""
+        if not self.token:
+            return None
+        import asyncio
+        return await asyncio.to_thread(self._get_latest_chat_id_sync)
+
+    def _get_latest_chat_id_sync(self) -> Optional[dict]:
+        import requests
+        url = f"https://api.telegram.org/bot{self.token}/getUpdates"
+        proxies = None
+        if self.proxy:
+            proxies = {"http": self.proxy, "https": self.proxy}
+        try:
+            r = requests.get(url, proxies=proxies, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                updates = data.get("result", [])
+                if updates:
+                    last = updates[-1]
+                    msg = last.get("message") or last.get("channel_post") or {}
+                    chat = msg.get("chat") or {}
+                    user = msg.get("from") or {}
+                    return {
+                        "chat_id": str(chat.get("id")),
+                        "username": user.get("username") or chat.get("username"),
+                        "first_name": user.get("first_name") or chat.get("title"),
+                        "text": msg.get("text"),
+                    }
+        except Exception as exc:
+            logger.warning(f"Telegram getUpdates failed: {exc}")
+        return None
 
     # ------------------------------------------------------------------
     # Trade notifications

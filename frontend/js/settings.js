@@ -22,6 +22,49 @@ const SettingsManager = (() => {
     // add symbol
     document.getElementById('btnAddSymbol').addEventListener('click', openAddModal);
     document.getElementById('btnSaveSymbol').addEventListener('click', saveSymbol);
+
+    // test telegram
+    const btnTestTg = document.getElementById('btnTestTg');
+    if (btnTestTg) {
+      btnTestTg.addEventListener('click', testTelegramNotification);
+    }
+  }
+
+  // ─── Test Telegram Notification ──────────────────────────────────────
+  async function testTelegramNotification() {
+    const btn = document.getElementById('btnTestTg');
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>测试中…';
+
+    try {
+      // 先保存一次当前填写的 token 和 chat_id
+      const payload = {
+        telegram_token:   document.getElementById('telegramToken').value.trim(),
+        telegram_chat_id: document.getElementById('telegramChatId').value.trim(),
+      };
+      await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const res = await fetch('/api/settings/test-telegram', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || '测试发送失败');
+      }
+
+      if (data.chat_id) {
+        document.getElementById('telegramChatId').value = data.chat_id;
+      }
+      alert('✅ ' + (data.message || 'Telegram 测试消息发送成功！'));
+    } catch (err) {
+      alert('❌ 发送失败:\n' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalText;
+    }
   }
 
   // ─── Load global settings ────────────────────────────────────────────

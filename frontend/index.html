@@ -207,7 +207,13 @@
                   </div>
                   <div class="mb-3">
                     <label class="form-label small">Telegram Chat ID</label>
-                    <input type="text" class="form-control form-control-sm" id="telegramChatId" placeholder="-100xxxxxxx" />
+                    <div class="input-group input-group-sm">
+                      <input type="text" class="form-control" id="telegramChatId" placeholder="chat id (或留空点击右侧测试自动获取)" />
+                      <button class="btn btn-outline-info" type="button" id="btnTestTg" title="测试发送或自动获取 Chat ID">
+                        <i class="fa-solid fa-paper-plane me-1"></i>测试
+                      </button>
+                    </div>
+                    <div class="form-text text-secondary" style="font-size:11px">在 Telegram 给 @gemini_tony_auto_bot 发消息后点击“测试”可自动识别</div>
                   </div>
                   <div class="mb-3">
                     <label class="form-label small">交易模式</label>
@@ -580,9 +586,9 @@
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/chart.js?v=20261123_02"></script>
-<script src="js/settings.js?v=20261123_02"></script>
-<script src="js/backtest.js?v=20261123_02"></script>
-<script src="js/app.js?v=20261123_02"></script>
+<script src="js/chart.js?v=20261123_03"></script>
+<script src="js/settings.js?v=20261123_03"></script>
+<script src="js/backtest.js?v=20261123_03"></script>
+<script src="js/app.js?v=20261123_03"></script>
 </body>
 </html>

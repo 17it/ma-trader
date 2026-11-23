@@ -120,3 +120,54 @@ def delete_symbol(symbol_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol config not found.")
     db.delete(obj)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Telegram Test Route
+# ---------------------------------------------------------------------------
+
+@router.post("/settings/test-telegram", summary="Test Telegram notification")
+async def test_telegram_notification(db: Session = Depends(get_db)):
+    from notifier import TelegramNotifier
+    from config import get_setting, set_setting
+
+    token = get_setting(db, "telegram_token", "") or ""
+    chat_id = get_setting(db, "telegram_chat_id", "") or ""
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先配置 Telegram Token！"
+        )
+
+    notifier = TelegramNotifier(token=token, chat_id=chat_id)
+
+    # If chat_id not configured, try auto-discovery via getUpdates
+    if not chat_id:
+        discovered = await notifier.get_latest_chat_id()
+        if discovered and discovered.get("chat_id"):
+            chat_id = discovered["chat_id"]
+            set_setting(db, "telegram_chat_id", chat_id)
+            db.commit()
+            notifier.chat_id = chat_id
+            notifier._enabled = True
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="未检测到 Telegram Chat ID！请打开 Telegram 搜索您的机器人（@gemini_tony_auto_bot）并发送 /start 或任意消息，然后再次点击测试。"
+            )
+
+    msg = (
+        "🚀 *MA Trader 通知系统测试*\n\n"
+        "✅ Telegram 交易机器人已成功连接！\n"
+        "📈 后续实盘/模拟交易的开仓、平仓、止盈止损均会实时推送到此。\n"
+        "⏱ 发送时间: 刚刚"
+    )
+    ok = await notifier.send(msg)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="消息发送失败，请检查网络/代理或 Bot 权限设置。"
+        )
+
+    return {"status": "success", "chat_id": chat_id, "message": "测试消息发送成功！请检查您的 Telegram。"}
