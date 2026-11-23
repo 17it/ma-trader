@@ -38,8 +38,9 @@ const SettingsManager = (() => {
     btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>测试中…';
 
     try {
-      // 先保存一次当前填写的 token 和 chat_id
+      // 先保存一次当前填写的代理、token 和 chat_id
       const payload = {
+        http_proxy:       (document.getElementById('httpProxy')?.value || '').trim(),
         telegram_token:   document.getElementById('telegramToken').value.trim(),
         telegram_chat_id: document.getElementById('telegramChatId').value.trim(),
       };

@@ -13,32 +13,44 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
-def _get_notifier_proxy() -> Optional[str]:
-    """Auto-detect proxy for Telegram API requests, preferring local xray socks5h."""
-    # Test local xray proxy first (socks5h ensures remote DNS resolution)
-    for candidate in ["socks5h://127.0.0.1:10808", "http://127.0.0.1:10808"]:
-        try:
-            import socket
-            s = socket.socket()
-            s.settimeout(0.2)
-            s.connect(("127.0.0.1", 10808))
-            s.close()
-            return candidate
-        except Exception:
-            pass
+def _get_configured_proxy(for_requests: bool = True) -> Optional[str]:
+    """
+    Retrieve user-configured proxy from database settings or environment.
+    No hardcoded proxy addresses.
+    If for_requests=True and proxy starts with socks5://, converts to socks5h://
+    for remote DNS resolution (prevents DNS poisoning).
+    """
+    proxy = ""
+    try:
+        from database import SessionLocal, SettingModel
+        db = SessionLocal()
+        setting = db.query(SettingModel).filter(SettingModel.key == "http_proxy").first()
+        if setting and setting.value and setting.value.strip():
+            proxy = setting.value.strip()
+        db.close()
+    except Exception:
+        pass
 
-    import os
-    env_p = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
-    if env_p:
-        if env_p.startswith("socks5://"):
-            return env_p.replace("socks5://", "socks5h://")
-        return env_p
-    return None
+    if not proxy:
+        import os
+        proxy = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("ALL_PROXY")
+            or ""
+        ).strip()
+
+    if not proxy:
+        return None
+
+    if for_requests and proxy.startswith("socks5://"):
+        return "socks5h://" + proxy[len("socks5://"):]
+    return proxy
 
 
 class TelegramNotifier:
     """
-    Async Telegram notifier with robust remote DNS socks5h proxy support.
+    Async Telegram notifier with proxy support from global settings.
 
     All public methods silently swallow errors when the bot is not
     configured, so callers never need to guard against missing credentials.
@@ -47,7 +59,8 @@ class TelegramNotifier:
     def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, proxy: Optional[str] = None):
         self.token = token or ""
         self.chat_id = chat_id or ""
-        self.proxy = proxy or _get_notifier_proxy()
+        self.proxy = proxy or _get_configured_proxy(for_requests=True)
+        self.last_error: Optional[str] = None
         self._enabled = bool(self.token and self.chat_id)
         if not self._enabled:
             logger.info("TelegramNotifier: token/chat_id not configured — notifications disabled.")
@@ -59,7 +72,7 @@ class TelegramNotifier:
     async def send(self, message: str) -> bool:
         """
         Send a plain-text (Markdown) message to the configured chat.
-        Runs requests in a thread pool for rock-solid socks5h support.
+        Runs requests in a thread pool for rock-solid socks5h remote DNS support.
         """
         if not self._enabled:
             return False
@@ -81,9 +94,11 @@ class TelegramNotifier:
         try:
             resp = requests.post(url, json=payload, proxies=proxies, timeout=12)
             resp.raise_for_status()
+            self.last_error = None
             return True
         except Exception as exc:
-            logger.warning(f"Telegram send failed: {exc}")
+            self.last_error = str(exc)
+            logger.warning(f"Telegram send failed (proxy={self.proxy}): {exc}")
             return False
 
     async def get_latest_chat_id(self) -> Optional[dict]:
@@ -116,7 +131,8 @@ class TelegramNotifier:
                         "text": msg.get("text"),
                     }
         except Exception as exc:
-            logger.warning(f"Telegram getUpdates failed: {exc}")
+            self.last_error = str(exc)
+            logger.warning(f"Telegram getUpdates failed (proxy={self.proxy}): {exc}")
         return None
 
     # ------------------------------------------------------------------

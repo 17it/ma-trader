@@ -133,23 +133,28 @@ def find_missing_intervals(
 
 
 def _get_active_proxy() -> Optional[str]:
-    """Auto-detect working proxy from env or local xray proxy."""
-    import os
-    env_p = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
-    if env_p:
-        return env_p
-    # Test local xray proxy at 10808
-    for candidate in ["socks5://127.0.0.1:10808", "http://127.0.0.1:10808"]:
-        try:
-            import socket
-            s = socket.socket()
-            s.settimeout(0.2)
-            s.connect(("127.0.0.1", 10808))
-            s.close()
-            return candidate
-        except Exception:
-            pass
-    return None
+    """Auto-detect proxy from user settings in DB or environment. No hardcoded addresses."""
+    proxy = ""
+    try:
+        from database import SessionLocal, SettingModel
+        db = SessionLocal()
+        setting = db.query(SettingModel).filter(SettingModel.key == "http_proxy").first()
+        if setting and setting.value and setting.value.strip():
+            proxy = setting.value.strip()
+        db.close()
+    except Exception:
+        pass
+
+    if not proxy:
+        import os
+        proxy = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("ALL_PROXY")
+            or ""
+        ).strip()
+
+    return proxy if proxy else None
 
 
 def _fetch_interval_from_network(
