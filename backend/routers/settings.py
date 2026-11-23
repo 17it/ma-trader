@@ -43,6 +43,7 @@ def read_settings(db: Session = Depends(get_db)):
 
 
 @router.put("/settings", summary="Bulk update settings")
+@router.post("/settings", summary="Bulk update settings (POST fallback for Nginx/CDN)")
 def write_settings(body: dict, db: Session = Depends(get_db)):
     # Support both flat JSON object and {"settings": {...}}
     if "settings" in body and isinstance(body["settings"], dict):
@@ -95,6 +96,7 @@ def create_symbol(body: SymbolConfigCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/symbols/{symbol_id}", response_model=SymbolConfigResponse, summary="Update symbol config")
+@router.post("/symbols/{symbol_id}", response_model=SymbolConfigResponse, summary="Update symbol config (POST fallback)")
 def update_symbol(symbol_id: int, body: SymbolConfigUpdate, db: Session = Depends(get_db)):
     obj = db.query(SymbolConfig).filter(SymbolConfig.id == symbol_id).first()
     if not obj:

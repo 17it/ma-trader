@@ -45,13 +45,20 @@ const SettingsManager = (() => {
         telegram_chat_id: document.getElementById('telegramChatId').value.trim(),
       };
       await fetch('/api/settings', {
-        method: 'PUT',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
       const res = await fetch('/api/settings/test-telegram', { method: 'POST' });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data = {};
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        const match = rawText.match(/<title>(.*?)<\/title>/i);
+        throw new Error(`服务器网关异常 (HTTP ${res.status}): ${match ? match[1] : rawText.slice(0, 100)}`);
+      }
       if (!res.ok) {
         throw new Error(data.detail || '测试发送失败');
       }
@@ -103,11 +110,19 @@ const SettingsManager = (() => {
 
     try {
       const res = await fetch('/api/settings', {
-        method: 'PUT',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data = {};
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        const match = rawText.match(/<title>(.*?)<\/title>/i);
+        throw new Error(`服务器网关异常 (HTTP ${res.status}): ${match ? match[1] : rawText.slice(0, 100)}`);
+      }
+
       if (!res.ok) {
         throw new Error(data.detail || `HTTP ${res.status}: 数据库写入失败`);
       }
@@ -268,7 +283,7 @@ const SettingsManager = (() => {
       let res;
       if (editingId) {
         res = await fetch(`/api/symbols/${editingId}`, {
-          method: 'PUT',
+          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
