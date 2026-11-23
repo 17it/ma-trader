@@ -62,33 +62,21 @@ ma-trader/
 
 ---
 
-## 🚀 Ubuntu 服务器部署指南
+## 🚀 Ubuntu 服务器一键极速部署（推荐）
 
-### 1. 系统环境与依赖准备
-
-```bash
-# 更新系统包
-sudo apt update && sudo apt upgrade -y
-
-# 安装 Python 3、pip、venv 与 git
-sudo apt install -y python3 python3-pip python3-venv git
-```
-
-### 2. 进入项目并一键启动
+进入项目目录后，直接执行内置的一键安装脚本，全自动安装依赖、创建虚拟环境并配置 Systemd 后台自启服务：
 
 ```bash
-cd /path/to/ma-trader
+cd ma-trader
 
-# 赋予启动脚本执行权限
-chmod +x run.sh
-
-# 首次运行：自动创建虚拟环境、安装依赖并启动
-./run.sh
+# 赋予执行权限并运行一键安装脚本
+chmod +x install.sh
+./install.sh
 ```
 
-> **开发模式（热重载）**：`./run.sh --reload`
+脚本运行完毕后，即可直接在浏览器打开：`http://你的服务器IP:8080`。
 
-启动成功后，浏览器打开：`http://你的服务器IP:8080` 即可访问 Web 控制面板。
+详细手动部署与 Nginx 反向代理配置见：[DEPLOY.md](DEPLOY.md)。
 
 ---
 
