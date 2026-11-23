@@ -174,12 +174,13 @@ class Backtester:
         trade_direction: Optional[str] = None
         trade_entry: float = 0.0
         trade_sl: float = 0.0
-        trade_tp: float = 0.0
+        trade_tp: float = 0.0        # activation threshold (1.5R level), not fixed exit
         trade_qty: float = 0.0
         trade_entry_time: Optional[int] = None
         trade_entry_idx: int = 0
         confirm_count: int = 0
         pending_direction: Optional[str] = None
+        trailing_active: bool = False  # True after price hits rr_ratio * R → break-even locked
 
         min_idx = 60  # need at least 60 bars for MA60
 
@@ -209,71 +210,141 @@ class Backtester:
             # ---- If in a trade, check exit conditions ----
             if in_trade:
                 if trade_direction == "long":
-                    if l <= trade_sl:
-                        exit_price = trade_sl
-                        pnl = (exit_price - trade_entry) * trade_qty
-                        pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                        capital += pnl
-                        trades_result.append({
-                            "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                            "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                            "direction": "long",
-                            "entry_price": trade_entry,
-                            "exit_price": exit_price,
-                            "pnl": round(pnl, 4),
-                            "pnl_pct": round(pnl_pct, 2),
-                            "result": "loss",
-                        })
-                        in_trade = False
-                    elif h >= trade_tp:
-                        exit_price = trade_tp
-                        pnl = (exit_price - trade_entry) * trade_qty
-                        pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                        capital += pnl
-                        trades_result.append({
-                            "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                            "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                            "direction": "long",
-                            "entry_price": trade_entry,
-                            "exit_price": exit_price,
-                            "pnl": round(pnl, 4),
-                            "pnl_pct": round(pnl_pct, 2),
-                            "result": "win",
-                        })
-                        in_trade = False
+                    if not trailing_active:
+                        # Phase 1: waiting to hit rr_ratio * R activation threshold
+                        if l <= trade_sl:
+                            # Stop loss hit → loss
+                            exit_price = trade_sl
+                            pnl = (exit_price - trade_entry) * trade_qty
+                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
+                            capital += pnl
+                            trades_result.append({
+                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
+                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
+                                "direction": "long",
+                                "entry_price": trade_entry,
+                                "exit_price": exit_price,
+                                "pnl": round(pnl, 4),
+                                "pnl_pct": round(pnl_pct, 2),
+                                "result": "loss",
+                            })
+                            in_trade = False
+                            trailing_active = False
+                        elif h >= trade_tp:
+                            # Profit hit rr_ratio * R → lock break-even, switch to trailing mode
+                            trade_sl = trade_entry  # move SL to break-even
+                            trailing_active = True
+                            # Do NOT exit; let profit run with MA7 trailing
+                    else:
+                        # Phase 2: trailing mode — SL is at break-even or higher
+                        if l <= trade_sl:
+                            # Trailing SL hit (break-even or above) → exit
+                            exit_price = trade_sl
+                            pnl = (exit_price - trade_entry) * trade_qty
+                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
+                            capital += pnl
+                            trades_result.append({
+                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
+                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
+                                "direction": "long",
+                                "entry_price": trade_entry,
+                                "exit_price": exit_price,
+                                "pnl": round(pnl, 4),
+                                "pnl_pct": round(pnl_pct, 2),
+                                "result": "win" if pnl >= 0 else "loss",
+                            })
+                            in_trade = False
+                            trailing_active = False
+                        elif c < ma7:
+                            # Price closed below MA7 → trend over, exit at close
+                            exit_price = c
+                            pnl = (exit_price - trade_entry) * trade_qty
+                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
+                            capital += pnl
+                            trades_result.append({
+                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
+                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
+                                "direction": "long",
+                                "entry_price": trade_entry,
+                                "exit_price": exit_price,
+                                "pnl": round(pnl, 4),
+                                "pnl_pct": round(pnl_pct, 2),
+                                "result": "win" if pnl >= 0 else "loss",
+                            })
+                            in_trade = False
+                            trailing_active = False
+                        else:
+                            # Still above MA7 → keep trailing: raise SL to follow MA7 upward
+                            if not math.isnan(ma7):
+                                trade_sl = max(trade_sl, ma7 * 0.9995)
                 else:  # short
-                    if h >= trade_sl:
-                        exit_price = trade_sl
-                        pnl = (trade_entry - exit_price) * trade_qty
-                        pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                        capital += pnl
-                        trades_result.append({
-                            "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                            "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                            "direction": "short",
-                            "entry_price": trade_entry,
-                            "exit_price": exit_price,
-                            "pnl": round(pnl, 4),
-                            "pnl_pct": round(pnl_pct, 2),
-                            "result": "loss",
-                        })
-                        in_trade = False
-                    elif l <= trade_tp:
-                        exit_price = trade_tp
-                        pnl = (trade_entry - exit_price) * trade_qty
-                        pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                        capital += pnl
-                        trades_result.append({
-                            "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                            "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                            "direction": "short",
-                            "entry_price": trade_entry,
-                            "exit_price": exit_price,
-                            "pnl": round(pnl, 4),
-                            "pnl_pct": round(pnl_pct, 2),
-                            "result": "win",
-                        })
-                        in_trade = False
+                    if not trailing_active:
+                        # Phase 1: waiting to hit rr_ratio * R activation threshold
+                        if h >= trade_sl:
+                            # Stop loss hit → loss
+                            exit_price = trade_sl
+                            pnl = (trade_entry - exit_price) * trade_qty
+                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
+                            capital += pnl
+                            trades_result.append({
+                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
+                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
+                                "direction": "short",
+                                "entry_price": trade_entry,
+                                "exit_price": exit_price,
+                                "pnl": round(pnl, 4),
+                                "pnl_pct": round(pnl_pct, 2),
+                                "result": "loss",
+                            })
+                            in_trade = False
+                            trailing_active = False
+                        elif l <= trade_tp:
+                            # Profit hit rr_ratio * R → lock break-even, switch to trailing mode
+                            trade_sl = trade_entry  # move SL to break-even
+                            trailing_active = True
+                            # Do NOT exit; let profit run with MA7 trailing
+                    else:
+                        # Phase 2: trailing mode — SL is at break-even or lower (for short)
+                        if h >= trade_sl:
+                            # Trailing SL hit → exit
+                            exit_price = trade_sl
+                            pnl = (trade_entry - exit_price) * trade_qty
+                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
+                            capital += pnl
+                            trades_result.append({
+                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
+                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
+                                "direction": "short",
+                                "entry_price": trade_entry,
+                                "exit_price": exit_price,
+                                "pnl": round(pnl, 4),
+                                "pnl_pct": round(pnl_pct, 2),
+                                "result": "win" if pnl >= 0 else "loss",
+                            })
+                            in_trade = False
+                            trailing_active = False
+                        elif c > ma7:
+                            # Price closed above MA7 → trend over, exit at close
+                            exit_price = c
+                            pnl = (trade_entry - exit_price) * trade_qty
+                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
+                            capital += pnl
+                            trades_result.append({
+                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
+                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
+                                "direction": "short",
+                                "entry_price": trade_entry,
+                                "exit_price": exit_price,
+                                "pnl": round(pnl, 4),
+                                "pnl_pct": round(pnl_pct, 2),
+                                "result": "win" if pnl >= 0 else "loss",
+                            })
+                            in_trade = False
+                            trailing_active = False
+                        else:
+                            # Still below MA7 → keep trailing: lower SL to follow MA7 downward
+                            if not math.isnan(ma7):
+                                trade_sl = min(trade_sl, ma7 * 1.0005)
 
             # ---- If not in a trade, look for signals ----
             if not in_trade:
@@ -329,6 +400,7 @@ class Backtester:
 
                     if trade_qty > 0:
                         in_trade = True
+                        trailing_active = False
                         pending_direction = None
                         confirm_count = 0
 
