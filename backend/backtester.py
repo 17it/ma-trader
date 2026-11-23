@@ -33,38 +33,25 @@ def _is_short_aligned(ma7: float, ma25: float, ma60: float) -> bool:
 
 
 def _fetch_ohlcv_all(exchange, symbol: str, timeframe: str, since_ms: int, until_ms: int) -> list:
-    """Fetch all OHLCV bars in [since_ms, until_ms) using incremental SQLite cache with synthetic fallback."""
+    """
+    Fetch all OHLCV bars in [since_ms, until_ms) using incremental SQLite cache.
+    Raises an explicit error if real market data cannot be obtained.
+    No synthetic/mock data fallback allowed.
+    """
+    from backtest_cache import load_ohlcv_with_cache
     try:
-        from backtest_cache import load_ohlcv_with_cache
         result = load_ohlcv_with_cache(exchange, symbol, timeframe, since_ms, until_ms)
-        if len(result) >= 70:
-            return result
     except Exception as exc:
-        logger.warning(f"[Backtest Cache] Cache/Fetch failed: {exc}")
+        logger.error(f"[Backtest] Failed to load OHLCV data for {symbol} {timeframe}: {exc}")
+        raise RuntimeError(f"获取真实K线数据失败: {symbol} {timeframe} ({exc})，请检查网络或代理设置。")
 
-    # Fallback only if both network and cache failed to yield sufficient bars
-    import random
-    step_ms = _timeframe_to_ms(timeframe)
-    base_price = 59350.0 if "BTC" in symbol else 3120.0
-    cur = base_price
-    ts = since_ms
-    # Calculate bars needed across date range with multi-phase bull and bear trends
-    total_bars_needed = max(300, min(8000, (until_ms - since_ms) // step_ms))
-    result = []
-    for i in range(total_bars_needed):
-        # Oscillate trends every 150 bars to produce both multi-hour bull and bear markets
-        cycle = (i // 150) % 2
-        trend = 0.0006 if cycle == 0 else -0.0006
-        noise = (random.random() - 0.49) * 0.0006
-        drift = (trend + noise) * base_price
-        o = cur
-        c = cur + drift
-        h = max(o, c) + random.random() * (base_price * 0.0003)
-        l = min(o, c) - random.random() * (base_price * 0.0003)
-        v = random.uniform(50, 400)
-        cur = c
-        result.append([ts, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)])
-        ts += step_ms
+    if not result or len(result) < 70:
+        bars_count = len(result) if result else 0
+        raise ValueError(
+            f"未能获取到足够的真实K线数据: {symbol} {timeframe} "
+            f"(当前仅获取到 {bars_count} 根，策略计算 MA60 均线至少需要 70 根真实数据)。"
+            f"请检查网络/代理连接，或调整回测日期区间。"
+        )
 
     return result
 
