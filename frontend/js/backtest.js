@@ -31,7 +31,9 @@ const BacktestManager = (() => {
 
   // ─── Run backtest ─────────────────────────────────────────────────────
   async function runBacktest() {
+    const titleVal = document.getElementById('btTitle')?.value?.trim();
     const payload = {
+      title:         titleVal || null,
       symbol:        document.getElementById('btSymbol').value,
       timeframe:     document.getElementById('btTimeframe').value,
       htf_timeframe: document.getElementById('btHtf').value,
@@ -165,6 +167,16 @@ const BacktestManager = (() => {
     });
   }
 
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
   function formatTradeTime(tStr) {
     if (!tStr) return '—';
     try {
@@ -215,10 +227,13 @@ const BacktestManager = (() => {
       const wrVal  = wr != null ? (wr > 1 ? wr : wr * 100).toFixed(1) : '—';
       const wrStr  = wrVal !== '—' ? `${wrVal}%` : '—';
 
+      const titleStr = run.title ? `<span class="fw-semibold text-light">${escapeHtml(run.title)}</span>` : '<span class="text-secondary">—</span>';
+
       const tr = document.createElement('tr');
       tr.style.cursor = 'pointer';
       tr.innerHTML = `
         <td>#${run.id}</td>
+        <td>${titleStr}</td>
         <td>${run.symbol}</td>
         <td>${run.timeframe}</td>
         <td>${run.start_date} ~ ${run.end_date}</td>
@@ -265,11 +280,94 @@ const BacktestManager = (() => {
     }
   }
 
+  function fillParams(run) {
+    if (!run) return;
+    let params = {};
+    if (run.params) {
+      try {
+        params = typeof run.params === 'string' ? JSON.parse(run.params) : run.params;
+      } catch (e) {
+        console.warn('解析 run.params 失败', e);
+      }
+    }
+
+    // 交易对
+    const symbol = run.symbol || params.symbol;
+    if (symbol) {
+      const el = document.getElementById('btSymbol');
+      if (el) {
+        let exists = Array.from(el.options).some(opt => opt.value === symbol);
+        if (!exists) {
+          const opt = document.createElement('option');
+          opt.value = symbol;
+          opt.textContent = symbol;
+          el.appendChild(opt);
+        }
+        el.value = symbol;
+      }
+    }
+
+    // 时间框架
+    const tf = run.timeframe || params.timeframe;
+    if (tf) {
+      const el = document.getElementById('btTimeframe');
+      if (el) el.value = tf;
+    }
+
+    // 高级框架
+    const htf = params.htf_timeframe;
+    if (htf) {
+      const el = document.getElementById('btHtf');
+      if (el) el.value = htf;
+    }
+
+    // 开始/结束日期
+    const startDate = run.start_date || params.start_date;
+    if (startDate) {
+      const el = document.getElementById('btStartDate');
+      if (el) el.value = startDate;
+    }
+    const endDate = run.end_date || params.end_date;
+    if (endDate) {
+      const el = document.getElementById('btEndDate');
+      if (el) el.value = endDate;
+    }
+
+    // 回测标题
+    const title = run.title ?? params.title ?? '';
+    const titleEl = document.getElementById('btTitle');
+    if (titleEl) titleEl.value = title;
+
+    // 确认K线
+    const confirmCandles = params.confirm_candles;
+    if (confirmCandles != null) {
+      const el = document.getElementById('btConfirm');
+      const label = document.getElementById('btConfirmLabel');
+      if (el) el.value = confirmCandles;
+      if (label) label.textContent = confirmCandles;
+    }
+
+    // 盈亏比
+    const rr = params.rr_ratio;
+    if (rr != null) {
+      const el = document.getElementById('btRR');
+      if (el) el.value = rr;
+    }
+
+    // 初始资金
+    const cap = params.initial_capital;
+    if (cap != null) {
+      const el = document.getElementById('btCapital');
+      if (el) el.value = cap;
+    }
+  }
+
   async function viewRun(id) {
     try {
       const res = await fetch(`/api/backtest/${id}`);
       if (!res.ok) return;
       const run = await res.json();
+      fillParams(run);
       displayResults(run);
       document.getElementById('btResults').scrollIntoView({ behavior: 'smooth' });
       setTimeout(() => BacktestChart.resize(), 80);

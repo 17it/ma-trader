@@ -103,6 +103,7 @@ class TradeResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class BacktestRunCreate(BaseModel):
+    title: Optional[str] = Field(None, example="5m/15m趋势追踪测试")
     symbol: str = Field(..., example="BTCUSDT")
     timeframe: str = Field("1m", example="1m")
     htf_timeframe: str = Field("15m", example="15m")
@@ -124,6 +125,7 @@ class BacktestRunCreate(BaseModel):
 
 class BacktestRunResponse(BaseModel):
     id: int
+    title: Optional[str] = None
     symbol: str
     timeframe: str
     start_date: str

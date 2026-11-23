@@ -23,7 +23,12 @@ router = APIRouter(tags=["backtest"])
 def _get_exchange(request: Request):
     """Build exchange from cached config or anonymous ccxt client with proxy support."""
     import ccxt, os
-    cfg = request.app.state.config.get_all_cached()
+    cfg = {}
+    try:
+        if hasattr(request.app.state, "config") and request.app.state.config:
+            cfg = request.app.state.config.get_all_cached()
+    except Exception:
+        pass
     key = cfg.get("binance_key", "")
     secret = cfg.get("binance_secret", "")
     try:
@@ -97,6 +102,7 @@ async def create_backtest(
                 params[k] = v
 
     run = BacktestRun(
+        title=body.title.strip() if body.title and body.title.strip() else None,
         symbol=body.symbol.upper(),
         timeframe=body.timeframe,
         start_date=body.start_date,

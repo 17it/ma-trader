@@ -82,6 +82,7 @@ class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String, nullable=True)                      # 用户自定义回测标题/备注
     symbol = Column(String)
     timeframe = Column(String)
     start_date = Column(String)
