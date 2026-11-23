@@ -30,6 +30,11 @@ const ChartManager = (() => {
   let volumeChart = null;
   let currentData = { klines: [], trades: [] };
   let currentZoom = null;
+  let onReachStartCallback = null;
+
+  function setOnReachStart(callback) {
+    onReachStartCallback = callback;
+  }
 
   // ─── Init ───────────────────────────────────────────────────────────
   function init() {
@@ -52,12 +57,23 @@ const ChartManager = (() => {
 
     // Link zoom between charts and remember user's current zoom window
     klineChart.on('datazoom', (evt) => {
+      let start = 0;
+      let end = 100;
       if (evt.batch && evt.batch.length > 0) {
         currentZoom = { start: evt.batch[0].start, end: evt.batch[0].end };
+        start = evt.batch[0].start ?? 0;
+        end = evt.batch[0].end ?? 100;
       } else if (evt.start !== undefined && evt.end !== undefined) {
         currentZoom = { start: evt.start, end: evt.end };
+        start = evt.start;
+        end = evt.end;
       }
       volumeChart?.dispatchAction({ type: 'dataZoom', ...evt });
+
+      // When user drags / scrolls to the leftmost edge (history start), trigger load more
+      if (start <= 0.8 && onReachStartCallback) {
+        onReachStartCallback();
+      }
     });
 
     window.addEventListener('resize', () => {
@@ -326,12 +342,55 @@ const ChartManager = (() => {
         last.volume = v;
       }
     } else if (candleTime > lastTime) {
-      // New candle opened, append and keep window size
+      // New candle opened, append and keep window size (allow up to 2000 candles for smooth history navigation)
       klines.push([candleTime, o, h, l, c, v]);
-      if (klines.length > 300) klines.shift();
+      if (klines.length > 2000) klines.shift();
     }
 
     render(klines, currentData.trades);
+  }
+
+  // ─── Prepend older history candles (Lazy-loading on scroll to start) 
+  function prependHistory(olderBars) {
+    if (!olderBars || !olderBars.length) return false;
+    if (!currentData.klines || !currentData.klines.length) {
+      render(olderBars, currentData.trades);
+      return true;
+    }
+
+    const firstCandle = currentData.klines[0];
+    const firstTime = Array.isArray(firstCandle) ? firstCandle[0] : (firstCandle.time ?? firstCandle.t ?? 0);
+    const firstTimeMs = typeof firstTime === 'string' ? new Date(firstTime).getTime() : Number(firstTime);
+
+    // Only keep bars older than our earliest candle
+    const validOlder = olderBars.filter(bar => {
+      const t = Array.isArray(bar) ? bar[0] : (bar.time ?? bar.t ?? 0);
+      const ms = typeof t === 'string' ? new Date(t).getTime() : Number(t);
+      return ms < firstTimeMs;
+    });
+
+    if (!validOlder.length) return false;
+
+    const oldLen = currentData.klines.length;
+    const addLen = validOlder.length;
+    const newLen = oldLen + addLen;
+
+    // Prepend older candles
+    currentData.klines = [...validOlder, ...currentData.klines];
+
+    // Maintain current visible window position smoothly without jump
+    const oldStart = currentZoom?.start ?? 0;
+    const oldEnd = currentZoom?.end ?? 100;
+    const idxStart = (oldStart / 100) * oldLen + addLen;
+    const idxEnd = (oldEnd / 100) * oldLen + addLen;
+
+    currentZoom = {
+      start: Math.max(0, Math.min(100, (idxStart / newLen) * 100)),
+      end: Math.max(0, Math.min(100, (idxEnd / newLen) * 100))
+    };
+
+    render(currentData.klines, currentData.trades);
+    return true;
   }
 
   // ─── Update theme ──────────────────────────────────────────────────
@@ -342,7 +401,7 @@ const ChartManager = (() => {
     }
   }
 
-  return { init, render, highlightTrade, appendCandle, updateTheme };
+  return { init, render, highlightTrade, appendCandle, prependHistory, setOnReachStart, updateTheme };
 })();
 
 // ─── Stats charts ─────────────────────────────────────────────────────

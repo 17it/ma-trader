@@ -309,6 +309,7 @@ async def get_klines(
     request: Request,
     timeframe: str = Query("1m"),
     limit: int = Query(200, ge=10, le=1000),
+    endTime: Optional[int] = Query(None, description="毫秒时间戳，获取早于此时间的K线"),
 ):
     """
     Return OHLCV + MA7/MA25/MA60 data for charting.
@@ -343,7 +344,7 @@ async def get_klines(
         tf_val = "1m"
 
     raw = []
-    if exchange is not None:
+    if exchange is not None and not endTime:
         try:
             raw = exchange.fetch_ohlcv(symbol, tf_val, limit=limit_val + 60)
         except Exception as exc:
@@ -352,9 +353,11 @@ async def get_klines(
     # Fallback 1: Query public Binance Vision API (no geo restriction / 451 block)
     if not raw:
         clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
+        fetch_limit = limit_val if endTime else (limit_val + 60)
+        end_time_param = f"&endTime={endTime}" if endTime else ""
         endpoints = [
-            f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={limit_val + 60}",
-            f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={limit_val + 60}",
+            f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={fetch_limit}{end_time_param}",
+            f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={fetch_limit}{end_time_param}",
         ]
         proxy = (cfg.get("http_proxy") or "").strip()
         proxies = None
@@ -415,5 +418,5 @@ async def get_klines(
             "ma60": ma60[i],
         })
 
-    # Return only the last `limit` bars
-    return {"symbol": symbol, "timeframe": tf_val, "data": data[-limit_val:]}
+    # Return full data if paging history (endTime), otherwise last `limit` bars
+    return {"symbol": symbol, "timeframe": tf_val, "data": data if endTime else data[-limit_val:]}

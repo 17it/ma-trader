@@ -15,7 +15,9 @@ const AppController = (() => {
     ws: null,
     wsPingInterval: null,
     wsReconnectTimeout: null,
-    klinesData: []
+    klinesData: [],
+    isLoadingHistory: false,
+    hasMoreHistory: true
   };
 
   // ─── Initialization ────────────────────────────────────────────────
@@ -26,7 +28,12 @@ const AppController = (() => {
     setupTheme();
 
     // 1. Init Sub-managers
-    if (typeof ChartManager !== 'undefined') ChartManager.init();
+    if (typeof ChartManager !== 'undefined') {
+      ChartManager.init();
+      ChartManager.setOnReachStart(() => {
+        loadMoreHistoryKlines();
+      });
+    }
     if (typeof SettingsManager !== 'undefined') SettingsManager.init();
     if (typeof BacktestManager !== 'undefined') BacktestManager.init();
 
@@ -160,6 +167,8 @@ const AppController = (() => {
     if (!symbol) return;
     symbol = symbol.toUpperCase();
     state.currentSymbol = symbol;
+    state.hasMoreHistory = true;
+    state.isLoadingHistory = false;
 
     const label = document.getElementById('chartSymbolLabel');
     if (label) label.textContent = symbol;
@@ -192,6 +201,8 @@ const AppController = (() => {
   function switchTimeframe(tf) {
     if (!tf) return;
     state.currentTimeframe = tf;
+    state.hasMoreHistory = true;
+    state.isLoadingHistory = false;
 
     document.querySelectorAll('#tfBtns .tf-btn').forEach(btn => {
       if (btn.dataset.tf === tf) {
@@ -298,6 +309,55 @@ const AppController = (() => {
       }
     } catch (err) {
       console.warn('[App] Load klines error:', err);
+    }
+  }
+
+  // ─── Lazy-load earlier history candles when user scrolls to leftmost edge ────
+  async function loadMoreHistoryKlines() {
+    if (state.isLoadingHistory || !state.hasMoreHistory) return;
+    if (!state.klinesData || state.klinesData.length === 0) return;
+
+    state.isLoadingHistory = true;
+    try {
+      const firstCandle = state.klinesData[0];
+      const rawTime = Array.isArray(firstCandle) ? firstCandle[0] : (firstCandle.time ?? firstCandle.t);
+      const oldestTs = typeof rawTime === 'string' ? new Date(rawTime).getTime() : Number(rawTime);
+      if (!oldestTs || isNaN(oldestTs)) {
+        state.isLoadingHistory = false;
+        return;
+      }
+
+      const url = `/api/klines/${state.currentSymbol}?timeframe=${state.currentTimeframe}&limit=100&endTime=${oldestTs - 1}`;
+      console.log(`[App] Requesting earlier history klines: endTime=${oldestTs - 1}`);
+
+      const res = await fetch(url);
+      if (!res.ok) {
+        console.warn('[App] Load more history HTTP error:', res.status);
+        state.isLoadingHistory = false;
+        return;
+      }
+
+      const body = await res.json();
+      const olderData = body.data || [];
+      if (!olderData.length) {
+        console.log('[App] No more history klines returned from exchange.');
+        state.hasMoreHistory = false;
+      } else {
+        const added = ChartManager.prependHistory(olderData);
+        if (added) {
+          state.klinesData = [...olderData, ...state.klinesData];
+          console.log(`[App] Loaded ${olderData.length} earlier candles. Total: ${state.klinesData.length}`);
+        } else {
+          state.hasMoreHistory = false;
+        }
+      }
+    } catch (err) {
+      console.warn('[App] Load more history exception:', err);
+    } finally {
+      // Small cooldown to prevent scroll bouncing
+      setTimeout(() => {
+        state.isLoadingHistory = false;
+      }, 400);
     }
   }
 
