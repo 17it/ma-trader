@@ -29,6 +29,7 @@ const ChartManager = (() => {
   let klineChart = null;
   let volumeChart = null;
   let currentData = { klines: [], trades: [] };
+  let currentZoom = null;
 
   // ─── Init ───────────────────────────────────────────────────────────
   function init() {
@@ -49,8 +50,13 @@ const ChartManager = (() => {
     klineChart  = echarts.init(klineEl,  cfg.echartsTheme, { renderer: 'canvas' });
     volumeChart = echarts.init(volEl,    cfg.echartsTheme, { renderer: 'canvas' });
 
-    // Link zoom between charts
+    // Link zoom between charts and remember user's current zoom window
     klineChart.on('datazoom', (evt) => {
+      if (evt.batch && evt.batch.length > 0) {
+        currentZoom = { start: evt.batch[0].start, end: evt.batch[0].end };
+      } else if (evt.start !== undefined && evt.end !== undefined) {
+        currentZoom = { start: evt.start, end: evt.end };
+      }
       volumeChart?.dispatchAction({ type: 'dataZoom', ...evt });
     });
 
@@ -199,10 +205,23 @@ const ChartManager = (() => {
         splitLine: { lineStyle: { color: cfg.splitLine } }
       },
       dataZoom: [
-        { type: 'inside', start: Math.max(0, 100 - 10000 / norm.length), end: 100 },
-        { type: 'slider', height: 20, bottom: 0, borderColor: cfg.sliderBorder,
-          fillerColor: cfg.sliderFiller, handleStyle: { color: cfg.sliderHandle },
-          textStyle: { color: cfg.axisLabel, fontSize: 10 }, labelFormatter: () => '' }
+        {
+          type: 'inside',
+          start: currentZoom?.start ?? Math.max(0, 100 - 10000 / norm.length),
+          end: currentZoom?.end ?? 100
+        },
+        {
+          type: 'slider',
+          height: 20,
+          bottom: 0,
+          start: currentZoom?.start ?? Math.max(0, 100 - 10000 / norm.length),
+          end: currentZoom?.end ?? 100,
+          borderColor: cfg.sliderBorder,
+          fillerColor: cfg.sliderFiller,
+          handleStyle: { color: cfg.sliderHandle },
+          textStyle: { color: cfg.axisLabel, fontSize: 10 },
+          labelFormatter: () => ''
+        }
       ],
       series: [
         {
@@ -271,18 +290,47 @@ const ChartManager = (() => {
     klineChart.dispatchAction({ type: 'dataZoom', startValue: Math.max(0, idx - 20), endValue: Math.min(norm.length - 1, idx + 20) });
   }
 
-  // ─── Append a new live candle / update last ─────────────────────────
+  // ─── Append a new live candle / update last from WebSocket ─────────
   function appendCandle(candle) {
-    // candle: {t,o,h,l,c,v}
+    if (!candle) return;
+    if (!currentData.klines || !currentData.klines.length) {
+      render([candle], currentData.trades);
+      return;
+    }
     const { klines } = currentData;
     const last = klines[klines.length - 1];
-    const candleTime = typeof candle.t === 'string' ? new Date(candle.t).getTime() : candle.t;
-    if (last && Math.abs((Array.isArray(last) ? last[0] : last.t) - candleTime) < 90000) {
-      klines[klines.length - 1] = candle;
-    } else {
-      klines.push(candle);
-      if (klines.length > 500) klines.shift();
+
+    const t = candle.time ?? candle.t ?? candle.timestamp ?? (Array.isArray(candle) ? candle[0] : 0);
+    const o = +(candle.open ?? candle.o ?? (Array.isArray(candle) ? candle[1] : 0));
+    const h = +(candle.high ?? candle.h ?? (Array.isArray(candle) ? candle[2] : 0));
+    const l = +(candle.low ?? candle.l ?? (Array.isArray(candle) ? candle[3] : 0));
+    const c = +(candle.close ?? candle.c ?? (Array.isArray(candle) ? candle[4] : 0));
+    const v = +(candle.volume ?? candle.v ?? (Array.isArray(candle) ? candle[5] : 0));
+
+    const candleTime = typeof t === 'string' ? new Date(t).getTime() : Number(t);
+    const rawLastTime = Array.isArray(last) ? last[0] : (last.time ?? last.t);
+    const lastTime = typeof rawLastTime === 'string' ? new Date(rawLastTime).getTime() : Number(rawLastTime);
+
+    // If candle belongs to same period/timestamp, update it in-place
+    if (lastTime && Math.abs(candleTime - lastTime) < 30000) {
+      if (Array.isArray(last)) {
+        last[1] = o;
+        last[2] = Math.max(+last[2], h);
+        last[3] = Math.min(+last[3], l);
+        last[4] = c;
+        last[5] = v;
+      } else {
+        last.high = Math.max(last.high ?? h, h);
+        last.low = Math.min(last.low ?? l, l);
+        last.close = c;
+        last.volume = v;
+      }
+    } else if (candleTime > lastTime) {
+      // New candle opened, append and keep window size
+      klines.push([candleTime, o, h, l, c, v]);
+      if (klines.length > 300) klines.shift();
     }
+
     render(klines, currentData.trades);
   }
 

@@ -322,10 +322,10 @@ async def get_klines(
         cfg = config_mgr.get_all_cached()
     else:
         from database import SessionLocal
-        from config import ConfigManager
+        from config import get_all_settings
         db_s = SessionLocal()
         try:
-            cfg = ConfigManager.get_all(db_s)
+            cfg = get_all_settings(db_s)
         finally:
             db_s.close()
 
@@ -352,51 +352,41 @@ async def get_klines(
     # Fallback 1: Query public Binance Vision API (no geo restriction / 451 block)
     if not raw:
         clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
-        import httpx
         endpoints = [
             f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={limit_val + 60}",
             f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={limit_val + 60}",
         ]
         proxy = (cfg.get("http_proxy") or "").strip()
-        for endpoint in endpoints:
-            for p in [proxy, None]:
-                try:
-                    kwargs = {"timeout": 4.0}
-                    if p:
-                        kwargs["proxy"] = p
-                    resp = httpx.get(endpoint, **kwargs)
-                    if resp.status_code == 200:
-                        items = resp.json()
-                        if items and isinstance(items, list):
-                            raw = [
-                                [row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])]
-                                for row in items
-                            ]
-                            logger.info(f"Loaded {len(raw)} real live Binance candles from {endpoint}")
-                            break
-                except Exception:
-                    pass
-            if raw:
-                break
+        proxies = None
+        if proxy:
+            p_str = proxy
+            if p_str.startswith("socks5://"):
+                p_str = "socks5h://" + p_str[len("socks5://"):]
+            proxies = {"http": p_str, "https": p_str}
 
-    # Fallback 2: Generate demonstration data only if completely disconnected
+        import requests
+        for endpoint in endpoints:
+            try:
+                resp = requests.get(endpoint, proxies=proxies, timeout=6.0)
+                if resp.status_code == 200:
+                    items = resp.json()
+                    if items and isinstance(items, list):
+                        raw = [
+                            [row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])]
+                            for row in items
+                        ]
+                        logger.info(f"Loaded {len(raw)} real live Binance candles from {endpoint}")
+                        break
+            except Exception as e:
+                logger.warning(f"Failed to fetch live candles from {endpoint}: {e}")
+
+    # No synthetic/demonstration fallback allowed. If network fails, return 503 error.
     if not raw:
-        import time, random
-        logger.warning(f"All Binance endpoints unreachable for {symbol}. Using simulated fallback.")
-        now_ms = int(time.time() * 1000)
-        step_ms = 60 * 1000 if tf_val == "1m" else (300 * 1000 if tf_val == "5m" else 900 * 1000)
-        base_price = 59350.0 if "BTC" in symbol else 3120.0
-        cur = base_price
-        for i in range(limit_val + 60):
-            ts = now_ms - (limit_val + 60 - i) * step_ms
-            drift = (random.random() - 0.48) * (base_price * 0.0012)
-            o = cur
-            c = cur + drift
-            h = max(o, c) + random.random() * (base_price * 0.0006)
-            l = min(o, c) - random.random() * (base_price * 0.0006)
-            v = random.uniform(50, 300)
-            cur = c
-            raw.append([ts, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)])
+        logger.error(f"Failed to fetch real live candles for {symbol} from all Binance endpoints.")
+        raise HTTPException(
+            status_code=503,
+            detail=f"无法获取 {symbol} 的实时真实K线数据，请检查网络连接或全局设置中的代理配置。"
+        )
 
     closes = [b[4] for b in raw]
     n = len(closes)

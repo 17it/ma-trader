@@ -49,8 +49,11 @@ const AppController = (() => {
       try { await loadKlines(); } catch (e) { console.warn(e); }
     }
 
-    // 5. Connect WebSocket
+    // 5. Connect local WebSocket for trade alerts and bot status
     connectWS();
+
+    // 6. Connect Binance official public Kline WebSocket for real-time live streaming (no polling)
+    connectBinanceStream(state.currentSymbol, state.currentTimeframe);
   }
 
   // ─── DOM Event Listeners ───────────────────────────────────────────
@@ -179,8 +182,11 @@ const AppController = (() => {
     // Reset indicator displays
     resetSignalDisplay();
 
-    // Reload Klines
+    // Reload Klines base chart (one-off initial load)
     loadKlines();
+
+    // Switch Binance real-time WebSocket stream
+    connectBinanceStream(symbol, state.currentTimeframe);
   }
 
   function switchTimeframe(tf) {
@@ -196,6 +202,9 @@ const AppController = (() => {
     });
 
     loadKlines();
+
+    // Switch Binance real-time WebSocket stream
+    connectBinanceStream(state.currentSymbol, tf);
   }
 
   // ─── HTTP API Calls ────────────────────────────────────────────────
@@ -601,6 +610,129 @@ const AppController = (() => {
       box.removeChild(box.firstChild);
     }
     box.scrollTop = box.scrollHeight;
+  }
+
+  // ─── Binance Official Realtime Kline WebSocket ─────────────────────
+  let binanceWs = null;
+  let currentBinanceStream = null;
+  let binanceReconnectTimer = null;
+
+  function connectBinanceStream(symbol, timeframe) {
+    if (!symbol) return;
+    const cleanSym = symbol.replace('/', '').replace(':USDT', '').toLowerCase();
+    const streamName = `${cleanSym}@kline_${timeframe || '1m'}`;
+
+    if (binanceWs && currentBinanceStream === streamName && binanceWs.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    if (binanceWs) {
+      try {
+        binanceWs.onclose = null;
+        binanceWs.onerror = null;
+        binanceWs.close();
+      } catch (_) {}
+      binanceWs = null;
+    }
+    clearTimeout(binanceReconnectTimer);
+
+    currentBinanceStream = streamName;
+    console.log(`[Binance WS] Connecting real-time stream: ${streamName}`);
+
+    // Try standard stream or fallback fstream
+    const wsUrl = `wss://stream.binance.com:9443/ws/${streamName}`;
+    try {
+      binanceWs = new WebSocket(wsUrl);
+
+      binanceWs.onopen = () => {
+        console.log(`[Binance WS] ✅ Connected to official live stream: ${streamName}`);
+      };
+
+      binanceWs.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg && msg.e === 'kline' && msg.k) {
+            const k = msg.k;
+            const candle = {
+              time: k.t,
+              open: parseFloat(k.o),
+              high: parseFloat(k.h),
+              low: parseFloat(k.l),
+              close: parseFloat(k.c),
+              volume: parseFloat(k.v),
+              isClosed: k.x,
+            };
+
+            // 1. Update current price display immediately
+            updateCurrentPrice(candle.close);
+
+            // 2. Update sidebar price if matching
+            if (typeof SettingsManager !== 'undefined' && SettingsManager.updateSymbolPrice) {
+              SettingsManager.updateSymbolPrice(state.currentSymbol, candle.close);
+            }
+
+            // 3. Update indicators (MA7 / MA25 / MA60 / Direction badge)
+            updateIndicatorsFromLastBar(candle.close);
+
+            // 4. Update live chart bar incrementally
+            if (typeof ChartManager !== 'undefined') {
+              ChartManager.appendCandle(candle);
+            }
+          }
+        } catch (err) {
+          console.warn('[Binance WS] Parse error:', err);
+        }
+      };
+
+      binanceWs.onerror = (err) => {
+        console.warn(`[Binance WS] Stream error (${streamName}), trying fstream...`, err);
+        try {
+          binanceWs.close();
+        } catch (_) {}
+      };
+
+      binanceWs.onclose = () => {
+        console.log(`[Binance WS] Stream closed (${streamName}). Reconnecting in 3s...`);
+        clearTimeout(binanceReconnectTimer);
+        binanceReconnectTimer = setTimeout(() => {
+          connectBinanceStream(state.currentSymbol, state.currentTimeframe);
+        }, 3000);
+      };
+    } catch (e) {
+      console.warn('[Binance WS] Connection failed:', e);
+    }
+  }
+
+  function updateIndicatorsFromLastBar(liveClose) {
+    if (!state.klinesData || state.klinesData.length < 7) return;
+    const closes = state.klinesData.map(k => Array.isArray(k) ? +k[4] : +(k.close ?? k.c ?? 0));
+    if (liveClose) closes[closes.length - 1] = liveClose;
+    const n = closes.length;
+    const m7  = closes.slice(-7).reduce((a, b) => a + b, 0) / 7;
+    const m25 = n >= 25 ? (closes.slice(-25).reduce((a, b) => a + b, 0) / 25) : null;
+    const m60 = n >= 60 ? (closes.slice(-60).reduce((a, b) => a + b, 0) / 60) : null;
+
+    const el7  = document.getElementById('ma7Val');
+    const el25 = document.getElementById('ma25Val');
+    const el60 = document.getElementById('ma60Val');
+    const dir  = document.getElementById('maDirection');
+
+    if (el7 && m7 != null)   el7.textContent  = m7.toFixed(1);
+    if (el25 && m25 != null) el25.textContent = m25.toFixed(1);
+    if (el60 && m60 != null) el60.textContent = m60.toFixed(1);
+
+    if (dir && m7 != null && m25 != null && m60 != null) {
+      if (m7 > m25 && m25 > m60) {
+        dir.textContent = '▲ 多头排列';
+        dir.className = 'direction-badge long';
+      } else if (m7 < m25 && m25 < m60) {
+        dir.textContent = '▼ 空头排列';
+        dir.className = 'direction-badge short';
+      } else {
+        dir.textContent = '— 震荡/整理';
+        dir.className = 'direction-badge flat';
+      }
+    }
   }
 
   // ─── WebSocket ─────────────────────────────────────────────────────

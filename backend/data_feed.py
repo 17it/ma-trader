@@ -159,34 +159,17 @@ class DataFeed:
         if real_df is not None:
             return real_df
 
-        # 2. Simulated fallback only if completely unreachable
-        logger.warning("All Binance endpoints unreachable for %s. Using simulated fallback.", symbol)
-        import time, random
-        now_ms = int(time.time() * 1000)
-        step_ms = 60 * 1000 if timeframe == "1m" else (300 * 1000 if timeframe == "5m" else 900 * 1000)
-        base_price = 59350.0 if "BTC" in symbol else 3120.0
-        cur = base_price
-        raw = []
-        for i in range(limit):
-            ts = now_ms - (limit - i) * step_ms
-            drift = (random.random() - 0.48) * (base_price * 0.001)
-            o = cur
-            c = cur + drift
-            h = max(o, c) + random.random() * (base_price * 0.0005)
-            l = min(o, c) - random.random() * (base_price * 0.0005)
-            v = random.uniform(50, 300)
-            cur = c
-            raw.append([ts, round(o, 2), round(h, 2), round(l, 2), round(c, 2), round(v, 2)])
-        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        return df
+        # No simulated fallback. Report failure immediately.
+        logger.error("Failed to fetch real OHLCV for %s: all Binance endpoints unreachable.", symbol)
+        return None
 
     # ------------------------------------------------------------------
     # Ticker
     # ------------------------------------------------------------------
     def get_ticker(self, symbol: str) -> Optional[float]:
         """
-        Return the last traded price for *symbol*, or fallback on failure.
+        Return the last traded price for *symbol*, or None on failure.
+        No simulated fake prices allowed.
         """
         if self._exchange is not None:
             try:
@@ -201,7 +184,8 @@ class DataFeed:
         if real_p is not None:
             return real_p
 
-        return 59355.6 if "BTC" in symbol else 3120.5
+        logger.error("Failed to fetch ticker for %s from all Binance endpoints.", symbol)
+        return None
 
     # ------------------------------------------------------------------
     # Account balance
