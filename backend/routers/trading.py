@@ -305,6 +305,41 @@ async def manual_close_trade(
     return TradeResponse.model_validate(trade)
 
 
+@router.delete("/trades/{trade_id}")
+@router.post("/trades/{trade_id}/delete")
+def delete_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
+    """Delete a single trade record by ID."""
+    trade = db.query(Trade).filter(Trade.id == trade_id).first()
+    if trade is None:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    if trade.status == "open":
+        bot = _get_bot(request)
+        if bot is not None and hasattr(bot, "positions"):
+            pos = bot.positions.get(trade.symbol)
+            pos_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
+            if pos_id == trade_id:
+                bot.positions.pop(trade.symbol, None)
+
+    db.delete(trade)
+    db.commit()
+    return {"status": "deleted", "id": trade_id}
+
+
+@router.delete("/trades")
+@router.post("/trades/clear")
+def clear_trades(request: Request, db: Session = Depends(get_db)):
+    """Delete all trade records."""
+    deleted_count = db.query(Trade).delete()
+    db.commit()
+
+    bot = _get_bot(request)
+    if bot is not None and hasattr(bot, "positions"):
+        bot.positions.clear()
+
+    return {"status": "cleared", "deleted": deleted_count}
+
+
 # ---------------------------------------------------------------------------
 # K-line data
 # ---------------------------------------------------------------------------

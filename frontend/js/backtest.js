@@ -5,6 +5,17 @@
 const BacktestManager = (() => {
 
   function init() {
+    // Default date range: 1st day of current month ~ today
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const y = now.getFullYear();
+    const m = pad(now.getMonth() + 1);
+    const d = pad(now.getDate());
+    const startEl = document.getElementById('btStartDate');
+    const endEl = document.getElementById('btEndDate');
+    if (startEl) startEl.value = `${y}-${m}-01`;
+    if (endEl) endEl.value = `${y}-${m}-${d}`;
+
     // confirm slider label
     document.getElementById('btConfirm').addEventListener('input', (e) => {
       document.getElementById('btConfirmLabel').textContent = e.target.value;

@@ -127,6 +127,10 @@ const AppController = (() => {
     const btnSimShort = document.getElementById('btnSimShort');
     if (btnSimLong) btnSimLong.addEventListener('click', () => simulateTrade('long'));
     if (btnSimShort) btnSimShort.addEventListener('click', () => simulateTrade('short'));
+
+    // Clear all trades button
+    const btnClearTrades = document.getElementById('btnClearTrades');
+    if (btnClearTrades) btnClearTrades.addEventListener('click', clearAllTrades);
   }
 
   // ─── Theme Management (Day / Night Mode) ────────────────────────────
@@ -651,6 +655,43 @@ const AppController = (() => {
     }
   }
 
+  async function deleteTrade(tradeId, status) {
+    const tip = status === 'open'
+      ? `订单 #${tradeId} 仍在持仓中，删除将同步移除监控状态，确定删除吗？`
+      : `确定要删除交易记录 #${tradeId} 吗？`;
+    if (!confirm(tip)) return;
+    try {
+      const res = await fetch(`/api/trades/${tradeId}/delete`, { method: 'POST' });
+      if (res.ok) {
+        appendLog(`[记录管理] 已删除交易记录 #${tradeId}`, 'info');
+        await loadTrades();
+        await loadStats();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('删除失败: ' + (err.detail || res.statusText));
+      }
+    } catch (err) {
+      alert('删除请求失败: ' + err.message);
+    }
+  }
+
+  async function clearAllTrades() {
+    if (!confirm('确定要清空全部交易记录吗？该操作不可恢复！')) return;
+    try {
+      const res = await fetch('/api/trades/clear', { method: 'POST' });
+      if (res.ok) {
+        appendLog('[记录管理] 已清空全部交易记录', 'info');
+        await loadTrades();
+        await loadStats();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('清空失败: ' + (err.detail || res.statusText));
+      }
+    } catch (err) {
+      alert('清空请求失败: ' + err.message);
+    }
+  }
+
   function highlightTrade(tradeId) {
     if (typeof ChartManager !== 'undefined') {
       ChartManager.highlightTrade(tradeId);
@@ -771,8 +812,11 @@ const AppController = (() => {
 
       // Action column
       let actionBtn = `
-        <button class="btn btn-xs btn-outline-secondary" onclick="AppController.highlightTrade(${t.id})">
+        <button class="btn btn-xs btn-outline-secondary" onclick="AppController.highlightTrade(${t.id})" title="定位到图表">
           <i class="fa-solid fa-crosshairs"></i>
+        </button>
+        <button class="btn btn-xs btn-outline-danger ms-1" onclick="AppController.deleteTrade(${t.id}, '${t.status}')" title="删除记录">
+          <i class="fa-solid fa-trash-can"></i>
         </button>
       `;
       if (t.status === 'open') {
@@ -1140,6 +1184,8 @@ const AppController = (() => {
     stopBot,
     simulateTrade,
     closeTrade,
+    deleteTrade,
+    clearAllTrades,
     highlightTrade,
     loadTrades,
     loadStats,
