@@ -40,14 +40,14 @@ def _get_config(request: Request):
 def _build_exchange(settings: dict, require_auth: bool = False) -> Optional[object]:
     """Build a ccxt Binance Futures instance from settings dict with proxy support."""
     import os
-    key = settings.get("binance_key", "")
-    secret = settings.get("binance_secret", "")
+    key = settings.get("binance_key", "") if require_auth else ""
+    secret = settings.get("binance_secret", "") if require_auth else ""
     if require_auth and (not key or not secret):
         return None
     try:
         cfg = {
-            "apiKey": key or "",
-            "secret": secret or "",
+            "apiKey": key,
+            "secret": secret,
             "options": {"defaultType": "future"},
             "enableRateLimit": True,
             "timeout": 5000,
