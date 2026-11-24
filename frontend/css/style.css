@@ -594,13 +594,154 @@ hr {
 .progress { background: var(--border-light); border-radius: 4px; height: 8px; }
 .progress-bar { transition: width 0.4s ease; background-color: var(--accent-blue); }
 
-/* ─── Responsive ─── */
-@media (max-width: 768px) {
-  .sidebar { width: 168px; min-width: 168px; }
-  .info-panel { display: none; }
+/* ─── Main Layout ─── */
+.main-layout {
+  height: calc(100vh - 54px);
+  overflow: hidden;
 }
-@media (max-width: 576px) {
-  .sidebar { display: none; }
+
+/* ─── Responsive (Tablet & Mobile) ─── */
+@media (max-width: 991.98px) {
+  html, body {
+    overflow-y: auto;
+    overflow-x: hidden;
+    height: auto;
+  }
+
+  .main-layout {
+    flex-direction: column !important;
+    height: auto !important;
+    min-height: calc(100dvh - 54px);
+    overflow: visible !important;
+  }
+
+  /* Turn left sidebar into a sleek horizontal pill bar on mobile */
+  .sidebar {
+    width: 100%;
+    min-width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border-light);
+    flex-direction: row;
+    align-items: center;
+    padding: 4px 10px;
+    gap: 8px;
+  }
+  .sidebar-header {
+    border-bottom: none;
+    padding: 4px 4px;
+    white-space: nowrap;
+    gap: 6px;
+  }
+  .symbol-list {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .symbol-list::-webkit-scrollbar { display: none; }
+  .symbol-item {
+    margin-bottom: 0;
+    padding: 5px 10px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-light);
+  }
+  .symbol-item.active {
+    box-shadow: none;
+    border-color: var(--accent-blue);
+    background: var(--item-active-bg);
+  }
+
+  /* Swipeable single-line tabs */
+  .nav-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+  .nav-tabs::-webkit-scrollbar { display: none; }
+  .nav-tabs .nav-link {
+    white-space: nowrap;
+    padding: 9px 12px;
+    font-size: 13px;
+  }
+
+  main.flex-fill,
+  .tab-content,
+  .tab-pane {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  /* Stack chart and right info panel vertically */
+  .chart-layout {
+    flex-direction: column !important;
+    height: auto !important;
+  }
+  .chart-main-col {
+    overflow: visible !important;
+    padding: 10px !important;
+  }
+  .chart-container {
+    height: 320px !important;
+    min-height: 320px !important;
+  }
+  .chart-volume {
+    height: 72px !important;
+  }
+
+  .info-panel {
+    width: 100% !important;
+    min-width: 100% !important;
+    border-left: none;
+    border-top: 1px solid var(--border-light);
+    overflow: visible;
+    padding: 14px !important;
+  }
+
+  /* Tables scroll cleanly horizontally instead of squashing text */
+  .table-custom {
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 575.98px) {
+  #topNav {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+    gap: 6px !important;
+  }
+  #topNav .navbar-brand {
+    font-size: 15px !important;
+    margin-right: 2px !important;
+  }
+  #topNav .navbar-brand i {
+    width: 24px;
+    height: 24px;
+    font-size: 12px;
+  }
+  .user-badge-btn, #btnThemeToggle {
+    padding: 4px 8px;
+  }
+  #btnBotToggle {
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+  .stat-value {
+    font-size: 20px;
+  }
+  .card-dark .card-body {
+    padding: 12px;
+  }
 }
 
 /* ═══════════════════════════════════════════
