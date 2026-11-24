@@ -758,7 +758,7 @@ const AppController = (() => {
       } else if (t.pnl !== null && t.pnl !== undefined) {
         const sign = t.pnl >= 0 ? '+' : '';
         const color = t.pnl >= 0 ? 'text-success' : 'text-danger';
-        const pct = t.pnl_pct ? ` (${(t.pnl_pct * 100).toFixed(1)}%)` : '';
+        const pct = t.pnl_pct !== null && t.pnl_pct !== undefined ? ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%)` : '';
         pnlText = `<span class="${color} fw-bold">${sign}$${t.pnl.toFixed(2)}${pct}</span>`;
       }
 
