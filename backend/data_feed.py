@@ -53,6 +53,7 @@ class DataFeed:
             self._authenticated = bool(api_key and secret)
             self._use_futures = use_futures
             self._proxy = active_proxy
+            self._geo_blocked = False
             logger.info(
                 "DataFeed initialised (futures=%s, auth=%s, proxy=%s)",
                 use_futures,
@@ -138,7 +139,7 @@ class DataFeed:
 
         Returns None on failure.
         """
-        if self._exchange is not None:
+        if self._exchange is not None and not getattr(self, "_geo_blocked", False):
             try:
                 raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
                 if raw:
@@ -152,7 +153,16 @@ class DataFeed:
                     df = df.reset_index(drop=True)
                     return df
             except Exception as exc:
-                logger.warning("get_ohlcv ccxt error (%s): %s. Trying public Binance Vision endpoint...", symbol, exc)
+                err_str = str(exc)
+                if "451" in err_str or "restricted location" in err_str.lower():
+                    if not getattr(self, "_geo_blocked", False):
+                        logger.warning(
+                            "Binance API (api.binance.com) is geo-restricted (HTTP 451) on this server. "
+                            "Switching to public Binance Vision endpoint (data-api.binance.vision) for market data."
+                        )
+                        self._geo_blocked = True
+                else:
+                    logger.warning("get_ohlcv ccxt error (%s): %s. Trying public Binance Vision endpoint...", symbol, exc)
 
         # 1. Fallback to real official Binance Vision market data
         real_df = self._fetch_fallback_ohlcv(symbol, timeframe, limit)
@@ -171,14 +181,23 @@ class DataFeed:
         Return the last traded price for *symbol*, or None on failure.
         No simulated fake prices allowed.
         """
-        if self._exchange is not None:
+        if self._exchange is not None and not getattr(self, "_geo_blocked", False):
             try:
                 ticker = self._exchange.fetch_ticker(symbol)
                 price = float(ticker.get("last") or ticker.get("close") or 0)
                 if price > 0:
                     return price
             except Exception as exc:
-                logger.warning("get_ticker ccxt error (%s): %s. Trying public Binance Vision endpoint...", symbol, exc)
+                err_str = str(exc)
+                if "451" in err_str or "restricted location" in err_str.lower():
+                    if not getattr(self, "_geo_blocked", False):
+                        logger.warning(
+                            "Binance API (api.binance.com) is geo-restricted (HTTP 451) on this server. "
+                            "Switching to public Binance Vision endpoint (data-api.binance.vision) for market data."
+                        )
+                        self._geo_blocked = True
+                else:
+                    logger.warning("get_ticker ccxt error (%s): %s. Trying public Binance Vision endpoint...", symbol, exc)
 
         real_p = self._fetch_fallback_ticker(symbol)
         if real_p is not None:

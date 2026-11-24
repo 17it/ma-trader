@@ -2,6 +2,7 @@
 MA Trader - Trading Router
 Endpoints for starting/stopping the bot, querying trades, manual ops, and K-line data.
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
