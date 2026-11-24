@@ -4,6 +4,8 @@ Database: SQLite at data/trading.db
 """
 
 import os
+import hashlib
+import secrets
 from datetime import datetime
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, Integer, String, Index, UniqueConstraint, text,
@@ -37,6 +39,17 @@ class SettingModel(Base):
 
     key = Column(String, primary_key=True)
     value = Column(String)
+
+
+class UserModel(Base):
+    """Web admin user credentials."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    salt = Column(String(64), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class SymbolConfig(Base):
@@ -197,6 +210,17 @@ def create_tables() -> None:
                 rr_ratio=1.5,
                 enabled=True
             ))
+        # Seed default admin user (admin / 123456) if not present
+        admin_user = db.query(UserModel).filter(UserModel.username == "admin").first()
+        if not admin_user:
+            salt = secrets.token_hex(16)
+            pwd_hash = hashlib.pbkdf2_hmac("sha256", "123456".encode("utf-8"), salt.encode("utf-8"), 100000).hex()
+            db.add(UserModel(
+                username="admin",
+                password_hash=pwd_hash,
+                salt=salt,
+            ))
+
         db.commit()
     finally:
         db.close()

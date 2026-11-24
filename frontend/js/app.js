@@ -27,6 +27,16 @@ const AppController = (() => {
     // 0. Setup Theme (Day / Night mode)
     setupTheme();
 
+    // 0.1 Check Authentication (protect frontend dashboard)
+    if (typeof AuthManager !== 'undefined') {
+      AuthManager.init();
+      const authed = await AuthManager.checkAuth();
+      if (!authed) {
+        console.log('[App] User not authenticated. Displaying login overlay...');
+        return;
+      }
+    }
+
     // 1. Init Sub-managers
     if (typeof ChartManager !== 'undefined') {
       ChartManager.init();

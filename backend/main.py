@@ -24,6 +24,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import create_tables, SessionLocal
 from config import ConfigManager
+from auth import validate_token, get_token_from_request
+from routers import auth as auth_router
 from routers import settings as settings_router
 from routers import trading as trading_router
 from routers import backtest as backtest_router
@@ -118,6 +120,28 @@ async def add_no_cache_headers(request, call_next):
         response.headers["Expires"] = "0"
     return response
 
+
+# Public paths that do not require authentication
+PUBLIC_API_PATHS = {"/api/auth/login", "/health", "/docs", "/openapi.json"}
+
+
+@app.middleware("http")
+async def api_auth_middleware(request, call_next):
+    path = request.url.path
+    # Intercept protected API routes
+    if path.startswith("/api/") and path not in PUBLIC_API_PATHS:
+        token = get_token_from_request(request)
+        user = validate_token(token)
+        if not user:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "未授权或登录已过期，请重新登录", "code": "UNAUTHORIZED"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    return await call_next(request)
+
+
 # Static files (frontend)
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
@@ -127,6 +151,7 @@ if FRONTEND_DIR.exists():
         app.mount("/js", StaticFiles(directory=str(FRONTEND_DIR / "js")), name="js")
 
 # Routers
+app.include_router(auth_router.router, prefix="/api")
 app.include_router(settings_router.router, prefix="/api")
 app.include_router(trading_router.router, prefix="/api")
 app.include_router(backtest_router.router, prefix="/api")
