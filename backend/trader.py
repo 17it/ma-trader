@@ -283,8 +283,8 @@ class TradingBot:
                 })
 
                 # --- Strategy confirmation: Strictly evaluate on newly closed candles (Bar Close) ---
-                # In df_1m: the last row iloc[-1] is the unclosed forming bar; iloc[:-1] are fully closed bars.
-                closed_df = df_1m.iloc[:-1].copy()
+                # In df_1m_ma: the last row iloc[-1] is the unclosed forming bar; iloc[:-1] are fully closed bars with MAs.
+                closed_df = df_1m_ma.iloc[:-1].copy()
                 closed_candle_ts = closed_df.iloc[-1]["timestamp"]
 
                 if first_cycle:
