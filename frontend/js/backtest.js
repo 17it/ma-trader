@@ -70,9 +70,20 @@ const BacktestManager = (() => {
   }
 
   async function pollBacktest(id, attempt = 0) {
-    if (attempt > 60) throw new Error('回测超时');
+    if (attempt > 300) throw new Error('回测请求超时（超过10分钟），请缩小回测时间区间重试');
+    
+    // Update progress label with elapsed seconds
+    const pBar = document.querySelector('#btProgress .progress-bar');
+    if (pBar) {
+      const elapsed = attempt * 2;
+      pBar.textContent = `后台非阻塞拉取数据与运算中... (${elapsed}s)`;
+    }
+
     await new Promise(r => setTimeout(r, 2000));
     const res = await fetch(`/api/backtest/${id}`);
+    if (!res.ok) {
+      throw new Error(`获取回测进度失败 (HTTP ${res.status})`);
+    }
     const run = await res.json();
     if (run.status === 'done') {
       displayResults(run);

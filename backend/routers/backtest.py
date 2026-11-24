@@ -47,8 +47,8 @@ def _get_exchange(request: Request):
         return None
 
 
-async def _run_backtest_task(run_id: int, params: dict, exchange):
-    """Background coroutine that runs the backtest and stores results."""
+def _run_backtest_sync(run_id: int, params: dict, exchange):
+    """Synchronous worker running in a background thread to prevent blocking the event loop."""
     from database import SessionLocal
 
     db = SessionLocal()
@@ -78,12 +78,20 @@ async def _run_backtest_task(run_id: int, params: dict, exchange):
         logger.info(f"Backtest {run_id} completed: {result['total_trades']} trades")
     except Exception as exc:
         logger.error(f"Backtest {run_id} failed: {exc}")
-        db.query(BacktestRun).filter(BacktestRun.id == run_id).update(
-            {"status": "failed", "error_msg": str(exc)[:500]}
-        )
-        db.commit()
+        try:
+            db.query(BacktestRun).filter(BacktestRun.id == run_id).update(
+                {"status": "failed", "error_msg": str(exc)[:500]}
+            )
+            db.commit()
+        except Exception:
+            pass
     finally:
         db.close()
+
+
+async def _run_backtest_task(run_id: int, params: dict, exchange):
+    """Non-blocking background coroutine: offloads heavy synchronous work to a worker thread."""
+    await asyncio.to_thread(_run_backtest_sync, run_id, params, exchange)
 
 
 @router.post("/backtest", response_model=BacktestRunResponse, status_code=202)
