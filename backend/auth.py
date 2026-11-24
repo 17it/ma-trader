@@ -18,11 +18,11 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from database import SessionLocal, UserModel, get_db
+from database import SessionLocal, SessionTokenModel, UserModel, get_db
 
 security = HTTPBearer(auto_error=False)
 
-# In-memory token storage: token -> {"user_id": int, "username": str, "expires_at": float}
+# In-memory read-through cache backed by SQLite SessionTokenModel
 _ACTIVE_TOKENS: Dict[str, dict] = {}
 TOKEN_EXPIRE_SECONDS = 30 * 86400  # 30 days
 
@@ -47,19 +47,39 @@ def verify_password(password: str, password_hash: str, salt: str) -> bool:
 
 
 def create_token_for_user(user: UserModel) -> str:
-    """Issue a new session token for the user."""
+    """Issue a new persistent session token for the user."""
     token = secrets.token_hex(32)
+    expires_at = time.time() + TOKEN_EXPIRE_SECONDS
     _ACTIVE_TOKENS[token] = {
         "user_id": user.id,
         "username": user.username,
-        "expires_at": time.time() + TOKEN_EXPIRE_SECONDS,
+        "expires_at": expires_at,
     }
+    db = SessionLocal()
+    try:
+        db.add(SessionTokenModel(
+            token=token,
+            user_id=user.id,
+            username=user.username,
+            expires_at=expires_at,
+        ))
+        # Prune expired tokens opportunistically
+        db.query(SessionTokenModel).filter(SessionTokenModel.expires_at < time.time()).delete()
+        db.commit()
+    finally:
+        db.close()
     return token
 
 
 def revoke_token(token: str) -> None:
     """Revoke an active token."""
     _ACTIVE_TOKENS.pop(token, None)
+    db = SessionLocal()
+    try:
+        db.query(SessionTokenModel).filter(SessionTokenModel.token == token).delete()
+        db.commit()
+    finally:
+        db.close()
 
 
 def revoke_all_tokens_for_user(user_id: int) -> None:
@@ -69,6 +89,12 @@ def revoke_all_tokens_for_user(user_id: int) -> None:
     ]
     for t in to_delete:
         _ACTIVE_TOKENS.pop(t, None)
+    db = SessionLocal()
+    try:
+        db.query(SessionTokenModel).filter(SessionTokenModel.user_id == user_id).delete()
+        db.commit()
+    finally:
+        db.close()
 
 
 def get_token_from_request(request: Request) -> Optional[str]:
@@ -82,12 +108,7 @@ def get_token_from_request(request: Request) -> Optional[str]:
 
 def validate_token(token: Optional[str], db: Optional[Session] = None) -> Optional[UserModel]:
     """Validate token and return the UserModel if valid, else None."""
-    if not token or token not in _ACTIVE_TOKENS:
-        return None
-
-    data = _ACTIVE_TOKENS[token]
-    if time.time() > data.get("expires_at", 0):
-        _ACTIVE_TOKENS.pop(token, None)
+    if not token:
         return None
 
     close_db = False
@@ -96,6 +117,24 @@ def validate_token(token: Optional[str], db: Optional[Session] = None) -> Option
         close_db = True
 
     try:
+        data = _ACTIVE_TOKENS.get(token)
+        if data is None:
+            row = db.query(SessionTokenModel).filter(SessionTokenModel.token == token).first()
+            if row is None:
+                return None
+            data = {
+                "user_id": row.user_id,
+                "username": row.username,
+                "expires_at": row.expires_at,
+            }
+            _ACTIVE_TOKENS[token] = data
+
+        if time.time() > data.get("expires_at", 0):
+            _ACTIVE_TOKENS.pop(token, None)
+            db.query(SessionTokenModel).filter(SessionTokenModel.token == token).delete()
+            db.commit()
+            return None
+
         user = db.query(UserModel).filter(UserModel.id == data["user_id"]).first()
         return user
     finally:

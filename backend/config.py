@@ -105,11 +105,12 @@ def get_trading_mode(db: Session) -> str:
 
 
 def get_max_daily_loss(db: Session) -> float:
-    value = get_setting(db, "max_daily_loss", "0.05")
+    """Return max daily loss percentage (e.g. 5.0 means 5%)."""
+    value = get_setting(db, "max_daily_loss", "5")
     try:
         return float(value)
     except (TypeError, ValueError):
-        return 0.05
+        return 5.0
 
 
 def get_binance_credentials(db: Session) -> Dict[str, str]:

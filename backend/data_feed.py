@@ -77,10 +77,13 @@ class DataFeed:
     # ------------------------------------------------------------------
     def _fetch_fallback_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 200) -> Optional[pd.DataFrame]:
         clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
-        urls = [
+        urls = []
+        if getattr(self, "_use_futures", True) and not getattr(self, "_geo_blocked", False):
+            urls.append(f"https://fapi.binance.com/fapi/v1/klines?symbol={clean_symbol}&interval={timeframe}&limit={limit}")
+        urls.extend([
             f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={timeframe}&limit={limit}",
             f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={timeframe}&limit={limit}",
-        ]
+        ])
         import httpx
         for url in urls:
             for proxy in [getattr(self, "_proxy", None), None]:
@@ -111,10 +114,13 @@ class DataFeed:
 
     def _fetch_fallback_ticker(self, symbol: str) -> Optional[float]:
         clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
-        urls = [
+        urls = []
+        if getattr(self, "_use_futures", True) and not getattr(self, "_geo_blocked", False):
+            urls.append(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={clean_symbol}")
+        urls.extend([
             f"https://data-api.binance.vision/api/v3/ticker/price?symbol={clean_symbol}",
             f"https://api.binance.com/api/v3/ticker/price?symbol={clean_symbol}",
-        ]
+        ])
         import httpx
         for url in urls:
             for proxy in [getattr(self, "_proxy", None), None]:

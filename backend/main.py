@@ -175,6 +175,12 @@ async def health():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+    user = validate_token(token)
+    if not user:
+        await websocket.close(code=4401)
+        return
+
     await ws_manager.connect(websocket)
 
     # Send current bot status immediately upon connection

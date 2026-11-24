@@ -92,6 +92,20 @@ def get_stats(
 
     daily_pnl = [{"date": d, "pnl": round(p, 4)} for d, p in sorted(daily.items())]
 
+    # ---- max drawdown (on cumulative equity curve starting from 10,000 base) ----
+    base_eq = 10_000.0
+    equity = base_eq
+    peak_eq = base_eq
+    max_dd_pct = 0.0
+    for t in trades:
+        equity += (t.pnl or 0.0)
+        if equity > peak_eq:
+            peak_eq = equity
+        if peak_eq > 0:
+            dd = (peak_eq - equity) / peak_eq * 100.0
+            if dd > max_dd_pct:
+                max_dd_pct = dd
+
     return StatsResponse(
         total_trades=total,
         win_trades=wins,
@@ -102,7 +116,7 @@ def get_stats(
         avg_win=round(avg_win, 4),
         avg_loss=round(avg_loss, 4),
         profit_factor=round(profit_factor, 4),
-        max_drawdown=0.0,
+        max_drawdown=round(max_dd_pct, 2),
         by_symbol=by_symbol_resp,
         daily_pnl=daily_pnl,
         symbol_pnl=[{"symbol": s, **d} for s, d in by_symbol_resp.items()],

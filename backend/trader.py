@@ -116,6 +116,9 @@ class TradingBot:
                         "is_paper": ot.is_paper,
                         "open_time": ot.open_time,
                         "timeframe": ot.timeframe or "1m",
+                        "exchange_order_id": getattr(ot, "exchange_order_id", None),
+                        "sl_order_id": getattr(ot, "sl_order_id", None),
+                        "trailing_active": bool(getattr(ot, "trailing_active", False)),
                     }
                 if open_trades:
                     logger.info("Restored %d open trades from database into memory", len(open_trades))
@@ -186,6 +189,41 @@ class TradingBot:
             logger.error("Failed to load symbol configs: %s", exc)
             return []
 
+    async def reload_symbols(self):
+        """Hot-reload enabled symbols while bot is running (no restart needed)."""
+        if not self.running:
+            return
+        symbol_configs = self._load_symbol_configs()
+        desired = {c.symbol: c for c in symbol_configs}
+
+        # Stop removed or disabled symbols
+        for sym in list(self._tasks.keys()):
+            if sym not in desired:
+                task = self._tasks.pop(sym)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                logger.info("Hot-reload: stopped monitoring %s", sym)
+
+        # Start newly enabled symbols (or restart if config changed)
+        for sym, cfg in desired.items():
+            if sym not in self._tasks:
+                await self._start_symbol(cfg)
+            else:
+                # Restart task to pick up updated timeframe/leverage/risk params
+                old_task = self._tasks.pop(sym)
+                old_task.cancel()
+                try:
+                    await old_task
+                except asyncio.CancelledError:
+                    pass
+                await self._start_symbol(cfg)
+
+        self.ws_streamer.update_symbols(list(desired.keys()))
+        logger.info("Hot-reload completed: active symbols = %s", list(desired.keys()))
+
     # ------------------------------------------------------------------
     # Per-symbol monitoring loop
     # ------------------------------------------------------------------
@@ -206,10 +244,10 @@ class TradingBot:
 
         while self.running:
             try:
-                # --- Fetch data ---
-                df_1m = self.data_feed.get_ohlcv(symbol, timeframe, limit=200)
-                df_htf = self.data_feed.get_ohlcv(symbol, htf_timeframe, limit=100)
-                price = self.data_feed.get_ticker(symbol)
+                # --- Fetch data (non-blocking via thread pool) ---
+                df_1m = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, timeframe, 200)
+                df_htf = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, htf_timeframe, 100)
+                price = await asyncio.to_thread(self.data_feed.get_ticker, symbol)
 
                 if df_1m is None or df_1m.empty or len(df_1m) < 3:
                     logger.warning("No data for %s, skipping cycle", symbol)
@@ -298,6 +336,44 @@ class TradingBot:
 
             await asyncio.sleep(interval)
 
+    def _is_daily_loss_exceeded(self, session, is_paper: bool, base_balance: float) -> bool:
+        """Return True if today's realized loss exceeds max_daily_loss % of base_balance."""
+        try:
+            try:
+                from backend.database import Trade, SettingModel
+            except ImportError:
+                from database import Trade, SettingModel
+
+            row = session.query(SettingModel).filter(SettingModel.key == "max_daily_loss").first()
+            max_pct = float(row.value) if row and row.value else 5.0
+            if max_pct <= 0:
+                return False
+            # Support legacy fractional values like 0.05 -> 5%
+            if max_pct <= 0.5:
+                max_pct *= 100.0
+
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+            closed_today = (
+                session.query(Trade)
+                .filter(
+                    Trade.status == "closed",
+                    Trade.is_paper == is_paper,
+                    Trade.close_time >= today_start,
+                )
+                .all()
+            )
+            today_pnl = sum(t.pnl or 0.0 for t in closed_today)
+            max_loss_amount = base_balance * (max_pct / 100.0)
+            if today_pnl <= -max_loss_amount:
+                logger.warning(
+                    "Daily loss limit reached: today_pnl=%.2f <= -%.2f (%.1f%% of %.2f)",
+                    today_pnl, max_loss_amount, max_pct, base_balance,
+                )
+                return True
+        except Exception as exc:
+            logger.warning("Daily loss check error: %s", exc)
+        return False
+
     # ------------------------------------------------------------------
     # Signal handling → open trade
     # ------------------------------------------------------------------
@@ -305,7 +381,7 @@ class TradingBot:
         """Open a trade when a confirmed signal arrives."""
         direction = signal["direction"]
         last = df.iloc[-1]
-        ticker_price = self.data_feed.get_ticker(symbol)
+        ticker_price = await asyncio.to_thread(self.data_feed.get_ticker, symbol)
         entry_price = float(ticker_price) if ticker_price and ticker_price > 0 else float(last["close"])
         ma7 = float(last["ma7"])
         ma25 = float(last["ma25"])
@@ -315,22 +391,43 @@ class TradingBot:
         risk_pct = getattr(config, "risk_per_trade", 0.01)
         rr = getattr(config, "rr_ratio", 1.5)
 
-        # Simple SL/TP calculation
-        atr_proxy = float(df["high"].iloc[-20:].max() - df["low"].iloc[-20:].min()) / 20
-        sl_distance = max(atr_proxy, entry_price * 0.002)
+        # SL/TP calculation aligned with Backtester (MA60 or candle low/high, min 0.3% distance)
+        if direction == "long":
+            sl_candidate = ma60 if ma60 < entry_price else float(last["low"])
+            stop_loss = min(sl_candidate, entry_price * 0.997)
+        else:
+            sl_candidate = ma60 if ma60 > entry_price else float(last["high"])
+            stop_loss = max(sl_candidate, entry_price * 1.003)
+
+        sl_distance = abs(entry_price - stop_loss)
+        if sl_distance <= 0:
+            return
         tp_distance = sl_distance * rr
 
         if direction == "long":
-            stop_loss = entry_price - sl_distance
             take_profit = entry_price + tp_distance
         else:
-            stop_loss = entry_price + sl_distance
             take_profit = entry_price - tp_distance
 
-        # Balance-based position sizing
-        balance = self.data_feed.get_account_balance() or 1000.0
+        is_paper = True
+        if self.executor is not None:
+            is_paper = self.executor.config.get("trading_mode", "paper") == "paper"
+
+        # Balance-based position sizing (never fall back to fake balance in live mode)
+        if is_paper:
+            balance = 10_000.0
+        else:
+            balance = await asyncio.to_thread(self.data_feed.get_account_balance)
+            if balance is None or balance <= 0:
+                msg = f"[{symbol}] 实盘余额获取失败或为 0，已中止开仓"
+                logger.error(msg)
+                self.broadcast({"type": "log", "level": "error", "message": msg})
+                return
+
         risk_amount = balance * risk_pct
         quantity = round((risk_amount * leverage) / sl_distance, 6)
+        if quantity <= 0:
+            return
 
         try:
             try:
@@ -339,21 +436,30 @@ class TradingBot:
                 from database import Trade
             session = self.db_session_factory()
             try:
-                is_paper = True  # default; executor can override
+                if self._is_daily_loss_exceeded(session, is_paper, balance):
+                    msg = f"🛑 [{symbol}] 已触发每日最大亏损风控阈值，暂停开仓"
+                    self.broadcast({"type": "log", "level": "warning", "message": msg})
+                    return
+
+                exchange_order_id = None
+                sl_order_id = None
                 if self.executor is not None:
-                    result = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: self.executor.open_trade(
-                            symbol=symbol,
-                            direction=direction,
-                            entry_price=entry_price,
-                            stop_loss=stop_loss,
-                            take_profit=take_profit,
-                            quantity=quantity,
-                            leverage=leverage,
-                        ),
+                    result = await asyncio.to_thread(
+                        self.executor.open_trade,
+                        symbol=symbol,
+                        direction=direction,
+                        entry_price=entry_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        quantity=quantity,
+                        leverage=leverage,
+                        is_paper=is_paper,
                     )
-                    is_paper = getattr(result, "is_paper", True)
+                    if isinstance(result, dict):
+                        is_paper = bool(result.get("is_paper", is_paper))
+                        entry_price = float(result.get("entry_price") or entry_price)
+                        exchange_order_id = result.get("exchange_order_id")
+                        sl_order_id = result.get("sl_order_id")
 
                 trade = Trade(
                     symbol=symbol,
@@ -370,11 +476,14 @@ class TradingBot:
                     ma7_at_entry=ma7,
                     ma25_at_entry=ma25,
                     ma60_at_entry=ma60,
+                    exchange_order_id=exchange_order_id,
+                    sl_order_id=sl_order_id,
+                    trailing_active=False,
                 )
                 session.add(trade)
                 session.commit()
                 session.refresh(trade)
-                
+
                 # Store plain dictionary in self.positions to avoid detached instance errors
                 self.positions[symbol] = {
                     "id": trade.id,
@@ -388,6 +497,9 @@ class TradingBot:
                     "is_paper": trade.is_paper,
                     "open_time": trade.open_time,
                     "timeframe": getattr(config, "timeframe", "1m"),
+                    "exchange_order_id": exchange_order_id,
+                    "sl_order_id": sl_order_id,
+                    "trailing_active": False,
                 }
 
                 trade_dict = {
@@ -441,57 +553,135 @@ class TradingBot:
             await asyncio.sleep(15)
 
     async def _check_exits(self):
-        """Check all open positions for exit conditions."""
+        """Check all open positions for exit conditions (aligned with Backtester trailing logic)."""
         for symbol, pos in list(self.positions.items()):
             try:
                 direction = pos["direction"] if isinstance(pos, dict) else pos.direction
+                entry_price = pos["entry_price"] if isinstance(pos, dict) else pos.entry_price
                 stop_loss = pos["stop_loss"] if isinstance(pos, dict) else pos.stop_loss
                 take_profit = pos["take_profit"] if isinstance(pos, dict) else pos.take_profit
                 open_time = pos["open_time"] if isinstance(pos, dict) else pos.open_time
                 timeframe = pos.get("timeframe", "1m") if isinstance(pos, dict) else getattr(pos, "timeframe", "1m")
+                trailing_active = bool(pos.get("trailing_active", False)) if isinstance(pos, dict) else False
 
-                # 1. First check Stop Loss / Take Profit via zero-HTTP ticker cache
-                price = self.data_feed.get_ticker(symbol)
+                # 1. Check Stop Loss / Take Profit activation via zero-HTTP ticker cache
+                price = await asyncio.to_thread(self.data_feed.get_ticker, symbol)
                 close_reason = None
+                sl_updated = False
+
                 if price is not None:
                     if direction == "long":
                         if price <= stop_loss:
-                            close_reason = "stop_loss"
-                        elif price >= take_profit:
-                            close_reason = "take_profit"
+                            close_reason = "trailing_stop" if trailing_active else "stop_loss"
+                        elif not trailing_active and price >= take_profit:
+                            # Activate break-even + MA7 trailing (matching Backtester)
+                            trailing_active = True
+                            stop_loss = entry_price
+                            sl_updated = True
+                            if isinstance(pos, dict):
+                                pos["trailing_active"] = True
+                                pos["stop_loss"] = stop_loss
+                            self.broadcast({
+                                "type": "log",
+                                "level": "info",
+                                "message": f"🔒 [{symbol}] 达到盈亏比目标，已移动止损至保本位 ({entry_price:.4f}) 并开启 MA7 移动止盈",
+                            })
                     else:
                         if price >= stop_loss:
-                            close_reason = "stop_loss"
-                        elif price <= take_profit:
-                            close_reason = "take_profit"
+                            close_reason = "trailing_stop" if trailing_active else "stop_loss"
+                        elif not trailing_active and price <= take_profit:
+                            trailing_active = True
+                            stop_loss = entry_price
+                            sl_updated = True
+                            if isinstance(pos, dict):
+                                pos["trailing_active"] = True
+                                pos["stop_loss"] = stop_loss
+                            self.broadcast({
+                                "type": "log",
+                                "level": "info",
+                                "message": f"🔒 [{symbol}] 达到盈亏比目标，已移动止损至保本位 ({entry_price:.4f}) 并开启 MA7 移动止盈",
+                            })
 
                 if close_reason:
                     await self._close_trade(symbol, pos, close_reason, price)
                     continue
 
-                # 2. Check MA indicator exit only if SL/TP not hit
+                # 2. Check MA indicator exit / update MA7 trailing stop
                 strategy = self.strategies.get(symbol)
                 if strategy is not None:
-                    df = self.data_feed.get_ohlcv(symbol, timeframe, limit=100)
+                    df = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, timeframe, 100)
                     if df is not None and not df.empty:
                         df = strategy.calculate_ma(df)
+                        if trailing_active and len(df) >= 1:
+                            ma7_val = float(df.iloc[-1]["ma7"])
+                            if direction == "long":
+                                new_sl = max(stop_loss, ma7_val * 0.9995)
+                                if new_sl > stop_loss:
+                                    stop_loss = new_sl
+                                    sl_updated = True
+                            else:
+                                new_sl = min(stop_loss, ma7_val * 1.0005)
+                                if new_sl < stop_loss:
+                                    stop_loss = new_sl
+                                    sl_updated = True
+                            if isinstance(pos, dict):
+                                pos["stop_loss"] = stop_loss
+
+                        if sl_updated and isinstance(pos, dict):
+                            self._persist_trailing_update(pos["id"], stop_loss, trailing_active)
+
                         position_dict = {
                             "direction": direction,
                             "open_time": open_time,
+                            "trailing_active": trailing_active,
                         }
-                        exit_sig = strategy.check_exit(df, position_dict)
+                        # Evaluate indicator exit on closed candle (iloc[:-1]) if available
+                        eval_df = df.iloc[:-1] if len(df) >= 2 else df
+                        exit_sig = strategy.check_exit(eval_df, position_dict)
                         if exit_sig:
                             await self._close_trade(
                                 symbol, pos, exit_sig, price or float(df.iloc[-1]["close"])
                             )
+                            continue
+
+                if sl_updated and isinstance(pos, dict):
+                    self._persist_trailing_update(pos["id"], stop_loss, trailing_active)
 
             except Exception as exc:
                 logger.error("_check_exits(%s) error: %s", symbol, exc, exc_info=True)
 
-    async def _close_trade(self, symbol: str, pos, reason: str, exit_price: float):
-        """Persist trade closure and broadcast the event without detached instance errors."""
-        trade_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
+    def _persist_trailing_update(self, trade_id: int, stop_loss: float, trailing_active: bool):
+        """Persist updated trailing stop_loss / trailing_active to SQLite."""
         try:
+            try:
+                from backend.database import Trade
+            except ImportError:
+                from database import Trade
+            session = self.db_session_factory()
+            try:
+                session.query(Trade).filter_by(id=trade_id).update({
+                    "stop_loss": stop_loss,
+                    "trailing_active": trailing_active,
+                })
+                session.commit()
+            finally:
+                session.close()
+        except Exception as exc:
+            logger.warning("Failed to persist trailing SL update for trade %s: %s", trade_id, exc)
+
+    async def _close_trade(self, symbol: str, pos, reason: str, exit_price: float):
+        """Execute live close if needed, persist trade closure, and broadcast the event."""
+        trade_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
+        is_paper = pos.get("is_paper", True) if isinstance(pos, dict) else getattr(pos, "is_paper", True)
+        try:
+            # 1. For live trades, actually close the position on the exchange first!
+            if not is_paper and self.executor is not None:
+                close_res = await asyncio.to_thread(
+                    self.executor.close_trade, pos, exit_price, reason
+                )
+                if isinstance(close_res, dict) and close_res.get("exit_price"):
+                    exit_price = float(close_res["exit_price"])
+
             trade_dict = None
             pnl = 0.0
             pnl_pct = 0.0

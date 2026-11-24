@@ -100,6 +100,20 @@ class Trade(Base):
     ma7_at_entry = Column(Float, nullable=True)
     ma25_at_entry = Column(Float, nullable=True)
     ma60_at_entry = Column(Float, nullable=True)
+    exchange_order_id = Column(String, nullable=True)
+    sl_order_id = Column(String, nullable=True)
+    trailing_active = Column(Boolean, default=False)
+
+
+class SessionTokenModel(Base):
+    """Persistent login session tokens (survives service restarts)."""
+    __tablename__ = "session_tokens"
+
+    token = Column(String(128), primary_key=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    username = Column(String(50), nullable=False)
+    expires_at = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class BacktestRun(Base):
@@ -183,9 +197,19 @@ def init_db() -> None:
 
 
 def create_tables() -> None:
-    """Create all tables and seed default settings if missing."""
+    """Create all tables, migrate missing columns, and seed default settings if missing."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     Base.metadata.create_all(bind=engine)
+
+    # Lightweight schema migration for existing SQLite databases
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(trades)")).fetchall()}
+        if "exchange_order_id" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN exchange_order_id VARCHAR"))
+        if "sl_order_id" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN sl_order_id VARCHAR"))
+        if "trailing_active" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN trailing_active BOOLEAN DEFAULT 0"))
 
     db = SessionLocal()
     try:

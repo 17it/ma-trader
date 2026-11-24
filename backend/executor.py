@@ -275,7 +275,7 @@ class Executor:
     def close_trade(self, trade, exit_price: float, reason: str = "exit_signal") -> dict:
         """Unified close trade method called by TradingBot."""
         # Convert ORM trade to dict if needed
-        if hasattr(trade, "__dict__"):
+        if hasattr(trade, "__dict__") and not isinstance(trade, dict):
             t_dict = {
                 "id": getattr(trade, "id", None),
                 "symbol": getattr(trade, "symbol", ""),
@@ -283,6 +283,7 @@ class Executor:
                 "entry_price": getattr(trade, "entry_price", exit_price),
                 "quantity": getattr(trade, "quantity", 0.0),
                 "is_paper": getattr(trade, "is_paper", True),
+                "sl_order_id": getattr(trade, "sl_order_id", None),
             }
         else:
             t_dict = dict(trade)

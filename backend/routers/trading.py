@@ -294,6 +294,11 @@ async def manual_close_trade(
     db.commit()
     db.refresh(trade)
 
+    # Sync in-memory bot positions so it doesn't keep monitoring or block new entries
+    bot = _get_bot(request)
+    if bot is not None and hasattr(bot, "positions"):
+        bot.positions.pop(trade.symbol, None)
+
     ws_manager = _get_ws_manager(request)
     await ws_manager.broadcast({"type": "trade_closed", "trade": TradeResponse.model_validate(trade).model_dump(mode="json")})
 
@@ -347,7 +352,7 @@ async def get_klines(
     raw = []
     if exchange is not None and not endTime:
         try:
-            raw = exchange.fetch_ohlcv(symbol, tf_val, limit=limit_val + 60)
+            raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, tf_val, limit=limit_val + 60)
         except Exception as exc:
             logger.warning(f"fetch_ohlcv for {symbol} failed: {exc}")
 
@@ -357,6 +362,7 @@ async def get_klines(
         fetch_limit = limit_val if endTime else (limit_val + 60)
         end_time_param = f"&endTime={endTime}" if endTime else ""
         endpoints = [
+            f"https://fapi.binance.com/fapi/v1/klines?symbol={clean_symbol}&interval={tf_val}&limit={fetch_limit}{end_time_param}",
             f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={fetch_limit}{end_time_param}",
             f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={fetch_limit}{end_time_param}",
         ]
@@ -371,7 +377,7 @@ async def get_klines(
         import requests
         for endpoint in endpoints:
             try:
-                resp = requests.get(endpoint, proxies=proxies, timeout=6.0)
+                resp = await asyncio.to_thread(requests.get, endpoint, proxies=proxies, timeout=6.0)
                 if resp.status_code == 200:
                     items = resp.json()
                     if items and isinstance(items, list):

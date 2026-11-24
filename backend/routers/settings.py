@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from database import SymbolConfig, get_db
@@ -72,7 +72,7 @@ def list_symbols(db: Session = Depends(get_db)):
     status_code=status.HTTP_201_CREATED,
     summary="Create symbol config",
 )
-def create_symbol(body: SymbolConfigCreate, db: Session = Depends(get_db)):
+async def create_symbol(body: SymbolConfigCreate, request: Request, db: Session = Depends(get_db)):
     existing = db.query(SymbolConfig).filter(SymbolConfig.symbol == body.symbol.upper()).first()
     if existing:
         raise HTTPException(
@@ -92,12 +92,17 @@ def create_symbol(body: SymbolConfigCreate, db: Session = Depends(get_db)):
     db.add(obj)
     db.commit()
     db.refresh(obj)
+
+    bot = getattr(request.app.state, "bot", None)
+    if bot is not None and bot.running and hasattr(bot, "reload_symbols"):
+        await bot.reload_symbols()
+
     return obj
 
 
 @router.put("/symbols/{symbol_id}", response_model=SymbolConfigResponse, summary="Update symbol config")
 @router.post("/symbols/{symbol_id}", response_model=SymbolConfigResponse, summary="Update symbol config (POST fallback)")
-def update_symbol(symbol_id: int, body: SymbolConfigUpdate, db: Session = Depends(get_db)):
+async def update_symbol(symbol_id: int, body: SymbolConfigUpdate, request: Request, db: Session = Depends(get_db)):
     obj = db.query(SymbolConfig).filter(SymbolConfig.id == symbol_id).first()
     if not obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol config not found.")
@@ -108,6 +113,11 @@ def update_symbol(symbol_id: int, body: SymbolConfigUpdate, db: Session = Depend
 
     db.commit()
     db.refresh(obj)
+
+    bot = getattr(request.app.state, "bot", None)
+    if bot is not None and bot.running and hasattr(bot, "reload_symbols"):
+        await bot.reload_symbols()
+
     return obj
 
 
@@ -116,12 +126,16 @@ def update_symbol(symbol_id: int, body: SymbolConfigUpdate, db: Session = Depend
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete symbol config",
 )
-def delete_symbol(symbol_id: int, db: Session = Depends(get_db)):
+async def delete_symbol(symbol_id: int, request: Request, db: Session = Depends(get_db)):
     obj = db.query(SymbolConfig).filter(SymbolConfig.id == symbol_id).first()
     if not obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol config not found.")
     db.delete(obj)
     db.commit()
+
+    bot = getattr(request.app.state, "bot", None)
+    if bot is not None and bot.running and hasattr(bot, "reload_symbols"):
+        await bot.reload_symbols()
 
 
 # ---------------------------------------------------------------------------

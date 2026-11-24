@@ -967,7 +967,8 @@ const AppController = (() => {
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const token = (typeof AuthManager !== 'undefined' && AuthManager.getToken) ? AuthManager.getToken() : '';
+    const wsUrl = `${protocol}//${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
     const badge = document.getElementById('wsBadge');
 
     try {

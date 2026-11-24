@@ -4,7 +4,7 @@ Each symbol gets its own MAStrategy instance so confirm_count is never shared.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -177,9 +177,9 @@ class MAStrategy:
         """
         Return a close_reason string if the position should be closed, else None.
 
-        Checks:
-        1. MA60 cross (price crosses through MA60 against position direction).
-        2. Time-based stop: position open for more than 5 minutes (for 1-min TF).
+        Aligns with Backtester:
+        1. If trailing_active is True, exit when price closes beyond MA7.
+        2. Otherwise, exit on MA60 cross against position direction.
         """
         if df is None or df.empty:
             return None
@@ -187,22 +187,21 @@ class MAStrategy:
         df = self.calculate_ma(df)
         last = df.iloc[-1]
         direction = position.get("direction")
-        open_time = position.get("open_time")
+        trailing_active = bool(position.get("trailing_active", False))
 
-        # --- MA60 cross exit ---
-        ma60 = last["ma60"]
-        close = last["close"]
-        if direction == "long" and close < ma60:
-            return "ma60_cross"
-        if direction == "short" and close > ma60:
-            return "ma60_cross"
+        close = float(last["close"])
+        ma7 = float(last["ma7"])
+        ma60 = float(last["ma60"])
 
-        # --- Time stop (5 minutes) ---
-        if open_time is not None:
-            if isinstance(open_time, str):
-                open_time = datetime.fromisoformat(open_time)
-            elapsed = datetime.utcnow() - open_time
-            if elapsed > timedelta(minutes=5):
-                return "time_stop"
+        if trailing_active:
+            if direction == "long" and close < ma7:
+                return "ma7_trailing"
+            if direction == "short" and close > ma7:
+                return "ma7_trailing"
+        else:
+            if direction == "long" and close < ma60:
+                return "ma60_cross"
+            if direction == "short" and close > ma60:
+                return "ma60_cross"
 
         return None

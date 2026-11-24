@@ -15,6 +15,7 @@ import websockets
 logger = logging.getLogger(__name__)
 
 PRIMARY_WS_URL = "wss://data-stream.binance.vision/stream"
+FUTURES_WS_URL = "wss://fstream.binance.com/stream"
 FALLBACK_WS_URL = "wss://stream.binance.com:9443/stream"
 
 
@@ -24,8 +25,9 @@ class BinanceWSStreamer:
     Maintains an in-memory price cache for instant zero-HTTP lookups.
     """
 
-    def __init__(self):
+    def __init__(self, use_futures: bool = True):
         self.symbols: Set[str] = set()
+        self.use_futures = use_futures
         self.latest_prices: Dict[str, float] = {}
         self.latest_ts: Dict[str, float] = {}
         self.callbacks: List[Callable[[dict], Any]] = []
@@ -81,7 +83,7 @@ class BinanceWSStreamer:
 
     async def _stream_loop(self):
         """Main connection and message dispatch loop with automatic reconnect."""
-        urls = [PRIMARY_WS_URL, FALLBACK_WS_URL]
+        urls = [FUTURES_WS_URL, PRIMARY_WS_URL, FALLBACK_WS_URL] if getattr(self, "use_futures", True) else [PRIMARY_WS_URL, FALLBACK_WS_URL]
         url_idx = 0
         backoff = 1.0
 
