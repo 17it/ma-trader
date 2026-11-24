@@ -26,6 +26,34 @@ class Executor:
         self.exchange = exchange
         self.config = config
 
+    def _ensure_markets(self) -> None:
+        """Load exchange markets once so ccxt precision helpers work."""
+        if self.exchange is not None and not getattr(self.exchange, "markets", None):
+            try:
+                self.exchange.load_markets()
+            except Exception as exc:
+                logger.warning(f"load_markets failed: {exc}")
+
+    def _fmt_qty(self, symbol: str, qty: float) -> float:
+        """Format order quantity according to exchange stepSize precision."""
+        if self.exchange is not None:
+            try:
+                self._ensure_markets()
+                return float(self.exchange.amount_to_precision(symbol, qty))
+            except Exception as exc:
+                logger.warning(f"amount_to_precision failed for {symbol}: {exc}")
+        return round(qty, 4)
+
+    def _fmt_price(self, symbol: str, price: float) -> float:
+        """Format order/trigger price according to exchange tickSize precision."""
+        if self.exchange is not None:
+            try:
+                self._ensure_markets()
+                return float(self.exchange.price_to_precision(symbol, price))
+            except Exception as exc:
+                logger.warning(f"price_to_precision failed for {symbol}: {exc}")
+        return round(price, 4)
+
     # ------------------------------------------------------------------
     # Position sizing
     # ------------------------------------------------------------------
@@ -92,6 +120,11 @@ class Executor:
 
         # Live trading via ccxt
         try:
+            qty = self._fmt_qty(symbol, qty)
+            stop_loss = self._fmt_price(symbol, stop_loss)
+            trade["quantity"] = qty
+            trade["stop_loss"] = stop_loss
+
             order = self.exchange.create_market_buy_order(symbol, qty)
             trade["entry_price"] = float(order.get("average") or order.get("price") or entry)
             trade["exchange_order_id"] = order.get("id")
@@ -140,6 +173,11 @@ class Executor:
             return trade
 
         try:
+            qty = self._fmt_qty(symbol, qty)
+            stop_loss = self._fmt_price(symbol, stop_loss)
+            trade["quantity"] = qty
+            trade["stop_loss"] = stop_loss
+
             order = self.exchange.create_market_sell_order(symbol, qty)
             trade["entry_price"] = float(order.get("average") or order.get("price") or entry)
             trade["exchange_order_id"] = order.get("id")
@@ -205,10 +243,11 @@ class Executor:
 
             if self.exchange:
                 try:
+                    close_qty = self._fmt_qty(trade["symbol"], qty)
                     if direction == "long":
-                        self.exchange.create_market_sell_order(trade["symbol"], qty)
+                        self.exchange.create_market_sell_order(trade["symbol"], close_qty, {"reduceOnly": True})
                     else:
-                        self.exchange.create_market_buy_order(trade["symbol"], qty)
+                        self.exchange.create_market_buy_order(trade["symbol"], close_qty, {"reduceOnly": True})
                 except Exception as exc:
                     logger.error(f"close_position market order failed: {exc}")
                     raise

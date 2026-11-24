@@ -425,7 +425,12 @@ class TradingBot:
                 return
 
         risk_amount = balance * risk_pct
-        quantity = round((risk_amount * leverage) / sl_distance, 6)
+        raw_qty = risk_amount / sl_distance
+        # Cap notional exposure within available margin * leverage (95% safety buffer)
+        max_notional = balance * leverage * 0.95
+        if raw_qty * entry_price > max_notional:
+            raw_qty = max_notional / entry_price
+        quantity = round(raw_qty, 6)
         if quantity <= 0:
             return
 
