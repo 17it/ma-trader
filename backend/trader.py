@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 
 # Polling interval per timeframe (seconds)
 _TF_INTERVAL: Dict[str, int] = {
-    "1m": 30,
-    "3m": 45,
-    "5m": 60,
-    "15m": 120,
-    "30m": 180,
+    "1m": 15,
+    "3m": 30,
+    "5m": 45,
+    "15m": 60,
+    "30m": 120,
     "1h": 300,
 }
 _DEFAULT_INTERVAL = 60
@@ -201,6 +201,8 @@ class TradingBot:
         interval: int = _interval_for(timeframe)
 
         strategy: MAStrategy = self.strategies[symbol]
+        last_closed_bar_ts = None
+        first_cycle = True
 
         while self.running:
             try:
@@ -209,7 +211,7 @@ class TradingBot:
                 df_htf = self.data_feed.get_ohlcv(symbol, htf_timeframe, limit=100)
                 price = self.data_feed.get_ticker(symbol)
 
-                if df_1m is None or df_1m.empty:
+                if df_1m is None or df_1m.empty or len(df_1m) < 3:
                     logger.warning("No data for %s, skipping cycle", symbol)
                     await asyncio.sleep(interval)
                     continue
@@ -218,15 +220,15 @@ class TradingBot:
                 if price is not None:
                     self.broadcast({"type": "ticker", "symbol": symbol, "price": price})
 
-                # --- Compute MAs and broadcast update ---
-                df_1m = strategy.calculate_ma(df_1m)
-                last = df_1m.iloc[-1]
+                # --- Compute MAs and broadcast real-time UI update ---
+                df_1m_ma = strategy.calculate_ma(df_1m)
+                last = df_1m_ma.iloc[-1]
                 ma7 = round(float(last["ma7"]), 4)
                 ma25 = round(float(last["ma25"]), 4)
                 ma60 = round(float(last["ma60"]), 4)
                 close = round(float(last["close"]), 4)
 
-                direction_str = strategy.check_alignment(df_1m)
+                direction_str = strategy.check_alignment(df_1m_ma)
                 direction_label = (
                     "long_aligned" if direction_str == "long"
                     else "short_aligned" if direction_str == "short"
@@ -242,36 +244,47 @@ class TradingBot:
                     "direction": direction_label,
                 })
 
-                # --- Strategy signal ---
-                signal = strategy.get_signal(df_1m, df_htf, confirm_candles)
+                # --- Strategy confirmation: Strictly evaluate on newly closed candles (Bar Close) ---
+                # In df_1m: the last row iloc[-1] is the unclosed forming bar; iloc[:-1] are fully closed bars.
+                closed_df = df_1m.iloc[:-1].copy()
+                closed_candle_ts = closed_df.iloc[-1]["timestamp"]
 
-                if signal is None:
-                    # Reset
-                    if self.confirm_counts.get(symbol, 0) != 0:
-                        self.confirm_counts[symbol] = 0
-                        self.broadcast({"type": "signal_reset", "symbol": symbol})
-                elif signal.get("pending"):
-                    # Partial confirmation — broadcast progress
-                    self.confirm_counts[symbol] = signal["confirm"]
-                    self.broadcast({
-                        "type": "signal",
-                        "symbol": symbol,
-                        "direction": signal["direction"],
-                        "confirm": signal["confirm"],
-                        "max_confirm": signal["max_confirm"],
-                    })
-                else:
-                    # Full confirmation — handle
-                    self.confirm_counts[symbol] = signal["confirm"]
-                    self.broadcast({
-                        "type": "signal",
-                        "symbol": symbol,
-                        "direction": signal["direction"],
-                        "confirm": signal["confirm"],
-                        "max_confirm": signal["max_confirm"],
-                    })
-                    if symbol not in self.positions:
-                        await self._handle_signal(symbol, signal, df_1m, symbol_config)
+                if first_cycle:
+                    # On startup, record the current closed candle timestamp so we only count newly closed candles onwards
+                    last_closed_bar_ts = closed_candle_ts
+                    first_cycle = False
+                elif last_closed_bar_ts != closed_candle_ts:
+                    # A new 1-minute candle has officially closed!
+                    last_closed_bar_ts = closed_candle_ts
+                    signal = strategy.get_signal(closed_df, df_htf, confirm_candles)
+
+                    if signal is None:
+                        # Reset
+                        if self.confirm_counts.get(symbol, 0) != 0:
+                            self.confirm_counts[symbol] = 0
+                            self.broadcast({"type": "signal_reset", "symbol": symbol})
+                    elif signal.get("pending"):
+                        # Partial confirmation on closed candle — broadcast progress
+                        self.confirm_counts[symbol] = signal["confirm"]
+                        self.broadcast({
+                            "type": "signal",
+                            "symbol": symbol,
+                            "direction": signal["direction"],
+                            "confirm": signal["confirm"],
+                            "max_confirm": signal["max_confirm"],
+                        })
+                    else:
+                        # Full confirmation reached on closed candles!
+                        self.confirm_counts[symbol] = signal["confirm"]
+                        self.broadcast({
+                            "type": "signal",
+                            "symbol": symbol,
+                            "direction": signal["direction"],
+                            "confirm": signal["confirm"],
+                            "max_confirm": signal["max_confirm"],
+                        })
+                        if symbol not in self.positions:
+                            await self._handle_signal(symbol, signal, closed_df, symbol_config)
 
             except asyncio.CancelledError:
                 raise
@@ -292,7 +305,8 @@ class TradingBot:
         """Open a trade when a confirmed signal arrives."""
         direction = signal["direction"]
         last = df.iloc[-1]
-        entry_price = float(last["close"])
+        ticker_price = self.data_feed.get_ticker(symbol)
+        entry_price = float(ticker_price) if ticker_price and ticker_price > 0 else float(last["close"])
         ma7 = float(last["ma7"])
         ma25 = float(last["ma25"])
         ma60 = float(last["ma60"])
