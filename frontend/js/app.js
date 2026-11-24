@@ -144,6 +144,7 @@ const AppController = (() => {
 
   function applyTheme(theme, notifyCharts = true) {
     document.documentElement.setAttribute('data-bs-theme', theme);
+    document.documentElement.classList.toggle('dark', theme === 'dark');
     const icon = document.getElementById('themeIcon');
     const label = document.getElementById('themeLabel');
     if (theme === 'light') {
@@ -763,8 +764,8 @@ const AppController = (() => {
       }
 
       const typeBadge = t.is_paper
-        ? '<span class="badge bg-secondary-subtle text-light border border-secondary" title="Paper Trading">模拟</span>'
-        : '<span class="badge bg-danger-subtle text-danger border border-danger" title="Live Trading">实盘</span>';
+        ? '<span class="badge el-tag-paper" title="Paper Trading">模拟</span>'
+        : '<span class="badge bg-danger-subtle text-danger border border-danger-subtle" title="Live Trading">实盘</span>';
 
       const timeStr = t.open_time ? t.open_time.replace('T', ' ').slice(5, 16) : '—';
 
