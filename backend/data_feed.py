@@ -27,7 +27,9 @@ class DataFeed:
         secret: Optional[str] = None,
         use_futures: bool = True,
         proxy: Optional[str] = None,
+        ws_streamer: Optional[object] = None,
     ):
+        self._ws_streamer = ws_streamer
         try:
             import ccxt, os
 
@@ -65,6 +67,10 @@ class DataFeed:
             self._exchange = None
             self._authenticated = False
             self._proxy = None
+
+    def set_ws_streamer(self, ws_streamer):
+        """Attach or update the WebSocket real-time price streamer."""
+        self._ws_streamer = ws_streamer
 
     # ------------------------------------------------------------------
     # Public Binance Vision Fallback (No Geo/451 Restriction)
@@ -179,8 +185,16 @@ class DataFeed:
     def get_ticker(self, symbol: str) -> Optional[float]:
         """
         Return the last traded price for *symbol*, or None on failure.
-        No simulated fake prices allowed.
+        Prioritizes the real-time WebSocket cache (0ms, zero HTTP requests).
+        Falls back to ccxt / Binance Vision public REST endpoints when cache is empty.
         """
+        # 1. Zero-HTTP WebSocket cache
+        if getattr(self, "_ws_streamer", None):
+            cached = self._ws_streamer.get_cached_price(symbol)
+            if cached is not None and cached > 0:
+                return cached
+
+        # 2. REST fallback
         if self._exchange is not None and not getattr(self, "_geo_blocked", False):
             try:
                 ticker = self._exchange.fetch_ticker(symbol)

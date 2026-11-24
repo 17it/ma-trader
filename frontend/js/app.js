@@ -742,7 +742,20 @@ const AppController = (() => {
       }
 
       let pnlText = '—';
-      if (t.pnl !== null && t.pnl !== undefined) {
+      if (t.status === 'open') {
+        const curPrice = (state.prices && state.prices[t.symbol]) || (t.symbol === state.currentSymbol ? state.currentPrice : null);
+        if (curPrice && t.entry_price && t.quantity) {
+          const isLong = (t.direction || '').toLowerCase() === 'long';
+          const diff = isLong ? (curPrice - t.entry_price) : (t.entry_price - curPrice);
+          const unrealizedPnl = diff * t.quantity;
+          const unrealizedPct = (unrealizedPnl / (t.entry_price * t.quantity)) * 100;
+          const sign = unrealizedPnl >= 0 ? '+' : '';
+          const color = unrealizedPnl >= 0 ? 'text-success' : 'text-danger';
+          pnlText = `<span class="${color} fw-bold open-pnl-cell" data-trade-id="${t.id}" data-symbol="${t.symbol}" data-dir="${t.direction}" data-entry="${t.entry_price}" data-qty="${t.quantity}">${sign}$${unrealizedPnl.toFixed(2)} (${sign}${unrealizedPct.toFixed(1)}%)</span> <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-1" style="font-size:10px;">持仓浮动</span>`;
+        } else {
+          pnlText = `<span class="text-secondary open-pnl-cell" data-trade-id="${t.id}" data-symbol="${t.symbol}" data-dir="${t.direction}" data-entry="${t.entry_price}" data-qty="${t.quantity}">浮动中...</span> <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-1" style="font-size:10px;">持仓浮动</span>`;
+        }
+      } else if (t.pnl !== null && t.pnl !== undefined) {
         const sign = t.pnl >= 0 ? '+' : '';
         const color = t.pnl >= 0 ? 'text-success' : 'text-danger';
         const pct = t.pnl_pct ? ` (${(t.pnl_pct * 100).toFixed(1)}%)` : '';
@@ -785,6 +798,26 @@ const AppController = (() => {
         <td class="text-end text-nowrap">${actionBtn}</td>
       `;
       tbody.appendChild(tr);
+    });
+  }
+
+  function updateOpenTradesPnl(symbol, price) {
+    if (!symbol || !price) return;
+    const cells = document.querySelectorAll(`.open-pnl-cell[data-symbol="${symbol}"]`);
+    cells.forEach(el => {
+      const entry = parseFloat(el.getAttribute('data-entry'));
+      const qty = parseFloat(el.getAttribute('data-qty'));
+      const dir = (el.getAttribute('data-dir') || '').toLowerCase();
+      if (!isNaN(entry) && !isNaN(qty) && entry > 0 && qty > 0) {
+        const isLong = dir === 'long';
+        const diff = isLong ? (price - entry) : (entry - price);
+        const unrealizedPnl = diff * qty;
+        const unrealizedPct = (unrealizedPnl / (entry * qty)) * 100;
+        const sign = unrealizedPnl >= 0 ? '+' : '';
+        const color = unrealizedPnl >= 0 ? 'text-success' : 'text-danger';
+        el.className = `${color} fw-bold open-pnl-cell`;
+        el.innerHTML = `${sign}$${unrealizedPnl.toFixed(2)} (${sign}${unrealizedPct.toFixed(1)}%) <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-1" style="font-size:10px;">持仓浮动</span>`;
+      }
     });
   }
 
@@ -992,6 +1025,8 @@ const AppController = (() => {
 
     switch (msg.type) {
       case 'ticker': {
+        state.prices = state.prices || {};
+        state.prices[msg.symbol] = msg.price;
         // Update sidebar
         if (typeof SettingsManager !== 'undefined' && SettingsManager.updateSymbolPrice) {
           SettingsManager.updateSymbolPrice(msg.symbol, msg.price);
@@ -1000,6 +1035,8 @@ const AppController = (() => {
         if (msg.symbol === state.currentSymbol) {
           updateCurrentPrice(msg.price);
         }
+        // Real-time floating PnL update for open trades
+        updateOpenTradesPnl(msg.symbol, msg.price);
         break;
       }
 

@@ -14,8 +14,10 @@ from typing import Callable, Dict, List, Optional
 
 try:
     from backend.strategy import MAStrategy
+    from backend.binance_ws import BinanceWSStreamer
 except ImportError:
     from strategy import MAStrategy
+    from binance_ws import BinanceWSStreamer
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +62,18 @@ class TradingBot:
 
         self.running: bool = False
         self.strategies: Dict[str, MAStrategy] = {}   # symbol → MAStrategy
-        self.positions: Dict[str, object] = {}         # symbol → Trade ORM obj
+        self.positions: Dict[str, dict] = {}          # symbol → pos_info dict (avoids detached session bugs)
         self.confirm_counts: Dict[str, int] = {}       # mirrored for quick access
         self.ws_callbacks: List[Callable[[dict], None]] = []
 
         self._tasks: Dict[str, asyncio.Task] = {}
         self._exit_task: Optional[asyncio.Task] = None
+
+        # Real-time WebSocket streamer for zero-latency, zero-HTTP prices
+        self.ws_streamer = BinanceWSStreamer()
+        self.ws_streamer.register_callback(lambda msg: self.broadcast(msg))
+        if hasattr(self.data_feed, "set_ws_streamer"):
+            self.data_feed.set_ws_streamer(self.ws_streamer)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -81,6 +89,41 @@ class TradingBot:
         self.broadcast({"type": "log", "level": "info", "message": "Bot started"})
 
         symbol_configs = self._load_symbol_configs()
+
+        # Start real-time Binance WebSocket stream for all active symbols
+        active_symbols = [c.symbol for c in symbol_configs if getattr(c, "symbol", None)]
+        self.ws_streamer.start(active_symbols)
+
+        # Restore open trades from DB into memory
+        try:
+            try:
+                from backend.database import Trade
+            except ImportError:
+                from database import Trade
+            session = self.db_session_factory()
+            try:
+                open_trades = session.query(Trade).filter_by(status="open").all()
+                for ot in open_trades:
+                    self.positions[ot.symbol] = {
+                        "id": ot.id,
+                        "symbol": ot.symbol,
+                        "direction": ot.direction,
+                        "entry_price": ot.entry_price,
+                        "stop_loss": ot.stop_loss,
+                        "take_profit": ot.take_profit,
+                        "quantity": ot.quantity,
+                        "status": "open",
+                        "is_paper": ot.is_paper,
+                        "open_time": ot.open_time,
+                        "timeframe": ot.timeframe or "1m",
+                    }
+                if open_trades:
+                    logger.info("Restored %d open trades from database into memory", len(open_trades))
+            finally:
+                session.close()
+        except Exception as exc:
+            logger.warning("Failed to restore open trades on start: %s", exc)
+
         for config in symbol_configs:
             await self._start_symbol(config)
 
@@ -90,6 +133,8 @@ class TradingBot:
     async def stop(self):
         """Cancel all monitoring tasks and mark bot as stopped."""
         self.running = False
+
+        await self.ws_streamer.stop()
 
         for sym, task in list(self._tasks.items()):
             task.cancel()
@@ -315,7 +360,21 @@ class TradingBot:
                 session.add(trade)
                 session.commit()
                 session.refresh(trade)
-                self.positions[symbol] = trade
+                
+                # Store plain dictionary in self.positions to avoid detached instance errors
+                self.positions[symbol] = {
+                    "id": trade.id,
+                    "symbol": trade.symbol,
+                    "direction": trade.direction,
+                    "entry_price": trade.entry_price,
+                    "stop_loss": trade.stop_loss,
+                    "take_profit": trade.take_profit,
+                    "quantity": trade.quantity,
+                    "status": "open",
+                    "is_paper": trade.is_paper,
+                    "open_time": trade.open_time,
+                    "timeframe": getattr(config, "timeframe", "1m"),
+                }
 
                 trade_dict = {
                     "id": trade.id,
@@ -369,80 +428,108 @@ class TradingBot:
 
     async def _check_exits(self):
         """Check all open positions for exit conditions."""
-        for symbol, trade in list(self.positions.items()):
+        for symbol, pos in list(self.positions.items()):
             try:
-                strategy = self.strategies.get(symbol)
-                if strategy is None:
-                    continue
+                direction = pos["direction"] if isinstance(pos, dict) else pos.direction
+                stop_loss = pos["stop_loss"] if isinstance(pos, dict) else pos.stop_loss
+                take_profit = pos["take_profit"] if isinstance(pos, dict) else pos.take_profit
+                open_time = pos["open_time"] if isinstance(pos, dict) else pos.open_time
+                timeframe = pos.get("timeframe", "1m") if isinstance(pos, dict) else getattr(pos, "timeframe", "1m")
 
-                timeframe = getattr(trade, "timeframe", "1m")
-                df = self.data_feed.get_ohlcv(symbol, timeframe, limit=100)
-                if df is None or df.empty:
-                    continue
-                df = strategy.calculate_ma(df)
-
-                position_dict = {
-                    "direction": trade.direction,
-                    "open_time": trade.open_time,
-                }
-                close_reason = strategy.check_exit(df, position_dict)
-
-                # Also check SL / TP
+                # 1. First check Stop Loss / Take Profit via zero-HTTP ticker cache
                 price = self.data_feed.get_ticker(symbol)
+                close_reason = None
                 if price is not None:
-                    if trade.direction == "long":
-                        if price <= trade.stop_loss:
+                    if direction == "long":
+                        if price <= stop_loss:
                             close_reason = "stop_loss"
-                        elif price >= trade.take_profit:
+                        elif price >= take_profit:
                             close_reason = "take_profit"
                     else:
-                        if price >= trade.stop_loss:
+                        if price >= stop_loss:
                             close_reason = "stop_loss"
-                        elif price <= trade.take_profit:
+                        elif price <= take_profit:
                             close_reason = "take_profit"
 
                 if close_reason:
-                    await self._close_trade(symbol, trade, close_reason, price or float(df.iloc[-1]["close"]))
+                    await self._close_trade(symbol, pos, close_reason, price)
+                    continue
+
+                # 2. Check MA indicator exit only if SL/TP not hit
+                strategy = self.strategies.get(symbol)
+                if strategy is not None:
+                    df = self.data_feed.get_ohlcv(symbol, timeframe, limit=100)
+                    if df is not None and not df.empty:
+                        df = strategy.calculate_ma(df)
+                        position_dict = {
+                            "direction": direction,
+                            "open_time": open_time,
+                        }
+                        exit_sig = strategy.check_exit(df, position_dict)
+                        if exit_sig:
+                            await self._close_trade(
+                                symbol, pos, exit_sig, price or float(df.iloc[-1]["close"])
+                            )
 
             except Exception as exc:
                 logger.error("_check_exits(%s) error: %s", symbol, exc, exc_info=True)
 
-    async def _close_trade(self, symbol: str, trade, reason: str, exit_price: float):
-        """Persist trade closure and broadcast the event."""
+    async def _close_trade(self, symbol: str, pos, reason: str, exit_price: float):
+        """Persist trade closure and broadcast the event without detached instance errors."""
+        trade_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
         try:
+            trade_dict = None
+            pnl = 0.0
+            pnl_pct = 0.0
+
             session = self.db_session_factory()
             try:
-                session.add(trade)
-                trade.exit_price = exit_price
-                trade.close_reason = reason
-                trade.close_time = datetime.now(timezone.utc)
-                trade.status = "closed"
+                try:
+                    from backend.database import Trade
+                except ImportError:
+                    from database import Trade
+                db_trade = session.query(Trade).filter_by(id=trade_id).first()
+                if db_trade is None:
+                    logger.warning("Trade id=%s not found in DB when closing", trade_id)
+                    self.positions.pop(symbol, None)
+                    return
+
+                db_trade.exit_price = exit_price
+                db_trade.close_reason = reason
+                db_trade.close_time = datetime.now(timezone.utc)
+                db_trade.status = "closed"
+
                 # PnL
-                if trade.direction == "long":
-                    trade.pnl = (exit_price - trade.entry_price) * trade.quantity
+                if db_trade.direction == "long":
+                    db_trade.pnl = (exit_price - db_trade.entry_price) * db_trade.quantity
                 else:
-                    trade.pnl = (trade.entry_price - exit_price) * trade.quantity
-                trade.pnl_pct = trade.pnl / (trade.entry_price * trade.quantity) * 100
+                    db_trade.pnl = (db_trade.entry_price - exit_price) * db_trade.quantity
+                db_trade.pnl_pct = db_trade.pnl / (db_trade.entry_price * db_trade.quantity) * 100
+
+                # Read all values before session commit / close to prevent DetachedInstanceError
+                pnl = db_trade.pnl
+                pnl_pct = db_trade.pnl_pct
+                trade_dict = {
+                    "id": db_trade.id,
+                    "symbol": db_trade.symbol,
+                    "direction": db_trade.direction,
+                    "entry_price": db_trade.entry_price,
+                    "exit_price": db_trade.exit_price,
+                    "pnl": db_trade.pnl,
+                    "pnl_pct": db_trade.pnl_pct,
+                    "close_reason": reason,
+                    "close_time": db_trade.close_time.isoformat() if db_trade.close_time else None,
+                }
                 session.commit()
             finally:
                 session.close()
 
             self.positions.pop(symbol, None)
 
-            trade_dict = {
-                "id": trade.id,
-                "symbol": trade.symbol,
-                "direction": trade.direction,
-                "entry_price": trade.entry_price,
-                "exit_price": trade.exit_price,
-                "pnl": trade.pnl,
-                "pnl_pct": trade.pnl_pct,
-                "close_reason": reason,
-                "close_time": trade.close_time.isoformat(),
-            }
-            self.broadcast({"type": "trade_closed", "trade": trade_dict})
+            if trade_dict:
+                self.broadcast({"type": "trade_closed", "trade": trade_dict})
 
-            emoji = "✅" if (trade.pnl or 0) >= 0 else "❌"
+            emoji = "✅" if pnl >= 0 else "❌"
             msg = (
                 f"{emoji} {symbol} closed ({reason})\n"
                 f"Exit: {exit_price}  PnL: {trade.pnl:.2f} ({trade.pnl_pct:.1f}%)"
