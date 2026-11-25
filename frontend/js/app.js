@@ -961,13 +961,13 @@ const AppController = (() => {
       const symText = log.symbol ? `<span class="fw-semibold">${_escapeHtml(log.symbol)}</span>` : '<span class="text-secondary">—</span>';
       return `
         <tr>
-          <td class="ps-3 text-secondary">#${log.id}</td>
-          <td class="text-secondary font-monospace small">${_fmtLogTime(log.created_at)}</td>
-          <td><span class="badge ${meta.cls}">${meta.label}</span></td>
-          <td>${modeBadge}</td>
-          <td>${symText}</td>
-          <td class="fw-medium">${_escapeHtml(log.title)}</td>
-          <td class="pe-3 text-secondary small">${_escapeHtml(log.message)}</td>
+          <td class="ps-3 py-3 text-secondary">#${log.id}</td>
+          <td class="py-3 text-secondary font-monospace small">${_fmtLogTime(log.created_at)}</td>
+          <td class="py-3"><span class="badge ${meta.cls}">${meta.label}</span></td>
+          <td class="py-3">${modeBadge}</td>
+          <td class="py-3">${symText}</td>
+          <td class="py-3 fw-medium">${_escapeHtml(log.title)}</td>
+          <td class="pe-3 py-3 text-secondary small">${_escapeHtml(log.message)}</td>
         </tr>
       `;
     }).join('');
