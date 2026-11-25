@@ -18,7 +18,8 @@ const AppController = (() => {
     klinesData: [],
     isLoadingHistory: false,
     hasMoreHistory: true,
-    tradingMode: 'paper'
+    tradingMode: 'paper',
+    tradesMode: 'paper'
   };
 
   // ─── Initialization ────────────────────────────────────────────────
@@ -123,7 +124,27 @@ const AppController = (() => {
     }
     const tradesEqSym = document.getElementById('tradesEquitySymbol');
     if (tradesEqSym) {
-      tradesEqSym.addEventListener('change', () => renderTradesEquityCurve(state.trades));
+      tradesEqSym.addEventListener('change', () => renderTradesView());
+    }
+    const tradesModeWrap = document.getElementById('tradesModeTabs');
+    if (tradesModeWrap) {
+      tradesModeWrap.querySelectorAll('button[data-mode]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.tradesMode = btn.getAttribute('data-mode') || 'paper';
+          tradesModeWrap.querySelectorAll('button[data-mode]').forEach(b => {
+            const isActive = b === btn;
+            b.classList.toggle('active', isActive);
+            if (isActive) {
+              b.className = b.getAttribute('data-mode') === 'live'
+                ? 'btn btn-danger active'
+                : 'btn btn-primary active';
+            } else {
+              b.className = 'btn btn-outline-secondary';
+            }
+          });
+          renderTradesView();
+        });
+      });
     }
     const tabSettingsLink = document.querySelector('a[href="#tabSettings"]');
     if (tabSettingsLink) {
@@ -402,17 +423,12 @@ const AppController = (() => {
 
   async function loadTrades() {
     try {
-      const res = await fetch('/api/trades?limit=100');
+      const res = await fetch('/api/trades?limit=200');
       if (!res.ok) return;
       const trades = await res.json();
       state.trades = trades;
 
-      renderTradesTable(trades);
-      updateTradesEquitySymbols(trades);
-      renderTradesEquityCurve(trades);
-
-      const countEl = document.getElementById('tradeCount');
-      if (countEl) countEl.textContent = trades.length;
+      renderTradesView();
 
       // Update chart markers if on chart tab
       if (typeof ChartManager !== 'undefined' && state.klinesData.length > 0) {
@@ -769,6 +785,25 @@ const AppController = (() => {
     if (bar)  bar.style.width = '0%';
   }
 
+  function renderTradesView() {
+    const allTrades = state.trades || [];
+    const paperTrades = allTrades.filter(t => Boolean(t.is_paper));
+    const liveTrades = allTrades.filter(t => !t.is_paper);
+
+    const pBadge = document.getElementById('paperTradeBadge');
+    const lBadge = document.getElementById('liveTradeBadge');
+    if (pBadge) pBadge.textContent = paperTrades.length;
+    if (lBadge) lBadge.textContent = liveTrades.length;
+
+    const filtered = state.tradesMode === 'live' ? liveTrades : paperTrades;
+    const countEl = document.getElementById('tradeCount');
+    if (countEl) countEl.textContent = filtered.length;
+
+    renderTradesTable(filtered);
+    updateTradesEquitySymbols(filtered);
+    renderTradesEquityCurve(filtered);
+  }
+
   function updateTradesEquitySymbols(trades) {
     const sel = document.getElementById('tradesEquitySymbol');
     if (!sel) return;
@@ -810,7 +845,7 @@ const AppController = (() => {
       return;
     }
 
-    const baseCapital = 10000;
+    const baseCapital = state.tradesMode === 'live' ? 0 : 10000;
     let equity = baseCapital;
     const dates = ['起始'];
     const equities = [baseCapital];
@@ -819,7 +854,7 @@ const AppController = (() => {
     closed.forEach(t => {
       const p = Number(t.pnl || 0);
       equity += p;
-      const tsStr = (t.close_time || t.open_time || '').replace('T', ' ').slice(5, 16) || `#${t.id}`;
+      const tsStr = _fmtTradeTime(t.close_time || t.open_time) || `#${t.id}`;
       dates.push(`#${t.id} ${tsStr}`);
       equities.push(Number(equity.toFixed(2)));
       pnls.push(p);
@@ -829,7 +864,11 @@ const AppController = (() => {
     const sign = totalPnl >= 0 ? '+' : '';
     const colorClass = totalPnl >= 0 ? 'text-success' : 'text-danger';
     if (summaryEl) {
-      summaryEl.innerHTML = `已平仓 ${closed.length} 笔 · 累计盈亏 <span class="${colorClass} fw-bold">${sign}$${totalPnl.toFixed(2)}</span> · 当前权益 <b>$${equity.toFixed(2)}</b>`;
+      if (state.tradesMode === 'live') {
+        summaryEl.innerHTML = `实盘已平仓 ${closed.length} 笔 · 累计净盈亏 <span class="${colorClass} fw-bold">${sign}$${totalPnl.toFixed(2)}</span>`;
+      } else {
+        summaryEl.innerHTML = `模拟已平仓 ${closed.length} 笔 · 累计盈亏 <span class="${colorClass} fw-bold">${sign}$${totalPnl.toFixed(2)}</span> · 当前权益 <b>$${equity.toFixed(2)}</b>`;
+      }
     }
 
     TradesEquityChart.render(dates, equities, pnls);
