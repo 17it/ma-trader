@@ -739,16 +739,20 @@ class TradingBot:
                 self.broadcast({"type": "trade_closed", "trade": trade_dict})
 
             emoji = "✅" if pnl >= 0 else "❌"
+            pnl_sign = "+" if pnl >= 0 else ""
+            mode_tag = "PAPER" if is_paper else "LIVE"
+            entry_p = trade_dict["entry_price"] if trade_dict else ""
             msg = (
-                f"{emoji} {symbol} closed ({reason})\n"
-                f"Exit: {exit_price}  PnL: {trade.pnl:.2f} ({trade.pnl_pct:.1f}%)"
+                f"{emoji} {symbol} closed ({reason}) [{mode_tag}]\n"
+                f"Entry: {entry_p}  Exit: {exit_price}\n"
+                f"PnL: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)"
             )
             self.broadcast({"type": "log", "level": "info", "message": msg})
             if self.notifier:
                 try:
                     await self.notifier.send(msg)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Telegram close notification failed: %s", exc)
 
         except Exception as exc:
             logger.error("_close_trade(%s) failed: %s", symbol, exc, exc_info=True)

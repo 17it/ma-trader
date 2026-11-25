@@ -109,7 +109,16 @@ const AppController = (() => {
     }
     const tabTradesLink = document.querySelector('a[href="#tabTrades"]');
     if (tabTradesLink) {
-      tabTradesLink.addEventListener('shown.bs.tab', loadTrades);
+      tabTradesLink.addEventListener('shown.bs.tab', () => {
+        loadTrades();
+        if (typeof TradesEquityChart !== 'undefined') {
+          setTimeout(() => TradesEquityChart.resize(), 60);
+        }
+      });
+    }
+    const tradesEqSym = document.getElementById('tradesEquitySymbol');
+    if (tradesEqSym) {
+      tradesEqSym.addEventListener('change', () => renderTradesEquityCurve(state.trades));
     }
     const tabSettingsLink = document.querySelector('a[href="#tabSettings"]');
     if (tabSettingsLink) {
@@ -168,6 +177,9 @@ const AppController = (() => {
       }
       if (typeof BacktestChart !== 'undefined' && BacktestChart.updateTheme) {
         BacktestChart.updateTheme();
+      }
+      if (typeof TradesEquityChart !== 'undefined' && TradesEquityChart.updateTheme) {
+        TradesEquityChart.updateTheme();
       }
     }
   }
@@ -391,6 +403,8 @@ const AppController = (() => {
       state.trades = trades;
 
       renderTradesTable(trades);
+      updateTradesEquitySymbols(trades);
+      renderTradesEquityCurve(trades);
 
       const countEl = document.getElementById('tradeCount');
       if (countEl) countEl.textContent = trades.length;
@@ -748,6 +762,72 @@ const AppController = (() => {
     if (info) info.textContent = '无信号';
     if (wrap) wrap.style.setProperty('display', 'none', 'important');
     if (bar)  bar.style.width = '0%';
+  }
+
+  function updateTradesEquitySymbols(trades) {
+    const sel = document.getElementById('tradesEquitySymbol');
+    if (!sel) return;
+    const prev = sel.value;
+    const symSet = new Set();
+    (state.symbols || []).forEach(s => { if (s.symbol) symSet.add(s.symbol); });
+    (trades || []).forEach(t => { if (t.symbol) symSet.add(t.symbol); });
+
+    const opts = ['<option value="ALL">全部币种</option>'];
+    Array.from(symSet).sort().forEach(sym => {
+      opts.push(`<option value="${sym}">${sym}</option>`);
+    });
+    sel.innerHTML = opts.join('');
+
+    if (prev && (prev === 'ALL' || symSet.has(prev))) {
+      sel.value = prev;
+    } else if (symSet.size > 0) {
+      // Default to first available symbol (or BTCUSDT if present)
+      sel.value = symSet.has('BTCUSDT') ? 'BTCUSDT' : Array.from(symSet).sort()[0];
+    } else {
+      sel.value = 'ALL';
+    }
+  }
+
+  function renderTradesEquityCurve(trades) {
+    if (typeof TradesEquityChart === 'undefined') return;
+    const sel = document.getElementById('tradesEquitySymbol');
+    const summaryEl = document.getElementById('tradesEquitySummary');
+    const selectedSymbol = sel ? sel.value : 'ALL';
+
+    const closed = (trades || [])
+      .filter(t => t.status === 'closed' && (selectedSymbol === 'ALL' || t.symbol === selectedSymbol))
+      .slice()
+      .sort((a, b) => new Date(a.close_time || a.open_time) - new Date(b.close_time || b.open_time));
+
+    if (closed.length === 0) {
+      if (summaryEl) summaryEl.textContent = '暂无已平仓订单';
+      TradesEquityChart.render([], [], []);
+      return;
+    }
+
+    const baseCapital = 10000;
+    let equity = baseCapital;
+    const dates = ['起始'];
+    const equities = [baseCapital];
+    const pnls = [null];
+
+    closed.forEach(t => {
+      const p = Number(t.pnl || 0);
+      equity += p;
+      const tsStr = (t.close_time || t.open_time || '').replace('T', ' ').slice(5, 16) || `#${t.id}`;
+      dates.push(`#${t.id} ${tsStr}`);
+      equities.push(Number(equity.toFixed(2)));
+      pnls.push(p);
+    });
+
+    const totalPnl = equity - baseCapital;
+    const sign = totalPnl >= 0 ? '+' : '';
+    const colorClass = totalPnl >= 0 ? 'text-success' : 'text-danger';
+    if (summaryEl) {
+      summaryEl.innerHTML = `已平仓 ${closed.length} 笔 · 累计盈亏 <span class="${colorClass} fw-bold">${sign}$${totalPnl.toFixed(2)}</span> · 当前权益 <b>$${equity.toFixed(2)}</b>`;
+    }
+
+    TradesEquityChart.render(dates, equities, pnls);
   }
 
   function renderTradesTable(trades) {

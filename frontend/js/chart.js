@@ -531,3 +531,117 @@ const BacktestChart = (() => {
   window.addEventListener('resize', () => chart?.resize());
   return { render, updateTheme, resize };
 })();
+
+// ─── Trades Equity Curve Chart ─────────────────────────────────────────
+const TradesEquityChart = (() => {
+  let chart = null;
+  let lastData = null;
+
+  function render(dates, equity, pnls = []) {
+    lastData = { dates, equity, pnls };
+    const el = document.getElementById('tradesEquityChart');
+    if (!el) return;
+    const cfg = getThemeConfig();
+
+    if (!chart) {
+      chart = echarts.init(el, cfg.echartsTheme);
+    } else {
+      chart.resize();
+    }
+
+    if (!dates || dates.length === 0) {
+      chart.clear();
+      chart.setOption({
+        backgroundColor: 'transparent',
+        title: {
+          text: '暂无已平仓交易记录',
+          left: 'center',
+          top: 'middle',
+          textStyle: { color: cfg.axisLabel, fontSize: 13, fontWeight: 'normal' }
+        }
+      });
+      return;
+    }
+
+    chart.setOption({
+      backgroundColor: 'transparent',
+      animation: false,
+      title: { show: false },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: cfg.tooltipBg,
+        borderColor: cfg.tooltipBorder,
+        textStyle: { color: cfg.tooltipText, fontSize: 12 },
+        formatter: (params) => {
+          const p = params && params[0];
+          if (!p) return '';
+          const idx = p.dataIndex;
+          const eqVal = Number(p.value).toFixed(2);
+          const tradePnl = pnls[idx];
+          let html = `<div style="font-weight:600;margin-bottom:4px;">${p.axisValue}</div>`;
+          html += `<div>累计权益: <b>$${eqVal}</b></div>`;
+          if (tradePnl !== null && tradePnl !== undefined) {
+            const sign = tradePnl >= 0 ? '+' : '';
+            const color = tradePnl >= 0 ? cfg.bullish : cfg.bearish;
+            html += `<div>当笔盈亏: <span style="color:${color};font-weight:600;">${sign}$${Number(tradePnl).toFixed(2)}</span></div>`;
+          }
+          return html;
+        }
+      },
+      grid: { left: 65, right: 18, top: 16, bottom: 42 },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        axisLabel: { color: cfg.axisLabel, fontSize: 10, rotate: 25 },
+        axisLine: { lineStyle: { color: cfg.axisLine } }
+      },
+      yAxis: {
+        type: 'value',
+        scale: true,
+        axisLabel: { color: cfg.axisLabel, fontSize: 10, formatter: '${value}' },
+        splitLine: { lineStyle: { color: cfg.splitLine } }
+      },
+      series: [{
+        name: '权益',
+        type: 'line',
+        data: equity,
+        smooth: true,
+        symbol: 'circle',
+        symbolSize: 5,
+        lineStyle: { color: cfg.equityLine, width: 2 },
+        itemStyle: { color: cfg.equityLine },
+        areaStyle: {
+          color: {
+            type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [
+              { offset: 0, color: cfg.equityAreaStart },
+              { offset: 1, color: cfg.equityAreaEnd }
+            ]
+          }
+        }
+      }]
+    }, true);
+
+    requestAnimationFrame(() => chart?.resize());
+    setTimeout(() => chart?.resize(), 60);
+  }
+
+  function resize() {
+    if (chart) {
+      chart.resize();
+    } else if (lastData) {
+      render(lastData.dates, lastData.equity, lastData.pnls);
+    }
+  }
+
+  function updateTheme() {
+    if (chart) {
+      try { echarts.dispose(chart); } catch {}
+      chart = null;
+    }
+    if (lastData) render(lastData.dates, lastData.equity, lastData.pnls);
+  }
+
+  window.addEventListener('resize', () => chart?.resize());
+  return { render, updateTheme, resize };
+})();

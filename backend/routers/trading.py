@@ -302,6 +302,25 @@ async def manual_close_trade(
     ws_manager = _get_ws_manager(request)
     await ws_manager.broadcast({"type": "trade_closed", "trade": TradeResponse.model_validate(trade).model_dump(mode="json")})
 
+    # Send Telegram close notification
+    try:
+        cfg_mgr = _get_config(request)
+        cfg = cfg_mgr.get_all_cached() if cfg_mgr else {}
+        notifier = TelegramNotifier(
+            token=cfg.get("telegram_token"),
+            chat_id=cfg.get("telegram_chat_id"),
+        )
+        emoji = "✅" if trade.pnl >= 0 else "❌"
+        pnl_sign = "+" if trade.pnl >= 0 else ""
+        tg_msg = (
+            f"{emoji} {trade.symbol} closed (manual) [PAPER]\n"
+            f"Entry: {trade.entry_price}  Exit: {exit_price}\n"
+            f"PnL: {pnl_sign}${trade.pnl:.2f} ({pnl_sign}{trade.pnl_pct:.2f}%)"
+        )
+        await notifier.send(tg_msg)
+    except Exception as exc:
+        logger.warning(f"Manual close Telegram notification failed: {exc}")
+
     return TradeResponse.model_validate(trade)
 
 
