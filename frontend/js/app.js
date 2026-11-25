@@ -221,7 +221,7 @@ const AppController = (() => {
   function setupSidebar() {
     const sidebar = document.getElementById('sidebar');
     if (!sidebar) return;
-    const isSmallScreen = window.innerWidth < 992;
+    const isSmallScreen = window.innerWidth < 1920;
     const saved = localStorage.getItem('ma_sidebar_collapsed');
     const shouldCollapse = isSmallScreen ? true : (saved === '1');
     sidebar.classList.toggle('collapsed', shouldCollapse);
@@ -231,7 +231,7 @@ const AppController = (() => {
     const sidebar = document.getElementById('sidebar');
     if (!sidebar) return;
     const collapsed = sidebar.classList.toggle('collapsed');
-    if (window.innerWidth >= 992) {
+    if (window.innerWidth >= 1920) {
       localStorage.setItem('ma_sidebar_collapsed', collapsed ? '1' : '0');
     }
     setTimeout(() => {

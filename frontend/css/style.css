@@ -264,18 +264,22 @@ html, body {
 }
 
 #btnToggleSidebar {
-  border: 1px solid var(--border);
+  border: none;
   color: var(--text-regular);
-  background: var(--bg-card);
-  padding: 4px 9px;
-  border-radius: 6px;
+  background: transparent;
+  padding: 4px 6px;
+  font-size: 16px;
+  line-height: 1;
+  box-shadow: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
-#btnToggleSidebar:hover {
-  background: var(--accent-blue-soft);
-  border-color: var(--accent-blue);
+#btnToggleSidebar:hover,
+#btnToggleSidebar:focus {
+  background: transparent;
+  border: none;
+  box-shadow: none;
   color: var(--accent-blue);
 }
 
