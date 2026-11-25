@@ -94,6 +94,27 @@ class TradingBot:
         active_symbols = [c.symbol for c in symbol_configs if getattr(c, "symbol", None)]
         self.ws_streamer.start(active_symbols)
 
+        # Persist system start log
+        try:
+            try:
+                from backend.database import record_operation_log
+            except ImportError:
+                from database import record_operation_log
+            is_paper = getattr(self.executor, "is_paper", True)
+            mode_str = "paper" if is_paper else "live"
+            mode_label = "模拟交易" if is_paper else "实盘交易"
+            syms_label = ", ".join(active_symbols) if active_symbols else "无"
+            record_operation_log(
+                log_type="start",
+                title="系统启动",
+                message=f"交易系统已启动（{mode_label}），监控交易对：{syms_label}",
+                level="info",
+                mode=mode_str,
+            )
+            self.broadcast({"type": "operation_log"})
+        except Exception:
+            pass
+
         # Restore open trades from DB into memory
         try:
             try:
@@ -157,6 +178,24 @@ class TradingBot:
 
         self.broadcast({"type": "bot_status", "running": False})
         self.broadcast({"type": "log", "level": "info", "message": "Bot stopped"})
+        try:
+            try:
+                from backend.database import record_operation_log
+            except ImportError:
+                from database import record_operation_log
+            is_paper = getattr(self.executor, "is_paper", True)
+            mode_str = "paper" if is_paper else "live"
+            mode_label = "模拟交易" if is_paper else "实盘交易"
+            record_operation_log(
+                log_type="stop",
+                title="系统停止",
+                message=f"交易系统已停止（{mode_label}）",
+                level="warning",
+                mode=mode_str,
+            )
+            self.broadcast({"type": "operation_log"})
+        except Exception:
+            pass
         logger.info("TradingBot stopped")
 
     # ------------------------------------------------------------------
@@ -526,6 +565,24 @@ class TradingBot:
                     f"Entry: {entry_price}  SL: {stop_loss:.4f}  TP: {take_profit:.4f}\n"
                     f"Qty: {quantity}  {'[PAPER]' if is_paper else '[LIVE]'}"
                 )
+                try:
+                    try:
+                        from backend.database import record_operation_log
+                    except ImportError:
+                        from database import record_operation_log
+                    dir_label = "做多" if direction == "long" else "做空"
+                    record_operation_log(
+                        log_type="open",
+                        title=f"{symbol} {dir_label}开仓",
+                        message=f"入场价: {entry_price} | 止损: {stop_loss:.4f} | 止盈: {take_profit:.4f} | 数量: {quantity}",
+                        level="info",
+                        symbol=symbol,
+                        mode="paper" if is_paper else "live",
+                        db=session,
+                    )
+                    self.broadcast({"type": "operation_log"})
+                except Exception:
+                    pass
                 self.broadcast({"type": "log", "level": "info", "message": msg})
                 if self.notifier:
                     try:
@@ -825,6 +882,22 @@ class TradingBot:
                 f"Entry: {entry_p}  Exit: {exit_price}\n"
                 f"PnL: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)"
             )
+            try:
+                try:
+                    from backend.database import record_operation_log
+                except ImportError:
+                    from database import record_operation_log
+                record_operation_log(
+                    log_type="close",
+                    title=f"{symbol} 平仓 ({reason})",
+                    message=f"入场: {entry_p} | 出场: {exit_price} | 盈亏: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)",
+                    level="success" if pnl >= 0 else "warning",
+                    symbol=symbol,
+                    mode="paper" if is_paper else "live",
+                )
+                self.broadcast({"type": "operation_log"})
+            except Exception:
+                pass
             self.broadcast({"type": "log", "level": "info", "message": msg})
             if self.notifier:
                 try:

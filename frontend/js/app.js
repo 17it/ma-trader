@@ -19,7 +19,9 @@ const AppController = (() => {
     isLoadingHistory: false,
     hasMoreHistory: true,
     tradingMode: 'paper',
-    tradesMode: 'paper'
+    tradesMode: 'paper',
+    logs: [],
+    logsTypeFilter: ''
   };
 
   // ─── Initialization ────────────────────────────────────────────────
@@ -150,6 +152,29 @@ const AppController = (() => {
     if (tabSettingsLink) {
       tabSettingsLink.addEventListener('shown.bs.tab', loadSettings);
     }
+
+    const tabLogsLink = document.querySelector('a[href="#tabLogs"]');
+    if (tabLogsLink) {
+      tabLogsLink.addEventListener('shown.bs.tab', loadOperationLogs);
+    }
+
+    const logsTypeWrap = document.getElementById('logsTypeFilter');
+    if (logsTypeWrap) {
+      logsTypeWrap.querySelectorAll('button[data-log-type]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.logsTypeFilter = btn.getAttribute('data-log-type') || '';
+          logsTypeWrap.querySelectorAll('button[data-log-type]').forEach(b => {
+            const isActive = b === btn;
+            b.className = isActive ? 'btn btn-primary active' : 'btn btn-outline-secondary';
+          });
+          loadOperationLogs();
+        });
+      });
+    }
+    const btnRefreshLogs = document.getElementById('btnRefreshLogs');
+    if (btnRefreshLogs) btnRefreshLogs.addEventListener('click', loadOperationLogs);
+    const btnClearLogs = document.getElementById('btnClearLogs');
+    if (btnClearLogs) btnClearLogs.addEventListener('click', clearOperationLogs);
 
     // Theme toggle (Day / Night mode)
     const btnThemeToggle = document.getElementById('btnThemeToggle');
@@ -874,6 +899,92 @@ const AppController = (() => {
     TradesEquityChart.render(dates, equities, pnls);
   }
 
+  function _fmtLogTime(isoStr) {
+    if (!isoStr) return '—';
+    const s = String(isoStr).trim();
+    const normalized = (s.includes('Z') || s.includes('+')) ? s : (s.replace(' ', 'T') + 'Z');
+    const d = new Date(normalized);
+    if (isNaN(d.getTime())) return s.replace('T', ' ').slice(5, 19);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function _escapeHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  async function loadOperationLogs() {
+    try {
+      let url = '/api/logs?limit=200';
+      if (state.logsTypeFilter) {
+        url += `&log_type=${encodeURIComponent(state.logsTypeFilter)}`;
+      }
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const logs = await res.json();
+      state.logs = Array.isArray(logs) ? logs : [];
+      renderOperationLogs(state.logs);
+    } catch (err) {
+      console.warn('[App] Load operation logs error:', err);
+    }
+  }
+
+  function renderOperationLogs(logs) {
+    const tbody = document.getElementById('logsTableBody');
+    const countEl = document.getElementById('logCount');
+    if (countEl) countEl.textContent = `共 ${(logs || []).length} 条`;
+    if (!tbody) return;
+
+    if (!logs || logs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-secondary py-4">暂无操作日志</td></tr>';
+      return;
+    }
+
+    const typeMeta = {
+      open:  { label: '开仓',     cls: 'bg-primary-subtle text-primary border border-primary-subtle' },
+      close: { label: '平仓',     cls: 'bg-success-subtle text-success border border-success-subtle' },
+      start: { label: '系统启动', cls: 'bg-info-subtle text-info border border-info-subtle' },
+      stop:  { label: '系统停止', cls: 'bg-warning-subtle text-warning border border-warning-subtle' }
+    };
+
+    tbody.innerHTML = logs.map(log => {
+      const meta = typeMeta[log.log_type] || { label: log.log_type || '其他', cls: 'bg-secondary-subtle text-secondary' };
+      const modeBadge = log.mode === 'live'
+        ? '<span class="badge bg-danger-subtle text-danger">实盘</span>'
+        : (log.mode === 'paper'
+            ? '<span class="badge bg-secondary-subtle text-secondary">模拟</span>'
+            : '<span class="text-secondary">—</span>');
+      const symText = log.symbol ? `<span class="fw-semibold">${_escapeHtml(log.symbol)}</span>` : '<span class="text-secondary">—</span>';
+      return `
+        <tr>
+          <td class="ps-3 text-secondary">#${log.id}</td>
+          <td class="text-secondary font-monospace small">${_fmtLogTime(log.created_at)}</td>
+          <td><span class="badge ${meta.cls}">${meta.label}</span></td>
+          <td>${modeBadge}</td>
+          <td>${symText}</td>
+          <td class="fw-medium">${_escapeHtml(log.title)}</td>
+          <td class="pe-3 text-secondary small">${_escapeHtml(log.message)}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  async function clearOperationLogs() {
+    if (!confirm('确定清空所有操作日志吗？此操作不可撤销。')) return;
+    try {
+      const res = await fetch('/api/logs/clear', { method: 'POST' });
+      if (res.ok) {
+        loadOperationLogs();
+      }
+    } catch (err) {
+      console.error('[App] Clear logs error:', err);
+    }
+  }
+
   function _fmtTradeTime(isoStr) {
     if (!isoStr) return '—';
     const s = String(isoStr).trim();
@@ -1317,6 +1428,14 @@ const AppController = (() => {
 
       case 'bot_status': {
         updateBotUI(Boolean(msg.running));
+        break;
+      }
+
+      case 'operation_log': {
+        const tabLogsPane = document.getElementById('tabLogs');
+        if (tabLogsPane && tabLogsPane.classList.contains('active')) {
+          loadOperationLogs();
+        }
         break;
       }
 

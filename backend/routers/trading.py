@@ -11,8 +11,8 @@ import ccxt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from database import get_db, Trade, SymbolConfig, SettingModel
-from models import TradeResponse, TradingStatus
+from database import get_db, Trade, SymbolConfig, SettingModel, OperationLog, record_operation_log
+from models import TradeResponse, TradingStatus, OperationLogResponse
 from executor import Executor
 from notifier import TelegramNotifier
 
@@ -255,8 +255,20 @@ async def simulate_trade(
     db.commit()
     db.refresh(trade)
 
+    dir_label = "做多" if direction == "long" else "做空"
+    record_operation_log(
+        log_type="open",
+        title=f"{symbol} {dir_label}开仓 (手动模拟)",
+        message=f"入场价: {entry_price} | 止损: {stop_loss} | 止盈: {take_profit} | 数量: {quantity}",
+        level="info",
+        symbol=symbol,
+        mode="paper",
+        db=db,
+    )
+
     ws_manager = _get_ws_manager(request)
     await ws_manager.broadcast({"type": "trade_opened", "trade": TradeResponse.model_validate(trade).model_dump(mode="json")})
+    await ws_manager.broadcast({"type": "operation_log"})
 
     return TradeResponse.model_validate(trade)
 
@@ -294,6 +306,17 @@ async def manual_close_trade(
     db.commit()
     db.refresh(trade)
 
+    pnl_sign = "+" if trade.pnl >= 0 else ""
+    record_operation_log(
+        log_type="close",
+        title=f"{trade.symbol} 平仓 (manual)",
+        message=f"入场: {trade.entry_price} | 出场: {exit_price} | 盈亏: {pnl_sign}${trade.pnl:.2f} ({pnl_sign}{trade.pnl_pct:.2f}%)",
+        level="success" if trade.pnl >= 0 else "warning",
+        symbol=trade.symbol,
+        mode="paper" if trade.is_paper else "live",
+        db=db,
+    )
+
     # Sync in-memory bot positions so it doesn't keep monitoring or block new entries
     bot = _get_bot(request)
     if bot is not None and hasattr(bot, "positions"):
@@ -301,6 +324,7 @@ async def manual_close_trade(
 
     ws_manager = _get_ws_manager(request)
     await ws_manager.broadcast({"type": "trade_closed", "trade": TradeResponse.model_validate(trade).model_dump(mode="json")})
+    await ws_manager.broadcast({"type": "operation_log"})
 
     # Send Telegram close notification
     try:
@@ -481,3 +505,30 @@ async def get_klines(
 
     # Return full data if paging history (endTime), otherwise last `limit` bars
     return {"symbol": symbol, "timeframe": tf_val, "data": data if endTime else data[-limit_val:]}
+
+
+# ---------------------------------------------------------------------------
+# Operation Logs
+# ---------------------------------------------------------------------------
+
+@router.get("/logs", response_model=list[OperationLogResponse])
+def list_operation_logs(
+    log_type: Optional[str] = Query(None, description="Filter by log_type: open, close, start, stop"),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Return persistent operation logs ordered newest first."""
+    q = db.query(OperationLog)
+    if log_type:
+        q = q.filter(OperationLog.log_type == log_type)
+    return q.order_by(OperationLog.id.desc()).offset(offset).limit(limit).all()
+
+
+@router.delete("/logs")
+@router.post("/logs/clear")
+def clear_operation_logs(db: Session = Depends(get_db)):
+    """Clear all operation logs."""
+    deleted = db.query(OperationLog).delete()
+    db.commit()
+    return {"status": "cleared", "deleted": deleted}

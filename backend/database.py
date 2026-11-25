@@ -6,7 +6,7 @@ Database: SQLite at data/trading.db
 import os
 import hashlib
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, Integer, String, Index, UniqueConstraint, text,
     create_engine, event
@@ -114,6 +114,53 @@ class SessionTokenModel(Base):
     username = Column(String(50), nullable=False)
     expires_at = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OperationLog(Base):
+    """Persistent operation logs (open, close, system start, system stop)."""
+    __tablename__ = "operation_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    log_type = Column(String(32), nullable=False, index=True)   # "open" | "close" | "start" | "stop"
+    level = Column(String(16), default="info", nullable=False)   # "info" | "success" | "warning" | "error"
+    symbol = Column(String(32), nullable=True, index=True)
+    mode = Column(String(16), nullable=True)                     # "paper" | "live" | None
+    title = Column(String(160), nullable=False)
+    message = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+
+def record_operation_log(
+    log_type: str,
+    title: str,
+    message: str,
+    *,
+    level: str = "info",
+    symbol: str | None = None,
+    mode: str | None = None,
+    db=None,
+) -> None:
+    """Persist an OperationLog entry safely without disrupting trading execution."""
+    own_session = db is None
+    session = SessionLocal() if own_session else db
+    try:
+        entry = OperationLog(
+            log_type=log_type,
+            level=level,
+            symbol=symbol,
+            mode=mode,
+            title=title,
+            message=message,
+            created_at=datetime.now(timezone.utc),
+        )
+        session.add(entry)
+        session.commit()
+    except Exception:
+        if own_session:
+            session.rollback()
+    finally:
+        if own_session:
+            session.close()
 
 
 class BacktestRun(Base):

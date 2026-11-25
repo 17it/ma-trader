@@ -172,3 +172,20 @@ class TradingStatus(BaseModel):
     daily_pnl: float = 0.0
     daily_pnl_pct: float = 0.0
     uptime_seconds: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Operation Logs
+# ---------------------------------------------------------------------------
+
+class OperationLogResponse(BaseModel):
+    id: int
+    log_type: str
+    level: str
+    symbol: Optional[str] = None
+    mode: Optional[str] = None
+    title: str
+    message: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
