@@ -151,6 +151,11 @@
           <i class="fa-solid fa-list me-1"></i>交易记录
         </a>
       </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tabStrategy">
+          <i class="fa-solid fa-book-open me-1"></i>策略说明
+        </a>
+      </li>
     </ul>
 
     <div class="tab-content flex-fill overflow-hidden">
@@ -598,6 +603,159 @@
                   </thead>
                   <tbody id="tradesTableBody"><!-- filled by app.js --></tbody>
                 </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════ TAB 6: STRATEGY DOCS ══════════ -->
+      <div class="tab-pane fade h-100 overflow-auto" id="tabStrategy">
+        <div class="p-3">
+          <!-- Header summary card -->
+          <div class="card card-dark mb-3">
+            <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+              <span><i class="fa-solid fa-book-open me-2"></i>MA7 / MA25 / MA60 双周期顺势量化策略</span>
+              <span class="badge bg-primary-subtle text-primary border border-primary-subtle">实盘 · 模拟 · 回测 三端逻辑对齐</span>
+            </div>
+            <div class="card-body">
+              <p class="mb-0 text-secondary" style="line-height:1.7;">
+                核心思路：<strong class="text-body">「双周期均线共振 + 多重过滤防追高 + 以损定仓 + 三阶梯保本移动止盈」</strong>。
+                只在顺大势且均线刚起势时进场，过滤震荡与脉冲末端追单，单笔亏损严格受账户风险比例控制，盈利后自动分阶段抬高止损并开启 MA7 移动追踪让利润奔跑。
+              </p>
+            </div>
+          </div>
+
+          <!-- Key parameters overview -->
+          <div class="row g-2 mb-3">
+            <div class="col-6 col-lg-3">
+              <div class="bt-metric-card h-100">
+                <div class="bt-metric-label">大周期趋势过滤</div>
+                <div class="bt-metric-value text-blue" style="font-size:16px;">HTF 同向排列</div>
+                <div class="small text-secondary mt-1">默认 15m，不逆大势开单</div>
+              </div>
+            </div>
+            <div class="col-6 col-lg-3">
+              <div class="bt-metric-card h-100">
+                <div class="bt-metric-label">乖离率防追单</div>
+                <div class="bt-metric-value text-green" style="font-size:16px;">≤ 0.35% / 0.60%</div>
+                <div class="small text-secondary mt-1">偏离 MA25≤0.35% · MA60≤0.60%</div>
+              </div>
+            </div>
+            <div class="col-6 col-lg-3">
+              <div class="bt-metric-card h-100">
+                <div class="bt-metric-label">假突破过滤</div>
+                <div class="bt-metric-value text-blue" style="font-size:16px;">影线 ≤ 1.5× 实体</div>
+                <div class="small text-secondary mt-1">过滤长影线插针与十字星</div>
+              </div>
+            </div>
+            <div class="col-6 col-lg-3">
+              <div class="bt-metric-card h-100">
+                <div class="bt-metric-label">三阶梯锁盈</div>
+                <div class="bt-metric-value text-green" style="font-size:16px;">0.7R · 1.2R · MA7</div>
+                <div class="small text-secondary mt-1">先保本微赚，再锁半仓与追踪</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Detailed rules -->
+          <div class="row g-3">
+            <!-- Entry Rules -->
+            <div class="col-lg-4">
+              <div class="card card-dark h-100">
+                <div class="card-header">
+                  <i class="fa-solid fa-right-to-bracket me-2"></i>一、开仓条件（全部满足）
+                </div>
+                <div class="card-body d-flex flex-column gap-3" style="line-height:1.65;">
+                  <div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">1</span>大周期定方向（HTF）</div>
+                    <div class="small text-secondary">做多需高级框架（如 15m）满足 <code>收盘 &gt; MA7 &gt; MA25 &gt; MA60</code>；做空需满足 <code>收盘 &lt; MA7 &lt; MA25 &lt; MA60</code>。</div>
+                  </div>
+                  <div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">2</span>小周期排列 + 斜率共振</div>
+                    <div class="small text-secondary">基础周期（如 1m）同样满足三线多头/空头排列，且最近 <strong>3 根 K 线</strong> 的 MA7 与 MA25 斜率持续同向发散。</div>
+                  </div>
+                  <div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">3</span>防假突破 &amp; 防追高过滤</div>
+                    <div class="small text-secondary">
+                      • 影线总长不超过实体 <strong>1.5 倍</strong>；<br/>
+                      • 收盘价偏离 <strong>MA25 ≤ 0.35%</strong> 且偏离 <strong>MA60 ≤ 0.60%</strong>，不在急拉急跌末端追单。
+                    </div>
+                  </div>
+                  <div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">4</span>收盘价连续确认（Bar Close）</div>
+                    <div class="small text-secondary">仅在 K 线正式收盘时刻计数，必须连续 <strong>N 根</strong>（如 2 或 3 根）完整收盘 K 线全部满足条件才开单；同币种同时只持 1 单。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Risk & Position Sizing -->
+            <div class="col-lg-4">
+              <div class="card card-dark h-100">
+                <div class="card-header">
+                  <i class="fa-solid fa-shield-halved me-2"></i>二、仓位与风控管理
+                </div>
+                <div class="card-body d-flex flex-column gap-3" style="line-height:1.65;">
+                  <div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-warning-subtle text-warning border border-warning-subtle me-1">1</span>初始止损定锚（1R）</div>
+                    <div class="small text-secondary">以信号 K 线的 <code>MA60</code>（或信号 K 线高低点）作为结构止损位，同时强制保留至少 <strong>0.3%</strong> 的最小保护距离，防止止损过窄被正常波动扫出。</div>
+                  </div>
+                  <div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-warning-subtle text-warning border border-warning-subtle me-1">2</span>以损定仓公式</div>
+                    <div class="small text-secondary">
+                      <code>开仓数量 = (账户资金 × 风险比例) ÷ 止损距离</code><br/>
+                      无论止损宽窄，触及初始止损时最多仅亏损账户总资金的设定比例（如 <strong>1.2%</strong>），且总名义价值不超过 <code>可用保证金 × 杠杆 × 95%</code>。
+                    </div>
+                  </div>
+                  <div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-danger-subtle text-danger border border-danger-subtle me-1">3</span>每日最大亏损熔断</div>
+                    <div class="small text-secondary">按 UTC 自然日实时统计当日已平仓累计盈亏，一旦亏损达到全局设置的「每日最大亏损 %」（默认 <strong>5%</strong>），当天自动熔断暂停开新单。</div>
+                  </div>
+                  <div>
+                    <div class="fw-semibold mb-1"><span class="badge el-tag-paper me-1">4</span>实盘精度与安全保护</div>
+                    <div class="small text-secondary">实盘下单前自动按币安合约步长格式化数量与止损价，平仓市价单强制携带 <code>reduceOnly</code>，避免意外反手开仓。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Exit & Tiered Profit Lock -->
+            <div class="col-lg-4">
+              <div class="card card-dark h-100">
+                <div class="card-header">
+                  <i class="fa-solid fa-stairs me-2"></i>三、出场与三阶梯锁盈
+                </div>
+                <div class="card-body p-0">
+                  <div class="table-responsive">
+                    <table class="table table-custom table-sm mb-0" style="font-size:12px;">
+                      <thead>
+                        <tr>
+                          <th>阶段 / 触发条件</th>
+                          <th>止损与平仓动作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td><span class="badge bg-danger-subtle text-danger border border-danger-subtle">初始阶段</span><br/><span class="text-secondary small">未达 0.7R</span></td>
+                          <td class="text-secondary">触及初始止损记为 <code>初始止损</code>；K 线收盘穿破 MA60 记为 <code>MA60 穿线</code> 提前离场。</td>
+                        </tr>
+                        <tr>
+                          <td><span class="badge bg-primary-subtle text-primary border border-primary-subtle">第一阶</span><br/><span class="text-secondary small">浮盈 ≥ 0.7R</span></td>
+                          <td class="text-secondary">止损自动移至 <strong>入场价 ± 0.1%</strong>（覆盖手续费），防止盈利变亏损；触发记为 <code>阶梯锁盈</code>。</td>
+                        </tr>
+                        <tr>
+                          <td><span class="badge bg-success-subtle text-success border border-success-subtle">第二阶</span><br/><span class="text-secondary small">浮盈 ≥ 1.2R</span></td>
+                          <td class="text-secondary">止损推进至 <strong>入场价 ± 0.5R</strong>，先稳稳锁定一半利润。</td>
+                        </tr>
+                        <tr>
+                          <td><span class="badge bg-success text-white">第三阶</span><br/><span class="text-secondary small">达标 rr_ratio</span></td>
+                          <td class="text-secondary">开启 <strong>MA7 移动止盈</strong>：止损紧跟 <code>MA7 × 0.9995 / 1.0005</code> 单向推进让利润奔跑，触及移动止损或收线破 MA7 才平仓。</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
