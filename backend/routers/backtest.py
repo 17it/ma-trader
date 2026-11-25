@@ -134,9 +134,22 @@ def list_backtests(
     db: Session = Depends(get_db),
     limit: int = 50,
 ):
-    """List backtest history, most recent first."""
+    """List backtest history (lightweight summary without heavy trades/equity_curve arrays)."""
     runs = db.query(BacktestRun).order_by(BacktestRun.id.desc()).limit(limit).all()
-    return [BacktestRunResponse.model_validate(r) for r in runs]
+    resp = []
+    for r in runs:
+        item = BacktestRunResponse.model_validate(r)
+        if item.results:
+            try:
+                parsed = json.loads(item.results)
+                if isinstance(parsed, dict):
+                    parsed.pop("trades", None)
+                    parsed.pop("equity_curve", None)
+                    item.results = json.dumps(parsed, ensure_ascii=False)
+            except Exception:
+                pass
+        resp.append(item)
+    return resp
 
 
 @router.get("/backtest/{run_id}", response_model=BacktestRunResponse)
