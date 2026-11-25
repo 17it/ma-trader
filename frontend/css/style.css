@@ -813,3 +813,80 @@ hr {
   margin-bottom: 16px;
   display: none;
 }
+
+/* ─── Table Pagination Bar (Element UI style) ─── */
+.table-pagination-bar {
+  background: var(--bg-card);
+  border-top: 1px solid var(--border-light);
+  padding: 10px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+}
+
+.table-pagination-info {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.el-pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.el-page-btn {
+  min-width: 30px;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-regular);
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.el-page-btn:hover:not(:disabled):not(.active) {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+  background: var(--accent-blue-soft);
+}
+
+.el-page-btn.active {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #ffffff;
+  font-weight: 600;
+  cursor: default;
+}
+
+.el-page-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: var(--bg-elevated);
+}
+
+.el-page-ellipsis {
+  min-width: 24px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}

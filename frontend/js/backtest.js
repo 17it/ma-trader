@@ -3,6 +3,9 @@
  */
 
 const BacktestManager = (() => {
+  let historyRuns = [];
+  let historyPage = 1;
+  const historyPageSize = 20;
 
   function _toLocalInputVal(dateObj) {
     const pad = (n) => String(n).padStart(2, '0');
@@ -242,12 +245,37 @@ const BacktestManager = (() => {
   // ─── History ──────────────────────────────────────────────────────────
   async function loadHistory() {
     try {
-      const res = await fetch('/api/backtest?limit=50');
+      const res = await fetch('/api/backtest?limit=200');
       if (!res.ok) return;
       const runs = await res.json();
-      renderHistory(runs);
+      historyRuns = Array.isArray(runs) ? runs : [];
+      renderHistoryPage();
     } catch (err) {
       console.warn('加载历史回测失败', err);
+    }
+  }
+
+  function renderHistoryPage() {
+    const total = historyRuns.length;
+    const totalPages = Math.max(1, Math.ceil(total / historyPageSize));
+    historyPage = Math.max(1, Math.min(historyPage, totalPages));
+    const startIdx = (historyPage - 1) * historyPageSize;
+    const pageRuns = historyRuns.slice(startIdx, startIdx + historyPageSize);
+    renderHistory(pageRuns);
+
+    if (typeof window.renderTablePagination === 'function') {
+      window.renderTablePagination({
+        infoEl: document.getElementById('btHistoryPageInfo'),
+        ulEl: document.getElementById('btHistoryPagination'),
+        page: historyPage,
+        totalPages,
+        pageSize: historyPageSize,
+        total,
+        onPageChange: (p) => {
+          historyPage = p;
+          renderHistoryPage();
+        }
+      });
     }
   }
 
@@ -265,7 +293,7 @@ const BacktestManager = (() => {
     const tbody = document.getElementById('btHistoryBody');
     tbody.innerHTML = '';
     if (!runs || runs.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">暂无历史记录</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">暂无历史记录</td></tr>';
       return;
     }
     runs.forEach(run => {

@@ -22,6 +22,8 @@ const AppController = (() => {
     hasMoreHistory: true,
     tradingMode: 'paper',
     tradesMode: 'paper',
+    tradesPage: 1,
+    tradesPageSize: 20,
     logs: [],
     logsTypeFilter: '',
     logsPage: 1,
@@ -134,13 +136,17 @@ const AppController = (() => {
     }
     const tradesEqSym = document.getElementById('tradesEquitySymbol');
     if (tradesEqSym) {
-      tradesEqSym.addEventListener('change', () => renderTradesView());
+      tradesEqSym.addEventListener('change', () => {
+        state.tradesPage = 1;
+        renderTradesView();
+      });
     }
     const tradesModeWrap = document.getElementById('tradesModeTabs');
     if (tradesModeWrap) {
       tradesModeWrap.querySelectorAll('button[data-mode]').forEach(btn => {
         btn.addEventListener('click', () => {
           state.tradesMode = btn.getAttribute('data-mode') || 'paper';
+          state.tradesPage = 1;
           tradesModeWrap.querySelectorAll('button[data-mode]').forEach(b => {
             const isActive = b === btn;
             b.classList.toggle('active', isActive);
@@ -457,7 +463,7 @@ const AppController = (() => {
 
   async function loadTrades() {
     try {
-      const res = await fetch('/api/trades?limit=200');
+      const res = await fetch('/api/trades?limit=500');
       if (!res.ok) return;
       const trades = await res.json();
       state.trades = trades;
@@ -861,7 +867,26 @@ const AppController = (() => {
     const countEl = document.getElementById('tradeCount');
     if (countEl) countEl.textContent = filtered.length;
 
-    renderTradesTable(filtered);
+    const totalPages = Math.max(1, Math.ceil(filtered.length / state.tradesPageSize));
+    state.tradesPage = Math.max(1, Math.min(state.tradesPage || 1, totalPages));
+    const startIdx = (state.tradesPage - 1) * state.tradesPageSize;
+    const pageTrades = filtered.slice(startIdx, startIdx + state.tradesPageSize);
+
+    renderTradesTable(pageTrades);
+    if (typeof window.renderTablePagination === 'function') {
+      window.renderTablePagination({
+        infoEl: document.getElementById('tradesPageInfo'),
+        ulEl: document.getElementById('tradesPagination'),
+        page: state.tradesPage,
+        totalPages,
+        pageSize: state.tradesPageSize,
+        total: filtered.length,
+        onPageChange: (p) => {
+          state.tradesPage = p;
+          renderTradesView();
+        }
+      });
+    }
     updateTradesEquitySymbols(filtered);
     renderTradesEquityCurve(filtered);
   }
@@ -983,50 +1008,17 @@ const AppController = (() => {
   }
 
   function renderLogsPagination() {
-    const infoEl = document.getElementById('logsPageInfo');
-    const ulEl = document.getElementById('logsPagination');
-    const page = state.logsPage || 1;
-    const totalPages = state.logsTotalPages || 1;
-    if (infoEl) {
-      infoEl.textContent = `第 ${page} / ${totalPages} 页 · 每页 ${state.logsPageSize} 条`;
-    }
-    if (!ulEl) return;
-
-    const buildItem = (label, targetPage, disabled, active) => {
-      const liCls = `page-item${disabled ? ' disabled' : ''}${active ? ' active' : ''}`;
-      if (disabled || active) {
-        return `<li class="${liCls}"><span class="page-link">${label}</span></li>`;
-      }
-      return `<li class="${liCls}"><button type="button" class="page-link" data-page="${targetPage}">${label}</button></li>`;
-    };
-
-    const parts = [];
-    parts.push(buildItem('上一页', page - 1, page <= 1, false));
-
-    const pages = [];
-    for (let p = 1; p <= totalPages; p++) {
-      if (p === 1 || p === totalPages || Math.abs(p - page) <= 2) {
-        pages.push(p);
-      } else if (pages[pages.length - 1] !== '...') {
-        pages.push('...');
-      }
-    }
-    for (const p of pages) {
-      if (p === '...') {
-        parts.push('<li class="page-item disabled"><span class="page-link">…</span></li>');
-      } else {
-        parts.push(buildItem(String(p), p, false, p === page));
-      }
-    }
-
-    parts.push(buildItem('下一页', page + 1, page >= totalPages, false));
-    ulEl.innerHTML = parts.join('');
-    ulEl.querySelectorAll('button[data-page]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const p = parseInt(btn.getAttribute('data-page'), 10);
-        if (!isNaN(p)) goToLogsPage(p);
+    if (typeof window.renderTablePagination === 'function') {
+      window.renderTablePagination({
+        infoEl: document.getElementById('logsPageInfo'),
+        ulEl: document.getElementById('logsPagination'),
+        page: state.logsPage || 1,
+        totalPages: state.logsTotalPages || 1,
+        pageSize: state.logsPageSize,
+        total: state.logsTotal ?? 0,
+        onPageChange: goToLogsPage
       });
-    });
+    }
   }
 
   function renderOperationLogs(logs) {
@@ -1560,6 +1552,56 @@ const AppController = (() => {
     loadSymbols
   };
 })();
+
+// Shared Element-style pagination renderer for Logs / Trades / Backtest History
+window.renderTablePagination = function ({ infoEl, ulEl, page, totalPages, pageSize, total, onPageChange }) {
+  const curPage = Math.max(1, page || 1);
+  const maxPage = Math.max(1, totalPages || 1);
+  const count = total ?? 0;
+
+  if (infoEl) {
+    infoEl.textContent = `第 ${curPage} / ${maxPage} 页 · 共 ${count} 条 · 每页 ${pageSize} 条`;
+  }
+  if (!ulEl) return;
+
+  const buildItem = (label, targetPage, disabled, active) => {
+    const cls = `el-page-btn${active ? ' active' : ''}`;
+    if (disabled || active) {
+      return `<li><button type="button" class="${cls}" ${disabled ? 'disabled' : ''}>${label}</button></li>`;
+    }
+    return `<li><button type="button" class="${cls}" data-page="${targetPage}">${label}</button></li>`;
+  };
+
+  const parts = [];
+  parts.push(buildItem('上一页', curPage - 1, curPage <= 1, false));
+
+  const pages = [];
+  for (let p = 1; p <= maxPage; p++) {
+    if (p === 1 || p === maxPage || Math.abs(p - curPage) <= 2) {
+      pages.push(p);
+    } else if (pages[pages.length - 1] !== '...') {
+      pages.push('...');
+    }
+  }
+  for (const p of pages) {
+    if (p === '...') {
+      parts.push('<li><span class="el-page-ellipsis">…</span></li>');
+    } else {
+      parts.push(buildItem(String(p), p, false, p === curPage));
+    }
+  }
+
+  parts.push(buildItem('下一页', curPage + 1, curPage >= maxPage, false));
+  ulEl.innerHTML = parts.join('');
+  ulEl.querySelectorAll('button[data-page]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = parseInt(btn.getAttribute('data-page'), 10);
+      if (!isNaN(target) && typeof onPageChange === 'function') {
+        onPageChange(target);
+      }
+    });
+  });
+};
 
 // Auto-run on DOM ready
 document.addEventListener('DOMContentLoaded', () => {
