@@ -2,8 +2,8 @@
 API routes for settings and symbol configuration.
 
 Endpoints:
-    GET    /api/settings           — return all settings as dict
-    PUT    /api/settings           — bulk update settings
+    GET    /api/settings           — return all settings (secrets masked)
+    PUT    /api/settings           — bulk update settings (skips unchanged masked values)
     GET    /api/symbols            — list all symbol configs
     POST   /api/symbols            — create a symbol config
     PUT    /api/symbols/{id}       — update a symbol config
@@ -12,7 +12,9 @@ Endpoints:
 
 from __future__ import annotations
 
-from typing import List
+import re
+from typing import Dict, List
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -20,8 +22,6 @@ from sqlalchemy.orm import Session
 from database import SymbolConfig, get_db
 from config import get_all_settings, update_settings
 from models import (
-    SettingResponse,
-    SettingUpdate,
     SymbolConfigCreate,
     SymbolConfigResponse,
     SymbolConfigUpdate,
@@ -29,31 +29,141 @@ from models import (
 
 router = APIRouter()
 
+SECRET_KEYS = {"binance_key", "binance_secret", "telegram_token"}
+ALLOWED_SETTING_KEYS = {
+    "binance_key",
+    "binance_secret",
+    "telegram_token",
+    "telegram_chat_id",
+    "http_proxy",
+    "trading_mode",
+    "max_daily_loss",
+}
+ALLOWED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
+_MASK_PREFIX = "****"
+
+
+def _mask_secret(value: str) -> str:
+    """Return a masked representation that never reveals the raw secret."""
+    if not value:
+        return ""
+    if len(value) <= 6:
+        return _MASK_PREFIX
+    return f"{_MASK_PREFIX}{value[-4:]}"
+
+
+def _is_masked_placeholder(value: str) -> bool:
+    """True when the client echoed back our masked placeholder unchanged."""
+    s = value.strip()
+    return s.startswith(_MASK_PREFIX) or s.startswith("••••")
+
+
+def _sanitize_proxy_for_display(proxy: str) -> str:
+    """Strip credentials from a proxy URL before showing it in UI/error messages."""
+    if not proxy:
+        return ""
+    return re.sub(r"://[^/@\s]+@", "://***@", proxy)
+
+
+def _mask_settings_response(raw: Dict[str, str]) -> Dict[str, str]:
+    masked = dict(raw)
+    for k in SECRET_KEYS:
+        if k in masked:
+            masked[k] = _mask_secret(masked[k])
+    return masked
+
+
+def _validate_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
+    cleaned: Dict[str, str] = {}
+    for k, v in updates.items():
+        if k not in ALLOWED_SETTING_KEYS:
+            continue
+        val = str(v).strip()
+        if k in SECRET_KEYS and _is_masked_placeholder(val):
+            # Client did not edit this secret field; keep the stored DB value.
+            continue
+        if k == "http_proxy" and val:
+            parsed = urlparse(val)
+            if parsed.scheme.lower() not in ALLOWED_PROXY_SCHEMES or not parsed.hostname:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="代理地址格式无效，仅支持 http/https/socks5/socks5h://host:port",
+                )
+        if k == "max_daily_loss" and val:
+            try:
+                num = float(val)
+                if num < 0 or num > 100:
+                    raise ValueError()
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="每日最大亏损比例必须在 0 到 100 之间",
+                )
+        if k == "trading_mode" and val and val not in {"paper", "live"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="trading_mode 仅支持 paper 或 live",
+            )
+        cleaned[k] = val
+    return cleaned
+
+
+def _hot_reload_bot_settings(request: Request, full_settings: Dict[str, str]) -> None:
+    """Propagate updated notifier / proxy settings to any currently running bots."""
+    bots = getattr(request.app.state, "bots", {}) or {}
+    tg_token = full_settings.get("telegram_token", "")
+    tg_chat = full_settings.get("telegram_chat_id", "")
+    proxy = full_settings.get("http_proxy", "")
+    for bot in bots.values():
+        if bot is None:
+            continue
+        notifier = getattr(bot, "notifier", None)
+        if notifier is not None and hasattr(notifier, "update_config"):
+            notifier.update_config(tg_token, tg_chat, proxy=proxy)
+        data_feed = getattr(bot, "data_feed", None)
+        if data_feed is not None and hasattr(data_feed, "update_proxy"):
+            data_feed.update_proxy(proxy)
+    # Invalidate cached public kline exchange so new proxy takes effect immediately
+    try:
+        from routers.trading import invalidate_public_exchange_cache
+        invalidate_public_exchange_cache()
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Settings routes
 # ---------------------------------------------------------------------------
 
-@router.get("/settings", summary="Get all settings")
+@router.get("/settings", summary="Get all settings (secrets masked)")
 def read_settings(db: Session = Depends(get_db)):
     all_settings = get_all_settings(db)
-    resp = dict(all_settings)
-    resp["settings"] = all_settings
+    masked = _mask_settings_response(all_settings)
+    resp = dict(masked)
+    resp["settings"] = masked
     return resp
 
 
 @router.put("/settings", summary="Bulk update settings")
 @router.post("/settings", summary="Bulk update settings (POST fallback for Nginx/CDN)")
-def write_settings(body: dict, db: Session = Depends(get_db)):
-    # Support both flat JSON object and {"settings": {...}}
+def write_settings(body: dict, request: Request, db: Session = Depends(get_db)):
     if "settings" in body and isinstance(body["settings"], dict):
-        updates = {str(k): str(v) for k, v in body["settings"].items()}
+        raw_updates = {str(k): str(v) for k, v in body["settings"].items()}
     else:
-        updates = {str(k): str(v) for k, v in body.items() if k != "settings"}
+        raw_updates = {str(k): str(v) for k, v in body.items() if k != "settings"}
 
-    updated = update_settings(db, updates)
-    resp = dict(updated)
-    resp["settings"] = updated
+    updates = _validate_settings_updates(raw_updates)
+    updated = update_settings(db, updates) if updates else get_all_settings(db)
+
+    cfg_mgr = getattr(request.app.state, "config", None)
+    if cfg_mgr is not None and hasattr(cfg_mgr, "invalidate"):
+        cfg_mgr.invalidate()
+
+    _hot_reload_bot_settings(request, updated)
+
+    masked = _mask_settings_response(updated)
+    resp = dict(masked)
+    resp["settings"] = masked
     return resp
 
 
@@ -100,9 +210,7 @@ async def create_symbol(body: SymbolConfigCreate, request: Request, db: Session 
     db.commit()
     db.refresh(obj)
 
-    bot = getattr(request.app.state, "bot", None)
     await _reload_running_bots(request)
-
     return obj
 
 
@@ -120,9 +228,7 @@ async def update_symbol(symbol_id: int, body: SymbolConfigUpdate, request: Reque
     db.commit()
     db.refresh(obj)
 
-    bot = getattr(request.app.state, "bot", None)
     await _reload_running_bots(request)
-
     return obj
 
 
@@ -138,7 +244,6 @@ async def delete_symbol(symbol_id: int, request: Request, db: Session = Depends(
     db.delete(obj)
     db.commit()
 
-    bot = getattr(request.app.state, "bot", None)
     await _reload_running_bots(request)
 
 
@@ -147,59 +252,60 @@ async def delete_symbol(symbol_id: int, request: Request, db: Session = Depends(
 # ---------------------------------------------------------------------------
 
 @router.post("/settings/test-telegram", summary="Test Telegram notification")
-async def test_telegram_notification(db: Session = Depends(get_db)):
+async def test_telegram_notification(request: Request, db: Session = Depends(get_db)):
     from notifier import TelegramNotifier
     from config import get_setting, set_setting
 
     token = (get_setting(db, "telegram_token", "") or "").strip()
     chat_id = (get_setting(db, "telegram_chat_id", "") or "").strip()
+    proxy = (get_setting(db, "http_proxy", "") or "").strip()
 
     if not token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请先在全局设置中填写 Telegram Token！"
+            detail="请先在全局设置中填写 Telegram Token！",
         )
 
-    notifier = TelegramNotifier(token=token, chat_id=chat_id)
+    notifier = TelegramNotifier(token=token, chat_id=chat_id, proxy=proxy or None)
 
-    # If chat_id not configured or is a non-numeric string (e.g. username like gemini_tony_auto_bot)
     is_numeric_chat_id = chat_id and (chat_id.isdigit() or (chat_id.startswith("-") and chat_id[1:].isdigit()))
     if not is_numeric_chat_id:
         discovered = await notifier.get_latest_chat_id()
         if discovered and discovered.get("chat_id"):
             chat_id = discovered["chat_id"]
             set_setting(db, "telegram_chat_id", chat_id)
-            db.commit()
+            cfg_mgr = getattr(request.app.state, "config", None)
+            if cfg_mgr is not None and hasattr(cfg_mgr, "invalidate"):
+                cfg_mgr.invalidate()
             notifier.chat_id = chat_id
             notifier._enabled = True
         else:
             err_suffix = f" (网络/代理响应: {notifier.last_error})" if notifier.last_error else ""
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"未检测到有效的数字 Chat ID！请在 Telegram 中打开您的机器人并发送 /start 或任意消息，然后再次点击测试。{err_suffix}"
+                detail=f"未检测到有效的数字 Chat ID！请在 Telegram 中打开您的机器人并发送 /start 或任意消息，然后再次点击测试。{err_suffix}",
             )
 
     msg = (
         "🚀 *MA Trader 通知系统测试*\n\n"
         "✅ 恭喜！Telegram 交易机器人已成功连接！\n"
-        "📈 后续实盘/模拟交易的开仓、平仓、移动追踪止盈止损均会实时推送到此。\n"
-        "⏱ 发送时间: 刚刚"
+        "📈 后续实盘/模拟交易的开仓、平仓、移动追踪止盈止损均会实时推送到此。"
     )
     ok = await notifier.send(msg)
     if not ok:
         err_detail = notifier.last_error or "连接超时或拒绝"
-        proxy_info = f"\n[使用的代理]: {notifier.proxy}" if notifier.proxy else "\n[使用的代理]: 直连 (未配置代理)"
+        safe_proxy = _sanitize_proxy_for_display(notifier.proxy or "")
+        proxy_info = f"\n[使用的代理]: {safe_proxy}" if safe_proxy else "\n[使用的代理]: 直连 (未配置代理)"
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail=(
                 f"{err_detail}{proxy_info}\n\n"
-                f"💡 原因提示: 全局设置里配置的代理无法连通 api.telegram.org:443。\n"
-                f"如果使用本地科学上网客户端，请检查端口是否正确 (例如 Xray 本地端口通常为 socks5://127.0.0.1:10808，Clash 为 http://127.0.0.1:7890)。"
-            )
+                "💡 原因提示: 无法连通 api.telegram.org:443，请检查网络或代理端口是否正确。"
+            ),
         )
 
     return {
         "status": "success",
         "chat_id": chat_id,
-        "message": f"测试消息发送成功！(目标 Chat ID: {chat_id})"
+        "message": f"测试消息发送成功！(目标 Chat ID: {chat_id})",
     }

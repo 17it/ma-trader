@@ -41,21 +41,21 @@
         <label class="form-label small text-secondary">管理员账号</label>
         <div class="input-group input-group-sm">
           <span class="input-group-text"><i class="fa-solid fa-user"></i></span>
-          <input type="text" class="form-control" id="loginUsername" placeholder="默认: admin" value="admin" required autocomplete="username" />
+          <input type="text" class="form-control" id="loginUsername" placeholder="请输入管理员账号" required autocomplete="username" />
         </div>
       </div>
       <div class="mb-4">
         <label class="form-label small text-secondary">登录密码</label>
         <div class="input-group input-group-sm">
           <span class="input-group-text"><i class="fa-solid fa-lock"></i></span>
-          <input type="password" class="form-control" id="loginPassword" placeholder="默认: 123456" required autocomplete="current-password" />
+          <input type="password" class="form-control" id="loginPassword" placeholder="请输入登录密码" required autocomplete="current-password" />
         </div>
       </div>
       <button type="submit" class="btn btn-primary w-100 btn-sm py-2" id="btnLoginSubmit">
         <i class="fa-solid fa-right-to-bracket me-1"></i>登录系统
       </button>
       <div class="text-center text-secondary small mt-3" style="font-size: 11px;">
-        初始账号: <code class="text-primary">admin</code> / 初始密码: <code class="text-primary">123456</code>
+        首次部署请查看服务器 <code>data/admin_initial_password.txt</code> 获取初始密码
       </div>
     </form>
   </div>
@@ -280,7 +280,7 @@
                   <div class="mb-3">
                     <label class="form-label small">Telegram Token</label>
                     <div class="input-group input-group-sm">
-                      <input type="text" class="form-control" id="telegramToken" placeholder="bot token" />
+                      <input type="password" class="form-control" id="telegramToken" placeholder="bot token（留空或保持脱敏值不变）" autocomplete="new-password" />
                       <button class="btn btn-outline-info" type="button" id="btnTestTg" title="测试发送消息到 Telegram">
                         <i class="fa-solid fa-paper-plane me-1"></i>测试
                       </button>
@@ -883,7 +883,7 @@
             </div>
             <div class="col">
               <label class="form-label small">风险比例 (%)</label>
-              <input type="number" class="form-control form-control-sm" id="symRisk" min="0.1" max="100" step="0.1" value="1.2" />
+              <input type="number" class="form-control form-control-sm" id="symRisk" min="0.1" max="20" step="0.1" value="1.2" />
             </div>
             <div class="col">
               <label class="form-label small">盈亏比</label>
@@ -925,12 +925,12 @@
             <input type="password" class="form-control form-control-sm" id="pwdOld" required placeholder="请输入原密码" autocomplete="current-password" />
           </div>
           <div class="mb-3">
-            <label class="form-label small">新密码 (至少6位)</label>
-            <input type="password" class="form-control form-control-sm" id="pwdNew" required minlength="6" placeholder="请输入新密码" autocomplete="new-password" />
+            <label class="form-label small">新密码 (至少8位，需含字母和数字)</label>
+            <input type="password" class="form-control form-control-sm" id="pwdNew" required minlength="8" placeholder="请输入新密码" autocomplete="new-password" />
           </div>
           <div class="mb-2">
             <label class="form-label small">确认新密码</label>
-            <input type="password" class="form-control form-control-sm" id="pwdConfirm" required minlength="6" placeholder="再次输入新密码" autocomplete="new-password" />
+            <input type="password" class="form-control form-control-sm" id="pwdConfirm" required minlength="8" placeholder="再次输入新密码" autocomplete="new-password" />
           </div>
         </div>
         <div class="modal-footer py-2">

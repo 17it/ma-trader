@@ -4,21 +4,67 @@ Endpoints for starting/stopping the bot, querying trades, manual ops, and K-line
 """
 import asyncio
 import logging
+import os
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
 import ccxt
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+import httpx
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from database import get_db, Trade, SymbolConfig, SettingModel, OperationLog, record_operation_log
-from models import TradeResponse, TradingStatus, OperationLogResponse, OperationLogPageResponse
+from database import get_db, Trade, SymbolConfig, OperationLog, record_operation_log
+from models import (
+    ManualCloseRequest,
+    OperationLogPageResponse,
+    SimulateTradeRequest,
+    TradeResponse,
+    TradingStatus,
+    VALID_TIMEFRAMES,
+    validate_symbol_str,
+)
 from executor import Executor
 from notifier import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["trading"])
+
+# ---------------------------------------------------------------------------
+# Cached public exchange singleton (avoids reloading markets on every /klines call)
+# ---------------------------------------------------------------------------
+_public_exchange_lock = threading.Lock()
+_public_exchange_cache: dict = {"exchange": None, "proxy": None}
+
+
+def invalidate_public_exchange_cache() -> None:
+    with _public_exchange_lock:
+        _public_exchange_cache["exchange"] = None
+        _public_exchange_cache["proxy"] = None
+
+
+def _get_cached_public_exchange(proxy: Optional[str]) -> Optional[object]:
+    norm_proxy = (proxy or "").strip() or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
+    with _public_exchange_lock:
+        if _public_exchange_cache["exchange"] is not None and _public_exchange_cache["proxy"] == norm_proxy:
+            return _public_exchange_cache["exchange"]
+        try:
+            cfg = {
+                "options": {"defaultType": "future"},
+                "enableRateLimit": True,
+                "timeout": 8000,
+            }
+            if norm_proxy:
+                cfg["proxies"] = {"http": norm_proxy, "https": norm_proxy}
+            ex = ccxt.binance(cfg)
+            _public_exchange_cache["exchange"] = ex
+            _public_exchange_cache["proxy"] = norm_proxy
+            return ex
+        except Exception as exc:
+            logger.warning("Failed to build cached public exchange: %s", exc)
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +77,14 @@ def _get_bots(request: Request) -> dict:
         bots = {"paper": None, "live": None}
         request.app.state.bots = bots
     return bots
+
+
+def _get_bot_lock(request: Request) -> asyncio.Lock:
+    lock = getattr(request.app.state, "bot_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        request.app.state.bot_lock = lock
+    return lock
 
 
 def _bot_status_payload(bots: dict) -> dict:
@@ -56,7 +110,6 @@ def _get_config(request: Request):
 
 def _build_exchange(settings: dict, require_auth: bool = False) -> Optional[object]:
     """Build a ccxt Binance Futures instance from settings dict with proxy support."""
-    import os
     key = settings.get("binance_key", "") if require_auth else ""
     secret = settings.get("binance_secret", "") if require_auth else ""
     if require_auth and (not key or not secret):
@@ -67,16 +120,24 @@ def _build_exchange(settings: dict, require_auth: bool = False) -> Optional[obje
             "secret": secret,
             "options": {"defaultType": "future"},
             "enableRateLimit": True,
-            "timeout": 5000,
+            "timeout": 10000,
         }
         proxy = (settings.get("http_proxy") or "").strip() or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
         if proxy:
             cfg["proxies"] = {"http": proxy, "https": proxy}
-        exchange = ccxt.binance(cfg)
-        return exchange
+        return ccxt.binance(cfg)
     except Exception as exc:
-        logger.warning(f"Failed to build exchange: {exc}")
+        logger.warning("Failed to build exchange: %s", exc)
         return None
+
+
+def _normalize_httpx_proxy(proxy: Optional[str]) -> Optional[str]:
+    if not proxy:
+        return None
+    p = proxy.strip()
+    if p.startswith("socks5h://"):
+        return "socks5://" + p[len("socks5h://"):]
+    return p or None
 
 
 # ---------------------------------------------------------------------------
@@ -94,99 +155,126 @@ async def start_trading(
     from data_feed import DataFeed
     from database import SessionLocal
 
-    app = request.app
-    bots = _get_bots(request)
-    existing = bots.get(mode)
-    if existing is not None and existing.running:
-        return {"status": "already_running", "mode": mode}
+    lock = _get_bot_lock(request)
+    async with lock:
+        app = request.app
+        bots = _get_bots(request)
+        existing = bots.get(mode)
+        if existing is not None and existing.running:
+            return {"status": "already_running", "mode": mode}
 
-    cfg: dict = app.state.config.get_all(db)
-    is_paper = (mode == "paper")
-    if not is_paper and (not (cfg.get("binance_key") or "").strip() or not (cfg.get("binance_secret") or "").strip()):
-        raise HTTPException(status_code=400, detail="实盘启动失败：请先在设置中配置 Binance API Key 和 Secret")
+        cfg: dict = app.state.config.get_all(db)
+        is_paper = (mode == "paper")
+        if not is_paper and (not (cfg.get("binance_key") or "").strip() or not (cfg.get("binance_secret") or "").strip()):
+            raise HTTPException(status_code=400, detail="实盘启动失败：请先在设置中配置 Binance API Key 和 Secret")
 
-    exchange = _build_exchange(cfg, require_auth=not is_paper)
-    if not is_paper and exchange is None:
-        raise HTTPException(status_code=400, detail="实盘启动失败：无法初始化 Binance 交易所实例")
+        exchange = _build_exchange(cfg, require_auth=not is_paper)
+        if not is_paper and exchange is None:
+            raise HTTPException(status_code=400, detail="实盘启动失败：无法初始化 Binance 交易所实例")
 
-    notifier = TelegramNotifier(
-        token=cfg.get("telegram_token"),
-        chat_id=cfg.get("telegram_chat_id"),
-    )
+        notifier = TelegramNotifier(
+            token=cfg.get("telegram_token"),
+            chat_id=cfg.get("telegram_chat_id"),
+            proxy=cfg.get("http_proxy") or None,
+        )
 
-    shared_ws = getattr(app.state, "ws_streamer", None)
-    data_feed = DataFeed(
-        api_key=cfg.get("binance_key") if not is_paper else None,
-        secret=cfg.get("binance_secret") if not is_paper else None,
-        use_futures=True,
-        proxy=cfg.get("http_proxy"),
-        ws_streamer=shared_ws,
-    )
+        shared_ws = getattr(app.state, "ws_streamer", None)
+        data_feed = DataFeed(
+            api_key=cfg.get("binance_key") if not is_paper else None,
+            secret=cfg.get("binance_secret") if not is_paper else None,
+            use_futures=True,
+            proxy=cfg.get("http_proxy"),
+            ws_streamer=shared_ws,
+            allow_spot_fallback=is_paper,
+        )
 
-    executor = Executor(exchange=exchange, config=cfg, is_paper=is_paper)
-    ws_manager = _get_ws_manager(request)
+        executor = Executor(exchange=exchange, config=cfg, is_paper=is_paper)
+        ws_manager = _get_ws_manager(request)
 
-    bot = TradingBot(
-        db_session_factory=SessionLocal,
-        data_feed=data_feed,
-        executor=executor,
-        notifier=notifier,
-        ws_streamer=shared_ws,
-        is_paper=is_paper,
-    )
-    bot.register_ws_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
-    bots[mode] = bot
+        bot = TradingBot(
+            db_session_factory=SessionLocal,
+            data_feed=data_feed,
+            executor=executor,
+            notifier=notifier,
+            ws_streamer=shared_ws,
+            is_paper=is_paper,
+        )
+        bot.register_ws_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
+        bots[mode] = bot
 
-    await bot.start()
+        await bot.start()
 
-    await ws_manager.broadcast(_bot_status_payload(bots))
-    await notifier.notify_bot_started()
+        await ws_manager.broadcast(_bot_status_payload(bots))
+        await notifier.notify_bot_started()
 
-    return {"status": "started", "mode": mode}
+        return {"status": "started", "mode": mode}
 
 
 @router.post("/trading/stop")
 async def stop_trading(
     request: Request,
     mode: Optional[str] = Query(None, pattern="^(paper|live)$"),
+    db: Session = Depends(get_db),
 ):
     """Stop the TradingBot for the given mode ('paper' or 'live'), or all running bots if omitted."""
-    bots = _get_bots(request)
-    ws_manager = _get_ws_manager(request)
-    targets = [mode] if mode else ["paper", "live"]
+    lock = _get_bot_lock(request)
+    async with lock:
+        bots = _get_bots(request)
+        ws_manager = _get_ws_manager(request)
+        targets = [mode] if mode else ["paper", "live"]
 
-    stopped_any = False
-    for m in targets:
-        bot = bots.get(m)
-        if bot is not None and bot.running:
-            await bot.stop()
-            stopped_any = True
+        stopped_any = False
+        live_stopped = False
+        for m in targets:
+            bot = bots.get(m)
+            if bot is not None and bot.running:
+                await bot.stop()
+                stopped_any = True
+                if m == "live":
+                    live_stopped = True
 
-    if not stopped_any:
-        return {"status": "not_running", "mode": mode}
+        if not stopped_any:
+            return {"status": "not_running", "mode": mode}
 
-    # Stop shared market stream only when both bots are stopped
-    status_payload = _bot_status_payload(bots)
-    if not status_payload["running"]:
-        shared_ws = getattr(request.app.state, "ws_streamer", None)
-        if shared_ws is not None:
-            await shared_ws.stop()
+        status_payload = _bot_status_payload(bots)
+        if not status_payload["running"]:
+            shared_ws = getattr(request.app.state, "ws_streamer", None)
+            if shared_ws is not None:
+                await shared_ws.stop()
 
-    await ws_manager.broadcast(status_payload)
+        await ws_manager.broadcast(status_payload)
 
-    cfg = _get_config(request).get_all_cached()
-    notifier = TelegramNotifier(
-        token=cfg.get("telegram_token"),
-        chat_id=cfg.get("telegram_chat_id"),
-    )
-    await notifier.notify_bot_stopped()
+        open_live_count = (
+            db.query(Trade).filter(Trade.status == "open", Trade.is_paper == False).count()  # noqa: E712
+            if live_stopped
+            else 0
+        )
+        warning_msg = (
+            f"注意：交易所仍有 {open_live_count} 笔实盘持仓未平仓，停止后仅剩交易所已挂止损单保护。"
+            if open_live_count > 0
+            else None
+        )
 
-    return {"status": "stopped", "mode": mode}
+        cfg = _get_config(request).get_all_cached()
+        notifier = TelegramNotifier(
+            token=cfg.get("telegram_token"),
+            chat_id=cfg.get("telegram_chat_id"),
+            proxy=cfg.get("http_proxy") or None,
+        )
+        await notifier.notify_bot_stopped()
+        if warning_msg:
+            await notifier.send(f"⚠️ {warning_msg}")
+
+        resp = {"status": "stopped", "mode": mode}
+        if warning_msg:
+            resp["warning"] = warning_msg
+            resp["open_live_trades"] = open_live_count
+        return resp
 
 
 @router.get("/trading/status", response_model=TradingStatus)
 async def get_trading_status(request: Request, db: Session = Depends(get_db)):
-    """Return bot running status (paper & live) and active symbol info."""
+    """Return bot running status (paper & live), active symbols, and today's realized PnL."""
     bots = _get_bots(request)
     paper_bot = bots.get("paper")
     live_bot = bots.get("live")
@@ -206,12 +294,28 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
         mode = cfg.get("trading_mode", "paper")
 
     active_symbols_set = set()
+    started_at_candidates = []
     for bot in (paper_bot, live_bot):
         if bot is not None and bot.running:
             status_info = bot.get_status()
             active_symbols_set.update(status_info.get("symbols", {}).keys())
+            started = getattr(bot, "_started_at", None)
+            if started:
+                started_at_candidates.append(started)
 
     open_trades_count = db.query(Trade).filter(Trade.status == "open").count()
+
+    # Calculate today's UTC realized PnL across closed trades
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    today_q = db.query(Trade).filter(Trade.status == "closed", Trade.close_time >= today_start)
+    if mode in ("paper", "live"):
+        today_q = today_q.filter(Trade.is_paper == (mode == "paper"))
+    today_trades = today_q.all()
+    daily_pnl = sum(t.pnl or 0.0 for t in today_trades)
+    base_equity = 10_000.0
+    daily_pnl_pct = round(daily_pnl / base_equity * 100.0, 2) if base_equity > 0 else 0.0
+
+    uptime_seconds = int(time.time() - min(started_at_candidates)) if started_at_candidates else 0
 
     return TradingStatus(
         running=running,
@@ -220,7 +324,9 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
         mode=mode,
         active_symbols=sorted(active_symbols_set),
         open_trades=open_trades_count,
-        daily_pnl=0.0,
+        daily_pnl=round(daily_pnl, 4),
+        daily_pnl_pct=daily_pnl_pct,
+        uptime_seconds=max(0, uptime_seconds),
     )
 
 
@@ -264,29 +370,35 @@ def get_trade(trade_id: int, db: Session = Depends(get_db)):
 @router.post("/simulate")
 async def simulate_trade(
     request: Request,
-    body: dict,
+    body: SimulateTradeRequest,
     db: Session = Depends(get_db),
 ):
     """
-    Manually open a simulated (paper) trade.
-
-    Body: { "symbol": "BTCUSDT", "direction": "long"|"short", "entry_price": float }
+    Manually open a simulated (paper) trade and sync it with the running paper bot.
     """
-    symbol = body.get("symbol", "").upper()
-    direction = body.get("direction", "long")
-    entry_price = float(body.get("entry_price", 0))
+    symbol = body.symbol
+    direction = body.direction
+    entry_price = body.entry_price
 
-    if not symbol or entry_price <= 0:
-        raise HTTPException(status_code=400, detail="symbol and entry_price are required")
+    # Prevent duplicate open paper position on the same symbol
+    existing_open = (
+        db.query(Trade)
+        .filter(Trade.symbol == symbol, Trade.status == "open", Trade.is_paper == True)  # noqa: E712
+        .first()
+    )
+    if existing_open:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{symbol} 已有一笔持仓中的模拟订单 (#{existing_open.id})，请先平仓后再开新仓",
+        )
 
-    # Look up symbol config for SL/TP ratio
     sym_cfg = db.query(SymbolConfig).filter(SymbolConfig.symbol == symbol).first()
     rr = sym_cfg.rr_ratio if sym_cfg else 1.5
     risk_pct = sym_cfg.risk_per_trade if sym_cfg else 0.01
+    leverage = sym_cfg.leverage if sym_cfg else 5
     timeframe = sym_cfg.timeframe if sym_cfg else "1m"
     confirm_count = sym_cfg.confirm_candles if sym_cfg else 2
 
-    # Simple SL = 0.5 % away from entry
     sl_pct = 0.005
     if direction == "long":
         sl = entry_price * (1 - sl_pct)
@@ -296,8 +408,14 @@ async def simulate_trade(
         tp = entry_price - (sl - entry_price) * rr
 
     price_risk = abs(entry_price - sl)
-    balance = 10_000.0  # default paper balance
-    qty = balance * risk_pct / price_risk if price_risk > 0 else 0
+    balance = 10_000.0
+    raw_qty = balance * risk_pct / price_risk if price_risk > 0 else 0.0
+    max_notional = balance * leverage * 0.95
+    if raw_qty * entry_price > max_notional:
+        raw_qty = max_notional / entry_price
+    qty = round(raw_qty, 6)
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="计算得到的开仓数量无效")
 
     now = datetime.now(timezone.utc)
     trade = Trade(
@@ -306,22 +424,45 @@ async def simulate_trade(
         entry_price=entry_price,
         stop_loss=sl,
         take_profit=tp,
-        quantity=round(qty, 4),
+        quantity=qty,
         status="open",
         is_paper=True,
         open_time=now,
         timeframe=timeframe,
         confirm_count=confirm_count,
+        initial_risk=price_risk,
     )
     db.add(trade)
     db.commit()
     db.refresh(trade)
 
+    # Register with running paper bot so SL/TP/trailing monitoring covers manual paper trades too
+    bots = _get_bots(request)
+    paper_bot = bots.get("paper")
+    if paper_bot is not None and hasattr(paper_bot, "positions"):
+        paper_bot.positions[symbol] = {
+            "id": trade.id,
+            "symbol": trade.symbol,
+            "direction": trade.direction,
+            "entry_price": trade.entry_price,
+            "stop_loss": trade.stop_loss,
+            "take_profit": trade.take_profit,
+            "quantity": trade.quantity,
+            "status": "open",
+            "is_paper": True,
+            "open_time": trade.open_time,
+            "timeframe": trade.timeframe,
+            "exchange_order_id": None,
+            "sl_order_id": None,
+            "trailing_active": False,
+            "risk_r": price_risk,
+        }
+
     dir_label = "做多" if direction == "long" else "做空"
     record_operation_log(
         log_type="open",
         title=f"{symbol} {dir_label}开仓 (手动模拟)",
-        message=f"入场价: {entry_price} | 止损: {stop_loss} | 止盈: {take_profit} | 数量: {quantity}",
+        message=f"入场价: {entry_price} | 止损: {sl:.4f} | 止盈: {tp:.4f} | 数量: {qty}",
         level="info",
         symbol=symbol,
         mode="paper",
@@ -329,35 +470,92 @@ async def simulate_trade(
     )
 
     ws_manager = _get_ws_manager(request)
-    await ws_manager.broadcast({"type": "trade_opened", "trade": TradeResponse.model_validate(trade).model_dump(mode="json")})
-    await ws_manager.broadcast({"type": "operation_log"})
+    if ws_manager is not None:
+        await ws_manager.broadcast({
+            "type": "trade_opened",
+            "trade": TradeResponse.model_validate(trade).model_dump(mode="json"),
+        })
+        await ws_manager.broadcast({"type": "operation_log"})
 
     return TradeResponse.model_validate(trade)
+
+
+async def _resolve_live_price(request: Request, symbol: str, cfg: dict, allow_spot: bool = True) -> Optional[float]:
+    """Fetch current market price from shared WS cache first, then DataFeed REST."""
+    shared_ws = getattr(request.app.state, "ws_streamer", None)
+    if shared_ws is not None:
+        cached = shared_ws.get_cached_price(symbol)
+        if cached and cached > 0:
+            return float(cached)
+    from data_feed import DataFeed
+    feed = DataFeed(use_futures=True, proxy=cfg.get("http_proxy"), ws_streamer=shared_ws, allow_spot_fallback=allow_spot)
+    return await asyncio.to_thread(feed.get_ticker, symbol)
 
 
 @router.post("/trades/{trade_id}/close")
 async def manual_close_trade(
     trade_id: int,
-    body: dict,
     request: Request,
+    body: Optional[ManualCloseRequest] = Body(default=None),
     db: Session = Depends(get_db),
 ):
-    """Manually close a paper trade at the given exit_price."""
+    """
+    Manually close an open trade (supports both paper and live trades).
+    Body is optional: if exit_price is omitted, fetches current market price (or real fill price for live).
+    """
     trade = db.query(Trade).filter(Trade.id == trade_id).first()
     if trade is None:
         raise HTTPException(status_code=404, detail="Trade not found")
     if trade.status != "open":
         raise HTTPException(status_code=400, detail="Trade is not open")
-    if not trade.is_paper:
-        raise HTTPException(status_code=400, detail="Manual close only supported for paper trades")
 
-    exit_price = float(body.get("exit_price", trade.entry_price))
+    cfg_mgr = _get_config(request)
+    cfg = cfg_mgr.get_all_cached() if cfg_mgr else {}
+    bots = _get_bots(request)
+    target_bot = bots.get("paper" if trade.is_paper else "live")
+
+    requested_price = body.exit_price if body is not None else None
+    exit_price: Optional[float] = requested_price
+
+    if not trade.is_paper:
+        # Live close: execute real reduceOnly market close on Binance Futures
+        executor = getattr(target_bot, "executor", None) if target_bot is not None else None
+        if executor is None or executor.exchange is None:
+            exchange = _build_exchange(cfg, require_auth=True)
+            if exchange is None:
+                raise HTTPException(status_code=400, detail="实盘平仓失败：未配置有效的 Binance API 凭证")
+            executor = Executor(exchange=exchange, config=cfg, is_paper=False)
+
+        if exit_price is None:
+            exit_price = await _resolve_live_price(request, trade.symbol, cfg, allow_spot=False) or trade.entry_price
+
+        try:
+            close_res = await asyncio.to_thread(executor.close_trade, trade, exit_price, "manual")
+            if isinstance(close_res, dict) and close_res.get("exit_price"):
+                exit_price = float(close_res["exit_price"])
+        except Exception as exc:
+            logger.error("Manual live close failed for trade #%s (%s): %s", trade_id, trade.symbol, exc)
+            raise HTTPException(status_code=502, detail=f"交易所平仓失败: {exc}")
+    else:
+        if exit_price is None:
+            exit_price = await _resolve_live_price(request, trade.symbol, cfg, allow_spot=True)
+            if not exit_price or exit_price <= 0:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"无法获取 {trade.symbol} 当前实时市价，请稍后重试或手动传入 exit_price",
+                )
+
+    # Atomic guard against concurrent close by _exit_monitor
+    db.refresh(trade)
+    if trade.status != "open":
+        return TradeResponse.model_validate(trade)
 
     if trade.direction == "long":
         pnl = (exit_price - trade.entry_price) * trade.quantity
     else:
         pnl = (trade.entry_price - exit_price) * trade.quantity
-    pnl_pct = pnl / (trade.entry_price * trade.quantity) * 100 if trade.quantity else 0
+    notional = trade.entry_price * trade.quantity
+    pnl_pct = (pnl / notional * 100.0) if notional > 0 else 0.0
 
     trade.exit_price = exit_price
     trade.pnl = round(pnl, 4)
@@ -379,34 +577,36 @@ async def manual_close_trade(
         db=db,
     )
 
-    # Sync in-memory bot positions so it doesn't keep monitoring or block new entries
-    bots = _get_bots(request)
-    target_bot = bots.get("paper" if trade.is_paper else "live")
     if target_bot is not None and hasattr(target_bot, "positions"):
-        target_bot.positions.pop(trade.symbol, None)
+        pos = target_bot.positions.get(trade.symbol)
+        pos_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
+        if pos_id == trade.id or pos_id is None:
+            target_bot.positions.pop(trade.symbol, None)
 
     ws_manager = _get_ws_manager(request)
-    await ws_manager.broadcast({"type": "trade_closed", "trade": TradeResponse.model_validate(trade).model_dump(mode="json")})
-    await ws_manager.broadcast({"type": "operation_log"})
+    if ws_manager is not None:
+        await ws_manager.broadcast({
+            "type": "trade_closed",
+            "trade": TradeResponse.model_validate(trade).model_dump(mode="json"),
+        })
+        await ws_manager.broadcast({"type": "operation_log"})
 
-    # Send Telegram close notification
     try:
-        cfg_mgr = _get_config(request)
-        cfg = cfg_mgr.get_all_cached() if cfg_mgr else {}
         notifier = TelegramNotifier(
             token=cfg.get("telegram_token"),
             chat_id=cfg.get("telegram_chat_id"),
+            proxy=cfg.get("http_proxy") or None,
         )
+        mode_tag = "PAPER" if trade.is_paper else "LIVE"
         emoji = "✅" if trade.pnl >= 0 else "❌"
-        pnl_sign = "+" if trade.pnl >= 0 else ""
         tg_msg = (
-            f"{emoji} {trade.symbol} closed (manual) [PAPER]\n"
+            f"{emoji} {trade.symbol} closed (manual) [{mode_tag}]\n"
             f"Entry: {trade.entry_price}  Exit: {exit_price}\n"
             f"PnL: {pnl_sign}${trade.pnl:.2f} ({pnl_sign}{trade.pnl_pct:.2f}%)"
         )
-        await notifier.send(tg_msg)
+        await notifier.send(tg_msg, parse_mode=None)
     except Exception as exc:
-        logger.warning(f"Manual close Telegram notification failed: {exc}")
+        logger.warning("Manual close Telegram notification failed: %s", exc)
 
     return TradeResponse.model_validate(trade)
 
@@ -414,14 +614,20 @@ async def manual_close_trade(
 @router.delete("/trades/{trade_id}")
 @router.post("/trades/{trade_id}/delete")
 def delete_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
-    """Delete a single trade record by ID."""
+    """Delete a single trade record by ID (refuses to delete an open live position)."""
     trade = db.query(Trade).filter(Trade.id == trade_id).first()
     if trade is None:
         raise HTTPException(status_code=404, detail="Trade not found")
 
+    if trade.status == "open" and not trade.is_paper:
+        raise HTTPException(
+            status_code=400,
+            detail="禁止直接删除持仓中的实盘记录（会导致交易所仓位脱离监控），请先点击平仓！",
+        )
+
     if trade.status == "open":
         bots = _get_bots(request)
-        target_bot = bots.get("paper" if trade.is_paper else "live")
+        target_bot = bots.get("paper")
         if target_bot is not None and hasattr(target_bot, "positions"):
             pos = target_bot.positions.get(trade.symbol)
             pos_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
@@ -436,13 +642,21 @@ def delete_trade(trade_id: int, request: Request, db: Session = Depends(get_db))
 @router.delete("/trades")
 @router.post("/trades/clear")
 def clear_trades(request: Request, db: Session = Depends(get_db)):
-    """Delete all trade records."""
+    """Delete trade records (refuses to clear while any live position is still open)."""
+    open_live = db.query(Trade).filter(Trade.status == "open", Trade.is_paper == False).count()  # noqa: E712
+    if open_live > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前仍有 {open_live} 笔持仓中的实盘订单，禁止清空全部记录，请先平仓！",
+        )
+
     deleted_count = db.query(Trade).delete()
     db.commit()
 
-    bot = _get_bot(request)
-    if bot is not None and hasattr(bot, "positions"):
-        bot.positions.clear()
+    bots = _get_bots(request)
+    for bot in bots.values():
+        if bot is not None and hasattr(bot, "positions"):
+            bot.positions.clear()
 
     return {"status": "cleared", "deleted": deleted_count}
 
@@ -459,85 +673,64 @@ async def get_klines(
     limit: int = Query(200, ge=10, le=1000),
     endTime: Optional[int] = Query(None, description="毫秒时间戳，获取早于此时间的K线"),
 ):
-    """
-    Return OHLCV + MA7/MA25/MA60 data for charting.
+    """Return OHLCV + MA7/MA25/MA60 data for charting."""
+    try:
+        symbol = validate_symbol_str(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    Falls back to empty list when exchange is not configured.
-    """
-    import numpy as np
+    if timeframe not in VALID_TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"不支持的时间框架: {timeframe}")
 
     config_mgr = getattr(request.app.state, "config", None)
-    if config_mgr is not None and hasattr(config_mgr, "get_all_cached"):
-        cfg = config_mgr.get_all_cached()
-    else:
-        from database import SessionLocal
-        from config import get_all_settings
-        db_s = SessionLocal()
-        try:
-            cfg = get_all_settings(db_s)
-        finally:
-            db_s.close()
+    cfg = config_mgr.get_all_cached() if (config_mgr is not None and hasattr(config_mgr, "get_all_cached")) else {}
 
-    exchange = _build_exchange(cfg, require_auth=False)
-
-    symbol = symbol.upper()
-    try:
-        limit_val = int(getattr(limit, "default", limit) or 200)
-    except Exception:
-        limit_val = 200
-
-    try:
-        tf_val = str(getattr(timeframe, "default", timeframe) or "1m")
-    except Exception:
-        tf_val = "1m"
+    exchange = _get_cached_public_exchange(cfg.get("http_proxy"))
 
     raw = []
     if exchange is not None and not endTime:
         try:
-            raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, tf_val, limit=limit_val + 60)
+            raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, limit=limit + 60)
         except Exception as exc:
-            logger.warning(f"fetch_ohlcv for {symbol} failed: {exc}")
+            logger.warning("fetch_ohlcv for %s failed: %s", symbol, exc)
 
-    # Fallback 1: Query public Binance Vision API (no geo restriction / 451 block)
     if not raw:
         clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
-        fetch_limit = limit_val if endTime else (limit_val + 60)
+        fetch_limit = limit if endTime else (limit + 60)
         end_time_param = f"&endTime={endTime}" if endTime else ""
         endpoints = [
-            f"https://fapi.binance.com/fapi/v1/klines?symbol={clean_symbol}&interval={tf_val}&limit={fetch_limit}{end_time_param}",
-            f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={fetch_limit}{end_time_param}",
-            f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={tf_val}&limit={fetch_limit}{end_time_param}",
+            f"https://fapi.binance.com/fapi/v1/klines?symbol={clean_symbol}&interval={timeframe}&limit={fetch_limit}{end_time_param}",
+            f"https://data-api.binance.vision/api/v3/klines?symbol={clean_symbol}&interval={timeframe}&limit={fetch_limit}{end_time_param}",
+            f"https://api.binance.com/api/v3/klines?symbol={clean_symbol}&interval={timeframe}&limit={fetch_limit}{end_time_param}",
         ]
-        proxy = (cfg.get("http_proxy") or "").strip()
-        proxies = None
-        if proxy:
-            p_str = proxy
-            if p_str.startswith("socks5://"):
-                p_str = "socks5h://" + p_str[len("socks5://"):]
-            proxies = {"http": p_str, "https": p_str}
+        proxy = _normalize_httpx_proxy(cfg.get("http_proxy"))
 
-        import requests
-        for endpoint in endpoints:
-            try:
-                resp = await asyncio.to_thread(requests.get, endpoint, proxies=proxies, timeout=6.0)
-                if resp.status_code == 200:
-                    items = resp.json()
-                    if items and isinstance(items, list):
-                        raw = [
-                            [row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])]
-                            for row in items
-                        ]
-                        logger.info(f"Loaded {len(raw)} real live Binance candles from {endpoint}")
-                        break
-            except Exception as e:
-                logger.warning(f"Failed to fetch live candles from {endpoint}: {e}")
+        def _fetch_http():
+            client_kwargs = {"timeout": 6.0}
+            if proxy:
+                client_kwargs["proxy"] = proxy
+            with httpx.Client(**client_kwargs) as client:
+                for endpoint in endpoints:
+                    try:
+                        resp = client.get(endpoint)
+                        if resp.status_code == 200:
+                            items = resp.json()
+                            if items and isinstance(items, list):
+                                return [
+                                    [row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])]
+                                    for row in items
+                                ]
+                    except Exception as e:
+                        logger.warning("Failed to fetch live candles from %s: %s", endpoint, e)
+            return []
 
-    # No synthetic/demonstration fallback allowed. If network fails, return 503 error.
+        raw = await asyncio.to_thread(_fetch_http)
+
     if not raw:
-        logger.error(f"Failed to fetch real live candles for {symbol} from all Binance endpoints.")
+        logger.error("Failed to fetch real live candles for %s from all Binance endpoints.", symbol)
         raise HTTPException(
             status_code=503,
-            detail=f"无法获取 {symbol} 的实时真实K线数据，请检查网络连接或全局设置中的代理配置。"
+            detail=f"无法获取 {symbol} 的实时真实K线数据，请检查网络连接或全局设置中的代理配置。",
         )
 
     closes = [b[4] for b in raw]
@@ -545,17 +738,21 @@ async def get_klines(
 
     def _ma(period: int) -> list:
         result = [None] * n
-        for i in range(period - 1, n):
-            result[i] = round(sum(closes[i - period + 1: i + 1]) / period, 4)
+        if n < period:
+            return result
+        window_sum = sum(closes[:period])
+        result[period - 1] = round(window_sum / period, 4)
+        for i in range(period, n):
+            window_sum += closes[i] - closes[i - period]
+            result[i] = round(window_sum / period, 4)
         return result
 
     ma7 = _ma(7)
     ma25 = _ma(25)
     ma60 = _ma(60)
 
-    data = []
-    for i, bar in enumerate(raw):
-        data.append({
+    data = [
+        {
             "time": bar[0],
             "open": bar[1],
             "high": bar[2],
@@ -565,10 +762,11 @@ async def get_klines(
             "ma7": ma7[i],
             "ma25": ma25[i],
             "ma60": ma60[i],
-        })
+        }
+        for i, bar in enumerate(raw)
+    ]
 
-    # Return full data if paging history (endTime), otherwise last `limit` bars
-    return {"symbol": symbol, "timeframe": tf_val, "data": data if endTime else data[-limit_val:]}
+    return {"symbol": symbol, "timeframe": timeframe, "data": data if endTime else data[-limit:]}
 
 
 # ---------------------------------------------------------------------------

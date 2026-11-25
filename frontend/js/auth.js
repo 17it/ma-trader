@@ -6,6 +6,8 @@ const AuthManager = (() => {
   const TOKEN_KEY = 'ma_trader_token';
   const USER_KEY = 'ma_trader_username';
   let changePwdModalInstance = null;
+  let forcePasswordChange = false;
+  let initialized = false;
 
   // ─── Token Utilities ────────────────────────────────────────────────
   function getToken() {
@@ -73,6 +75,15 @@ const AuthManager = (() => {
         console.warn('[Auth] Received 401 Unauthorized, clearing session...');
         clearSession();
         showLoginOverlay('登录已过期或未授权，请重新登录');
+      } else if (response.status === 403 && !url.includes('/api/auth/')) {
+        try {
+          const cloned = response.clone();
+          const errData = await cloned.json();
+          if (errData && errData.code === 'PASSWORD_CHANGE_REQUIRED') {
+            forcePasswordChange = true;
+            openChangePwdModal(true);
+          }
+        } catch {}
       }
 
       return response;
@@ -81,11 +92,19 @@ const AuthManager = (() => {
 
   // ─── Init ───────────────────────────────────────────────────────────
   function init() {
+    if (initialized) return;
+    initialized = true;
     setupFetchInterceptor();
 
     const changePwdEl = document.getElementById('changePwdModal');
     if (changePwdEl && typeof bootstrap !== 'undefined') {
-      changePwdModalInstance = new bootstrap.Modal(changePwdEl);
+      changePwdModalInstance = new bootstrap.Modal(changePwdEl, { backdrop: 'static', keyboard: false });
+      changePwdEl.addEventListener('hide.bs.modal', (ev) => {
+        if (forcePasswordChange) {
+          ev.preventDefault();
+          showChangePwdError('首次登录或仍在使用默认密码，必须先修改密码后才能继续使用');
+        }
+      });
     }
 
     // Bind Login Form
@@ -135,6 +154,11 @@ const AuthManager = (() => {
         const data = await res.json();
         setSession(token, data.username);
         hideLoginOverlay();
+        if (data.must_change_password) {
+          forcePasswordChange = true;
+          openChangePwdModal(true);
+          return false;
+        }
         return true;
       } else {
         clearSession();
@@ -186,6 +210,12 @@ const AuthManager = (() => {
       setSession(data.token, data.username);
       hideLoginOverlay();
 
+      if (data.must_change_password) {
+        forcePasswordChange = true;
+        openChangePwdModal(true);
+        return;
+      }
+
       // Trigger app refresh
       if (typeof AppController !== 'undefined' && AppController.init) {
         AppController.init();
@@ -219,7 +249,7 @@ const AuthManager = (() => {
   }
 
   // ─── Handle Change Password ─────────────────────────────────────────
-  function openChangePwdModal() {
+  function openChangePwdModal(forced = false) {
     const oldPwdInput = document.getElementById('pwdOld');
     const newPwdInput = document.getElementById('pwdNew');
     const confirmPwdInput = document.getElementById('pwdConfirm');
@@ -227,7 +257,14 @@ const AuthManager = (() => {
     if (oldPwdInput) oldPwdInput.value = '';
     if (newPwdInput) newPwdInput.value = '';
     if (confirmPwdInput) confirmPwdInput.value = '';
-    if (errorBox) errorBox.style.display = 'none';
+    if (errorBox) {
+      if (forced) {
+        errorBox.textContent = '安全提示：检测到初始或默认密码，请立即设置新密码（至少 8 位且包含字母和数字）。';
+        errorBox.style.display = 'block';
+      } else {
+        errorBox.style.display = 'none';
+      }
+    }
 
     changePwdModalInstance?.show();
   }
@@ -246,8 +283,8 @@ const AuthManager = (() => {
       showChangePwdError('请输入当前原密码');
       return;
     }
-    if (newPwd.length < 6) {
-      showChangePwdError('新密码长度不能少于 6 位');
+    if (newPwd.length < 8 || !/[a-zA-Z]/.test(newPwd) || !/[0-9]/.test(newPwd)) {
+      showChangePwdError('新密码长度至少 8 位，且需同时包含字母和数字');
       return;
     }
     if (newPwd !== confirmPwd) {
@@ -272,12 +309,17 @@ const AuthManager = (() => {
         throw new Error(data.detail || '密码修改失败');
       }
 
+      const wasForced = forcePasswordChange;
+      forcePasswordChange = false;
       if (data.token) {
         setSession(data.token, getUsername());
       }
 
       changePwdModalInstance?.hide();
       alert('✅ ' + (data.message || '密码修改成功，新密码已生效！'));
+      if (wasForced && typeof AppController !== 'undefined' && AppController.init) {
+        AppController.init();
+      }
     } catch (err) {
       showChangePwdError(err.message);
     } finally {

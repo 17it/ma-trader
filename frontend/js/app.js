@@ -743,19 +743,33 @@ const AppController = (() => {
   }
 
   async function closeTrade(tradeId) {
-    if (!confirm(`确定要平仓该笔交易 (ID: ${tradeId}) 吗？`)) return;
+    const trade = (state.trades || []).find(t => t.id === tradeId);
+    const modeTip = trade && !trade.is_paper
+      ? `确定要市价平仓这笔【实盘】订单 (ID: ${tradeId} / ${trade.symbol}) 吗？将立即向交易所下单平仓！`
+      : `确定要平仓该笔交易 (ID: ${tradeId}) 吗？`;
+    if (!confirm(modeTip)) return;
     try {
-      const res = await fetch(`/api/trades/${tradeId}/close`, { method: 'POST' });
+      const payload = {};
+      if (trade) {
+        const curPrice = (state.prices && state.prices[trade.symbol]) || (trade.symbol === state.currentSymbol ? state.currentPrice : null);
+        if (curPrice && curPrice > 0) payload.exit_price = curPrice;
+      }
+      const res = await fetch(`/api/trades/${tradeId}/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
       if (res.ok) {
         appendLog(`[手动平仓] 订单 #${tradeId} 平仓成功`, 'info');
         await loadTrades();
         await loadStats();
       } else {
-        const err = await res.json();
-        alert('平仓失败: ' + (err.detail || '未知错误'));
+        const err = await res.json().catch(() => ({}));
+        alert('平仓失败: ' + (err.detail || `HTTP ${res.status}`));
       }
     } catch (err) {
       console.error('平仓失败', err);
+      alert('平仓请求失败: ' + err.message);
     }
   }
 
@@ -935,7 +949,8 @@ const AppController = (() => {
 
     const opts = ['<option value="ALL">全部币种</option>'];
     Array.from(symSet).sort().forEach(sym => {
-      opts.push(`<option value="${sym}">${sym}</option>`);
+      const safe = _escapeHtml(sym);
+      opts.push(`<option value="${safe}">${safe}</option>`);
     });
     sel.innerHTML = opts.join('');
 
@@ -1184,28 +1199,32 @@ const AppController = (() => {
         ma7_trailing:     '<span class="badge bg-success-subtle text-success border border-success-subtle">MA7 止盈</span>',
         ma60_cross:       '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">MA60 穿线</span>',
         take_profit:      '<span class="badge bg-success-subtle text-success border border-success-subtle">目标止盈</span>',
+        exchange_closed:  '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">交易所平仓</span>',
         manual:           '<span class="badge el-tag-paper">手动平仓</span>',
         time_stop:        '<span class="badge el-tag-paper">超时平仓</span>',
       };
       const reasonBadge = t.status === 'open'
         ? '<span class="text-secondary">—</span>'
-        : (reasonMap[t.close_reason] || (t.close_reason ? `<span class="badge el-tag-paper">${t.close_reason}</span>` : '<span class="text-secondary">—</span>'));
+        : (reasonMap[t.close_reason] || (t.close_reason ? `<span class="badge el-tag-paper">${_escapeHtml(t.close_reason)}</span>` : '<span class="text-secondary">—</span>'));
 
       const openTimeStr = _fmtTradeTime(t.open_time);
       const closeTimeStr = t.status === 'open' ? '—' : _fmtTradeTime(t.close_time);
+      const safeSym = _escapeHtml(t.symbol);
+      const safeStatus = _escapeHtml(t.status);
+      const idNum = Number(t.id) || 0;
 
       // Action column
       let actionBtn = `
-        <button class="btn btn-xs btn-outline-secondary" onclick="AppController.highlightTrade(${t.id})" title="定位到图表">
+        <button class="btn btn-xs btn-outline-secondary" onclick="AppController.highlightTrade(${idNum})" title="定位到图表">
           <i class="fa-solid fa-crosshairs"></i>
         </button>
-        <button class="btn btn-xs btn-outline-danger ms-1" onclick="AppController.deleteTrade(${t.id}, '${t.status}')" title="删除记录">
+        <button class="btn btn-xs btn-outline-danger ms-1" onclick="AppController.deleteTrade(${idNum}, '${safeStatus}')" title="删除记录">
           <i class="fa-solid fa-trash-can"></i>
         </button>
       `;
       if (t.status === 'open') {
         actionBtn = `
-          <button class="btn btn-xs btn-danger me-1" onclick="AppController.closeTrade(${t.id})" title="平仓">
+          <button class="btn btn-xs btn-danger me-1" onclick="AppController.closeTrade(${idNum})" title="平仓">
             平仓
           </button>
           ${actionBtn}
@@ -1213,8 +1232,8 @@ const AppController = (() => {
       }
 
       tr.innerHTML = `
-        <td><span class="text-secondary small">#${t.id}</span></td>
-        <td><strong>${t.symbol}</strong></td>
+        <td><span class="text-secondary small">#${idNum}</span></td>
+        <td><strong>${safeSym}</strong></td>
         <td>${dirBadge}</td>
         <td>${t.entry_price?.toFixed(2) ?? '—'}</td>
         <td>${t.exit_price ? t.exit_price.toFixed(2) : '—'}</td>
@@ -1257,8 +1276,8 @@ const AppController = (() => {
     if (!box) return;
     const time = new Date().toTimeString().split(' ')[0];
     const line = document.createElement('div');
-    line.className = 'log-line ' + level;
-    line.innerHTML = `<span class="text-secondary">[${time}]</span> ${msg}`;
+    line.className = 'log-line ' + String(level || 'info').replace(/[^a-z0-9_-]/gi, '');
+    line.innerHTML = `<span class="text-secondary">[${time}]</span> ${_escapeHtml(msg)}`;
     box.appendChild(line);
 
     // Keep max 100 lines
@@ -1399,7 +1418,7 @@ const AppController = (() => {
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const token = (typeof AuthManager !== 'undefined' && AuthManager.getToken) ? AuthManager.getToken() : '';
-    const wsUrl = `${protocol}//${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
     const badge = document.getElementById('wsBadge');
 
     try {
@@ -1407,6 +1426,8 @@ const AppController = (() => {
       state.ws = ws;
 
       ws.onopen = () => {
+        // Send token in the first JSON frame instead of URL query string
+        ws.send(JSON.stringify({ type: 'auth', token }));
         console.log('[WS] Connected to MA Trader stream');
         if (badge) {
           badge.className = 'badge bg-success-subtle text-success border border-success-subtle connected';

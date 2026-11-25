@@ -1,17 +1,18 @@
 """
 MA Trader - Backtest Router
-Async backtest task management: create, list, and retrieve results.
+Async backtest task management with bounded concurrency and retained task references.
 """
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Set
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from database import get_db, BacktestRun, SettingModel
+from database import get_db, BacktestRun
 from models import BacktestRunCreate, BacktestRunResponse
 from backtester import Backtester
 
@@ -19,25 +20,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["backtest"])
 
+# Retain strong references to background tasks (prevents GC cancellation) & cap concurrency
+_RUNNING_TASKS: Set[asyncio.Task] = set()
+_BACKTEST_SEMAPHORE = asyncio.Semaphore(2)
+
 
 def _get_exchange(request: Request):
     """Build exchange from cached config or anonymous ccxt client with proxy support."""
-    import ccxt, os
+    import ccxt
     cfg = {}
     try:
         if hasattr(request.app.state, "config") and request.app.state.config:
             cfg = request.app.state.config.get_all_cached()
     except Exception:
         pass
-    key = cfg.get("binance_key", "")
-    secret = cfg.get("binance_secret", "")
     try:
         options = {
-            "apiKey": key or "",
-            "secret": secret or "",
             "options": {"defaultType": "future"},
             "enableRateLimit": True,
-            "timeout": 5000,
+            "timeout": 10000,
         }
         proxy = (cfg.get("http_proxy") or "").strip() or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
         if proxy:
@@ -70,14 +71,17 @@ def _run_backtest_sync(run_id: int, params: dict, exchange):
             rr_ratio=params.get("rr_ratio", 1.5),
             initial_capital=params.get("initial_capital", 10_000.0),
             risk_per_trade=params.get("risk_per_trade", 0.01),
+            leverage=params.get("leverage", 5),
+            fee_rate=params.get("fee_rate", 0.0004),
+            slippage_rate=params.get("slippage_rate", 0.0001),
         )
 
         run.results = json.dumps(result, ensure_ascii=False, default=str)
         run.status = "done"
         db.commit()
-        logger.info(f"Backtest {run_id} completed: {result['total_trades']} trades")
+        logger.info("Backtest %d completed: %d trades", run_id, result["total_trades"])
     except Exception as exc:
-        logger.error(f"Backtest {run_id} failed: {exc}")
+        logger.error("Backtest %d failed: %s", run_id, exc)
         try:
             db.query(BacktestRun).filter(BacktestRun.id == run_id).update(
                 {"status": "failed", "error_msg": str(exc)[:500]}
@@ -90,8 +94,9 @@ def _run_backtest_sync(run_id: int, params: dict, exchange):
 
 
 async def _run_backtest_task(run_id: int, params: dict, exchange):
-    """Non-blocking background coroutine: offloads heavy synchronous work to a worker thread."""
-    await asyncio.to_thread(_run_backtest_sync, run_id, params, exchange)
+    """Non-blocking background coroutine with bounded concurrency."""
+    async with _BACKTEST_SEMAPHORE:
+        await asyncio.to_thread(_run_backtest_sync, run_id, params, exchange)
 
 
 @router.post("/backtest", response_model=BacktestRunResponse, status_code=202)
@@ -100,9 +105,7 @@ async def create_backtest(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """
-    Create a new backtest task.  Runs asynchronously; returns immediately with the run id.
-    """
+    """Create a new backtest task. Runs asynchronously; returns immediately with the run id."""
     params = body.model_dump()
     if "params" in params and isinstance(params["params"], dict):
         for k, v in params["params"].items():
@@ -117,14 +120,16 @@ async def create_backtest(
         end_date=body.end_date,
         params=json.dumps(params, ensure_ascii=False),
         status="pending",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(run)
     db.commit()
     db.refresh(run)
 
     exchange = _get_exchange(request)
-    asyncio.create_task(_run_backtest_task(run.id, params, exchange))
+    task = asyncio.create_task(_run_backtest_task(run.id, params, exchange), name=f"backtest-{run.id}")
+    _RUNNING_TASKS.add(task)
+    task.add_done_callback(_RUNNING_TASKS.discard)
 
     return BacktestRunResponse.model_validate(run)
 

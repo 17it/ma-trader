@@ -1,7 +1,7 @@
 """
 Binance Public WebSocket Streamer
-Subscribes to live tickers via Binance Vision public stream (no auth, no geo-block).
-Caches prices in memory and invokes callbacks for real-time broadcasts.
+Subscribes to live Futures tickers (with optional Spot fallback for non-live consumers),
+caches prices in memory along with source type (futures vs spot), and invokes callbacks.
 """
 
 import asyncio
@@ -14,15 +14,16 @@ import websockets
 
 logger = logging.getLogger(__name__)
 
-PRIMARY_WS_URL = "wss://data-stream.binance.vision/stream"
 FUTURES_WS_URL = "wss://fstream.binance.com/stream"
-FALLBACK_WS_URL = "wss://stream.binance.com:9443/stream"
+PRIMARY_SPOT_WS_URL = "wss://data-stream.binance.vision/stream"
+FALLBACK_SPOT_WS_URL = "wss://stream.binance.com:9443/stream"
 
 
 class BinanceWSStreamer:
     """
     Subscribes to Binance public WebSocket streams for live tickers.
-    Maintains an in-memory price cache for instant zero-HTTP lookups.
+    Maintains an in-memory price cache and tracks whether the active stream is
+    Futures or Spot so live Futures bots never silently consume Spot ticks.
     """
 
     def __init__(self, use_futures: bool = True):
@@ -30,22 +31,31 @@ class BinanceWSStreamer:
         self.use_futures = use_futures
         self.latest_prices: Dict[str, float] = {}
         self.latest_ts: Dict[str, float] = {}
+        self.latest_is_futures: Dict[str, bool] = {}
         self.callbacks: List[Callable[[dict], Any]] = []
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
+        self._active_is_futures: bool = use_futures
 
     def register_callback(self, cb: Callable[[dict], Any]):
         """Register a callback to be called on each ticker update."""
         self.callbacks.append(cb)
 
-    def get_cached_price(self, symbol: str, max_age: float = 15.0) -> Optional[float]:
+    def get_cached_price(
+        self,
+        symbol: str,
+        max_age: float = 15.0,
+        require_futures: bool = False,
+    ) -> Optional[float]:
         """
         Return the cached price if available and fresh within max_age seconds.
-        Returns None if expired or not found.
+        When require_futures=True, returns None if the cached tick came from a Spot stream.
         """
         clean = symbol.replace("/", "").replace(":USDT", "").upper()
         ts = self.latest_ts.get(clean)
         if ts is not None and (time.time() - ts) <= max_age:
+            if require_futures and not self.latest_is_futures.get(clean, False):
+                return None
             return self.latest_prices.get(clean)
         return None
 
@@ -82,8 +92,17 @@ class BinanceWSStreamer:
         logger.info("BinanceWSStreamer stopped")
 
     async def _stream_loop(self):
-        """Main connection and message dispatch loop with automatic reconnect."""
-        urls = [FUTURES_WS_URL, PRIMARY_WS_URL, FALLBACK_WS_URL] if getattr(self, "use_futures", True) else [PRIMARY_WS_URL, FALLBACK_WS_URL]
+        """
+        Main connection loop with automatic reconnect.
+        Always tries Futures WS first when use_futures=True, and resets back to
+        Futures WS after any successful connection closes so a transient blip
+        never leaves the streamer permanently stuck on Spot.
+        """
+        endpoints = (
+            [(FUTURES_WS_URL, True), (PRIMARY_SPOT_WS_URL, False), (FALLBACK_SPOT_WS_URL, False)]
+            if self.use_futures
+            else [(PRIMARY_SPOT_WS_URL, False), (FALLBACK_SPOT_WS_URL, False)]
+        )
         url_idx = 0
         backoff = 1.0
 
@@ -93,19 +112,26 @@ class BinanceWSStreamer:
                 continue
 
             stream_names = [f"{s.lower()}@ticker" for s in sorted(self.symbols)]
-            base_url = urls[url_idx % len(urls)]
+            base_url, is_futures = endpoints[url_idx % len(endpoints)]
             url = f"{base_url}?streams={'/'.join(stream_names)}"
 
             try:
-                logger.info("Connecting to Binance WebSocket: %s (%d streams)", base_url, len(stream_names))
+                logger.info(
+                    "Connecting to Binance WebSocket: %s (futures=%s, %d streams)",
+                    base_url, is_futures, len(stream_names),
+                )
                 async with websockets.connect(
                     url,
                     ping_interval=20,
                     ping_timeout=15,
                     close_timeout=5,
                 ) as ws:
-                    logger.info("Connected to Binance WebSocket market data stream")
-                    backoff = 1.0  # Reset backoff on successful connect
+                    self._active_is_futures = is_futures
+                    logger.info("Connected to Binance WebSocket (futures=%s)", is_futures)
+                    backoff = 1.0
+                    # If connected to primary futures stream, keep trying futures first next time too
+                    if is_futures:
+                        url_idx = 0
 
                     while self._running:
                         msg_raw = await ws.recv()
@@ -121,6 +147,7 @@ class BinanceWSStreamer:
                                 price = float(c)
                                 self.latest_prices[s] = price
                                 self.latest_ts[s] = time.time()
+                                self.latest_is_futures[s] = is_futures
 
                                 payload = {"type": "ticker", "symbol": s, "price": price}
                                 for cb in self.callbacks:
@@ -137,10 +164,9 @@ class BinanceWSStreamer:
                 break
             except Exception as exc:
                 logger.warning(
-                    "Binance WebSocket disconnected: %s. Reconnecting in %.1fs...",
-                    exc,
-                    backoff,
+                    "Binance WebSocket (%s) disconnected: %s. Reconnecting in %.1fs...",
+                    base_url, exc, backoff,
                 )
-                url_idx += 1  # Try next URL on error
+                url_idx = (url_idx + 1) % len(endpoints)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 15.0)

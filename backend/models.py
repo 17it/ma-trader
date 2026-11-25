@@ -4,10 +4,22 @@ Pydantic request / response schemas for MA Auto Trader.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+VALID_TIMEFRAMES = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
+TimeframeType = Literal["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}(/[A-Z0-9]{2,10})?$")
+
+
+def validate_symbol_str(v: str) -> str:
+    s = (v or "").strip().upper()
+    if not _SYMBOL_RE.match(s):
+        raise ValueError("交易对格式无效，仅允许字母与数字（例如 BTCUSDT）")
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +32,7 @@ class SettingUpdate(BaseModel):
         ...,
         example={
             "trading_mode": "paper",
-            "max_daily_loss": "0.05",
+            "max_daily_loss": "5",
         },
     )
 
@@ -35,23 +47,28 @@ class SettingResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SymbolConfigCreate(BaseModel):
-    symbol: str = Field(..., example="BTCUSDT")
-    timeframe: str = Field("1m", example="1m")
-    htf_timeframe: str = Field("15m", example="15m")
+    symbol: str = Field(..., min_length=4, max_length=25, example="BTCUSDT")
+    timeframe: TimeframeType = Field("1m", example="1m")
+    htf_timeframe: TimeframeType = Field("15m", example="15m")
     confirm_candles: int = Field(2, ge=1, le=20)
-    leverage: int = Field(5, ge=1, le=125)
-    risk_per_trade: float = Field(0.01, gt=0, le=1)
-    rr_ratio: float = Field(1.5, gt=0)
+    leverage: int = Field(5, ge=1, le=20)
+    risk_per_trade: float = Field(0.01, gt=0, le=0.2)
+    rr_ratio: float = Field(1.5, ge=0.5, le=20.0)
     enabled: bool = True
+
+    @field_validator("symbol")
+    @classmethod
+    def _check_symbol(cls, v: str) -> str:
+        return validate_symbol_str(v)
 
 
 class SymbolConfigUpdate(BaseModel):
-    timeframe: Optional[str] = None
-    htf_timeframe: Optional[str] = None
+    timeframe: Optional[TimeframeType] = None
+    htf_timeframe: Optional[TimeframeType] = None
     confirm_candles: Optional[int] = Field(None, ge=1, le=20)
-    leverage: Optional[int] = Field(None, ge=1, le=125)
-    risk_per_trade: Optional[float] = Field(None, gt=0, le=1)
-    rr_ratio: Optional[float] = Field(None, gt=0)
+    leverage: Optional[int] = Field(None, ge=1, le=20)
+    risk_per_trade: Optional[float] = Field(None, gt=0, le=0.2)
+    rr_ratio: Optional[float] = Field(None, ge=0.5, le=20.0)
     enabled: Optional[bool] = None
 
 
@@ -98,21 +115,39 @@ class TradeResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ManualCloseRequest(BaseModel):
+    exit_price: Optional[float] = Field(None, gt=0)
+
+
+class SimulateTradeRequest(BaseModel):
+    symbol: str = Field(..., min_length=4, max_length=25)
+    direction: Literal["long", "short"] = "long"
+    entry_price: float = Field(..., gt=0)
+
+    @field_validator("symbol")
+    @classmethod
+    def _check_symbol(cls, v: str) -> str:
+        return validate_symbol_str(v)
+
+
 # ---------------------------------------------------------------------------
 # Backtest
 # ---------------------------------------------------------------------------
 
 class BacktestRunCreate(BaseModel):
-    title: Optional[str] = Field(None, example="5m/15m趋势追踪测试")
-    symbol: str = Field(..., example="BTCUSDT")
-    timeframe: str = Field("1m", example="1m")
-    htf_timeframe: str = Field("15m", example="15m")
+    title: Optional[str] = Field(None, max_length=120, example="5m/15m趋势追踪测试")
+    symbol: str = Field(..., min_length=4, max_length=25, example="BTCUSDT")
+    timeframe: TimeframeType = Field("1m", example="1m")
+    htf_timeframe: TimeframeType = Field("15m", example="15m")
     start_date: str = Field(..., example="2024-01-01")
     end_date: str = Field(..., example="2024-12-31")
-    confirm_candles: int = 2
-    rr_ratio: float = 1.5
-    initial_capital: float = 10000.0
-    risk_per_trade: float = 0.01
+    confirm_candles: int = Field(2, ge=1, le=20)
+    rr_ratio: float = Field(1.5, ge=0.5, le=20.0)
+    initial_capital: float = Field(10000.0, gt=0, le=1e9)
+    risk_per_trade: float = Field(0.01, gt=0, le=0.2)
+    leverage: int = Field(5, ge=1, le=20)
+    fee_rate: float = Field(0.0004, ge=0.0, le=0.01)
+    slippage_rate: float = Field(0.0001, ge=0.0, le=0.01)
     params: Dict[str, Any] = Field(
         default_factory=dict,
         example={
@@ -121,6 +156,11 @@ class BacktestRunCreate(BaseModel):
             "initial_capital": 10000,
         },
     )
+
+    @field_validator("symbol")
+    @classmethod
+    def _check_symbol(cls, v: str) -> str:
+        return validate_symbol_str(v)
 
 
 class BacktestRunResponse(BaseModel):

@@ -1,6 +1,7 @@
 """
 MA Trader - FastAPI Main Entry Point
 """
+import os
 import sys
 from pathlib import Path
 
@@ -18,13 +19,13 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import create_tables, SessionLocal
+from database import create_tables
 from config import ConfigManager
-from auth import validate_token, get_token_from_request
+from auth import PASSWORD_CHANGE_ALLOWED_PATHS, validate_token, get_token_from_request
 from binance_ws import BinanceWSStreamer
 from routers import auth as auth_router
 from routers import settings as settings_router
@@ -51,6 +52,11 @@ class ConnectionManager:
         self.active_connections.append(websocket)
         logger.info(f"WebSocket client connected. Total: {len(self.active_connections)}")
 
+    def register_accepted(self, websocket: WebSocket):
+        if websocket not in self.active_connections:
+            self.active_connections.append(websocket)
+        logger.info(f"WebSocket client authenticated. Total: {len(self.active_connections)}")
+
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
@@ -60,7 +66,7 @@ class ConnectionManager:
         """Broadcast a JSON message to all connected clients."""
         text = json.dumps(message, ensure_ascii=False, default=str)
         dead = []
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             try:
                 await connection.send_text(text)
             except Exception:
@@ -82,21 +88,19 @@ ws_manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
-    # Startup
     logger.info("Starting MA Trader...")
     create_tables()
 
-    # Store shared objects on app.state
     app.state.ws_manager = ws_manager
     app.state.config = ConfigManager()
     shared_ws = BinanceWSStreamer()
     shared_ws.register_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
     app.state.ws_streamer = shared_ws
     app.state.bots = {"paper": None, "live": None}
+    app.state.bot_lock = asyncio.Lock()
 
     logger.info("MA Trader ready.")
     yield
-    # Shutdown
     bots = getattr(app.state, "bots", {}) or {}
     for bot in bots.values():
         if bot is not None and getattr(bot, "running", False):
@@ -111,20 +115,35 @@ async def lifespan(app: FastAPI):
     logger.info("MA Trader shut down.")
 
 
-app = FastAPI(title="MA Trader", version="1.0.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+_ENABLE_DOCS = os.environ.get("ENABLE_DOCS", "").strip().lower() in {"1", "true", "yes"}
+app = FastAPI(
+    title="MA Trader",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _ENABLE_DOCS else None,
+    redoc_url="/redoc" if _ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if _ENABLE_DOCS else None,
 )
+
+# Restrict CORS to explicitly configured origins (same-origin requests don't need CORS).
+_raw_origins = os.environ.get("CORS_ORIGINS", "").strip()
+_cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()] if _raw_origins else []
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 
 @app.middleware("http")
-async def add_no_cache_headers(request, call_next):
+async def add_security_and_cache_headers(request, call_next):
     response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
     path = request.url.path
     if path == "/" or path.endswith((".html", ".js", ".css")) or "/js/" in path or "/css/" in path:
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
@@ -133,23 +152,28 @@ async def add_no_cache_headers(request, call_next):
     return response
 
 
-# Public paths that do not require authentication
-PUBLIC_API_PATHS = {"/api/auth/login", "/health", "/docs", "/openapi.json"}
+PUBLIC_API_PATHS = {"/api/auth/login", "/health"}
 
 
 @app.middleware("http")
 async def api_auth_middleware(request, call_next):
     path = request.url.path
-    # Intercept protected API routes
     if path.startswith("/api/") and path not in PUBLIC_API_PATHS:
-        token = get_token_from_request(request)
+        token = get_token_from_request(request, allow_query=False)
         user = validate_token(token)
         if not user:
-            from fastapi.responses import JSONResponse
             return JSONResponse(
                 status_code=401,
                 content={"detail": "未授权或登录已过期，请重新登录", "code": "UNAUTHORIZED"},
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+        if getattr(user, "must_change_password", False) and path not in PASSWORD_CHANGE_ALLOWED_PATHS:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "首次登录或仍在使用默认密码，请先修改管理员密码",
+                    "code": "PASSWORD_CHANGE_REQUIRED",
+                },
             )
     return await call_next(request)
 
@@ -185,15 +209,35 @@ async def health():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    token = websocket.query_params.get("token")
+    """
+    WebSocket endpoint.
+    Prefers first-frame authentication ({"type": "auth", "token": "..."}) so tokens
+    never appear in URLs / server logs; also falls back to Authorization header.
+    """
+    token = None
+    auth_header = websocket.headers.get("authorization") or ""
+    if auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):].strip()
+
+    await websocket.accept()
+
+    if not token:
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            msg = json.loads(raw)
+            if isinstance(msg, dict) and msg.get("type") == "auth":
+                token = str(msg.get("token") or "").strip()
+        except Exception:
+            await websocket.close(code=4401)
+            return
+
     user = validate_token(token)
-    if not user:
+    if not user or getattr(user, "must_change_password", False):
         await websocket.close(code=4401)
         return
 
-    await ws_manager.connect(websocket)
+    ws_manager.register_accepted(websocket)
 
-    # Send current bot status immediately upon connection
     bots = getattr(websocket.app.state, "bots", {}) or {}
     paper_bot = bots.get("paper")
     live_bot = bots.get("live")
@@ -208,7 +252,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            # Keep connection alive; bot broadcasts outbound, client can send pings
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)

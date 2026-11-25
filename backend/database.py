@@ -5,6 +5,7 @@ Database: SQLite at data/trading.db
 
 import os
 import hashlib
+import hmac
 import secrets
 from datetime import datetime, timezone
 from sqlalchemy import (
@@ -60,7 +61,12 @@ class UserModel(Base):
     username = Column(String(50), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     salt = Column(String(64), nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    must_change_password = Column(Boolean, default=False, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class SymbolConfig(Base):
@@ -103,6 +109,7 @@ class Trade(Base):
     exchange_order_id = Column(String, nullable=True)
     sl_order_id = Column(String, nullable=True)
     trailing_active = Column(Boolean, default=False)
+    initial_risk = Column(Float, nullable=True)                # 开仓时 1R 距离（|entry - 初始止损|），重启后用于分档止盈
 
 
 class SessionTokenModel(Base):
@@ -113,7 +120,7 @@ class SessionTokenModel(Base):
     user_id = Column(Integer, nullable=False, index=True)
     username = Column(String(50), nullable=False)
     expires_at = Column(Float, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class OperationLog(Base):
@@ -175,7 +182,7 @@ class BacktestRun(Base):
     params = Column(String)                                    # JSON string
     results = Column(String, nullable=True)                    # JSON string
     status = Column(String, default="pending")                 # "pending","running","done","failed"
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     error_msg = Column(String, nullable=True)
 
 
@@ -193,9 +200,10 @@ class CachedKline(Base):
     close = Column(Float, nullable=False)
     volume = Column(Float, nullable=False)
 
+    # The unique constraint already creates an index on (symbol, timeframe, open_time);
+    # a second identical index only wastes disk space and slows down inserts.
     __table_args__ = (
         UniqueConstraint("symbol", "timeframe", "open_time", name="uix_kline_sym_tf_ts"),
-        Index("ix_kline_lookup", "symbol", "timeframe", "open_time"),
     )
 
 
@@ -226,16 +234,49 @@ def _get_env_fallback(key: str) -> str:
         "max_daily_loss": "MAX_DAILY_LOSS",
     }
     target = mapping.get(key)
-    if isinstance(target, list):
-        for t in target:
-            val = os.environ.get(t)
-            if val:
-                return str(val).strip()
-    elif isinstance(target, str):
-        val = os.environ.get(target)
+    candidates = target if isinstance(target, list) else ([target] if isinstance(target, str) else [])
+    for t in candidates:
+        val = _clean_env_value(os.environ.get(t))
         if val:
-            return str(val).strip()
+            return val
     return ""
+
+
+def _clean_env_value(val) -> str:
+    """Normalise an env value: strip inline comments / quotes and ignore template placeholders."""
+    if not val:
+        return ""
+    s = str(val)
+    # systemd EnvironmentFile does not strip inline comments ("paper   # paper | live")
+    if " #" in s:
+        s = s.split(" #", 1)[0]
+    s = s.strip().strip('"').strip("'").strip()
+    # Ignore placeholders copied verbatim from .env.example (your_key, your_secret, ...)
+    if s.lower().startswith("your_") or s.lower() in {"changeme", "xxx", "none", "null"}:
+        return ""
+    return s
+
+
+DEFAULT_ADMIN_PASSWORD = "123456"
+INITIAL_PASSWORD_FILE = os.path.join(BASE_DIR, "data", "admin_initial_password.txt")
+
+
+def _pbkdf2(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000).hex()
+
+
+def _write_initial_password_file(password: str) -> None:
+    """Persist a generated admin password to a 0600 file so the operator can read it once."""
+    try:
+        fd = os.open(INITIAL_PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(
+                "MA Trader 初始管理员账号\n"
+                f"username: admin\npassword: {password}\n"
+                "首次登录后系统会强制要求修改密码；修改完成后请删除本文件。\n"
+            )
+    except OSError:
+        pass
 
 
 def init_db() -> None:
@@ -243,9 +284,24 @@ def init_db() -> None:
     create_tables()
 
 
+_TABLES_READY = False
+
+
+def ensure_tables() -> None:
+    """Run create_tables() once per process (cheap guard for hot paths like backtests)."""
+    global _TABLES_READY
+    if not _TABLES_READY:
+        create_tables()
+
+
 def create_tables() -> None:
     """Create all tables, migrate missing columns, and seed default settings if missing."""
+    global _TABLES_READY
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    try:
+        os.chmod(os.path.dirname(DB_PATH), 0o700)
+    except OSError:
+        pass
     Base.metadata.create_all(bind=engine)
 
     # Lightweight schema migration for existing SQLite databases
@@ -257,6 +313,23 @@ def create_tables() -> None:
             conn.execute(text("ALTER TABLE trades ADD COLUMN sl_order_id VARCHAR"))
         if "trailing_active" not in cols:
             conn.execute(text("ALTER TABLE trades ADD COLUMN trailing_active BOOLEAN DEFAULT 0"))
+        if "initial_risk" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN initial_risk FLOAT"))
+
+        user_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(users)")).fetchall()}
+        if "must_change_password" not in user_cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT 0"))
+
+        # Drop the redundant duplicate index (covered by uix_kline_sym_tf_ts)
+        conn.execute(text("DROP INDEX IF EXISTS ix_kline_lookup"))
+        # Hot query paths: open-position restore, daily-loss check, stats
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trades_status_paper ON trades (status, is_paper)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trades_close_time ON trades (close_time)"))
+
+    try:
+        os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
 
     db = SessionLocal()
     try:
@@ -266,6 +339,9 @@ def create_tables() -> None:
             if not existing:
                 init_val = env_val if env_val else default_val
                 db.add(SettingModel(key=key, value=init_val))
+            elif existing.value and existing.value.strip().lower().startswith("your_"):
+                # Clean up placeholder values imported from an untouched .env.example
+                existing.value = env_val or default_val
             elif not existing.value and env_val:
                 # If database setting is empty, populate from .env environment variable
                 existing.value = env_val
@@ -292,20 +368,36 @@ def create_tables() -> None:
                 rr_ratio=1.5,
                 enabled=True
             ))
-        # Seed default admin user (admin / 123456) if not present
+        # Seed the admin user. Never ship a well-known default password:
+        #   - ADMIN_PASSWORD from env if provided
+        #   - otherwise a random password written to data/admin_initial_password.txt (0600)
+        # Either way the password must be changed on first login.
         admin_user = db.query(UserModel).filter(UserModel.username == "admin").first()
         if not admin_user:
+            env_pwd = _clean_env_value(os.environ.get("ADMIN_PASSWORD"))
+            initial_pwd = env_pwd if env_pwd and len(env_pwd) >= 8 else secrets.token_urlsafe(12)
             salt = secrets.token_hex(16)
-            pwd_hash = hashlib.pbkdf2_hmac("sha256", "123456".encode("utf-8"), salt.encode("utf-8"), 100000).hex()
             db.add(UserModel(
                 username="admin",
-                password_hash=pwd_hash,
+                password_hash=_pbkdf2(initial_pwd, salt),
                 salt=salt,
+                must_change_password=True,
             ))
+            if not env_pwd:
+                _write_initial_password_file(initial_pwd)
+                import logging
+                logging.getLogger(__name__).warning(
+                    "已生成随机初始管理员密码，见 %s（首次登录后需修改）", INITIAL_PASSWORD_FILE
+                )
+        elif not admin_user.must_change_password:
+            # Existing deployments still on the legacy default password are forced to change it
+            if hmac.compare_digest(_pbkdf2(DEFAULT_ADMIN_PASSWORD, admin_user.salt), admin_user.password_hash):
+                admin_user.must_change_password = True
 
         db.commit()
     finally:
         db.close()
+    _TABLES_READY = True
 
 
 def get_db():

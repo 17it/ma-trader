@@ -1,20 +1,27 @@
 """
 MA Trader - Backtesting Engine
-Fetches historical OHLCV data via ccxt and simulates the MA strategy.
+Simulates the exact MAStrategy logic over historical Futures OHLCV data with:
+  - Zero look-ahead bias (HTF lookup uses strictly CLOSED HTF candles: htf_ts + htf_ms <= ltf_close_ts)
+  - Shared MAStrategy entry & exit rules (3-bar MA slope, false-breakout filter, bias guard, MA60 cross, MA7 trailing)
+  - Realistic trading fees (default 0.04% per side) and slippage (default 0.01% per side)
+  - Leverage-capped position sizing aligned with TradingBot
+  - Daily-return annualized Sharpe ratio (365 trading days/year for crypto)
 """
 import logging
 import math
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
+try:
+    from backend.strategy import MAStrategy
+except ImportError:
+    from strategy import MAStrategy
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _compute_mas(closes: pd.Series):
     """Return (ma7, ma25, ma60) Series aligned with closes."""
@@ -24,25 +31,16 @@ def _compute_mas(closes: pd.Series):
     return ma7, ma25, ma60
 
 
-def _is_long_aligned(ma7: float, ma25: float, ma60: float) -> bool:
-    return ma7 > ma25 > ma60
-
-
-def _is_short_aligned(ma7: float, ma25: float, ma60: float) -> bool:
-    return ma7 < ma25 < ma60
-
-
 def _fetch_ohlcv_all(exchange, symbol: str, timeframe: str, since_ms: int, until_ms: int) -> list:
     """
     Fetch all OHLCV bars in [since_ms, until_ms) using incremental SQLite cache.
     Raises an explicit error if real market data cannot be obtained.
-    No synthetic/mock data fallback allowed.
     """
     from backtest_cache import load_ohlcv_with_cache
     try:
         result = load_ohlcv_with_cache(exchange, symbol, timeframe, since_ms, until_ms)
     except Exception as exc:
-        logger.error(f"[Backtest] Failed to load OHLCV data for {symbol} {timeframe}: {exc}")
+        logger.error("[Backtest] Failed to load OHLCV data for %s %s: %s", symbol, timeframe, exc)
         raise RuntimeError(f"获取真实K线数据失败: {symbol} {timeframe} ({exc})，请检查网络或代理设置。")
 
     if not result or len(result) < 70:
@@ -52,7 +50,6 @@ def _fetch_ohlcv_all(exchange, symbol: str, timeframe: str, since_ms: int, until
             f"(当前仅获取到 {bars_count} 根，策略计算 MA60 均线至少需要 70 根真实数据)。"
             f"请检查网络/代理连接，或调整回测日期区间。"
         )
-
     return result
 
 
@@ -75,21 +72,33 @@ def _timeframe_to_ms(tf: str) -> int:
     return num * unit
 
 
-# ---------------------------------------------------------------------------
-# Backtester
-# ---------------------------------------------------------------------------
+def _compute_daily_sharpe(timestamps_ms: list[int], equity_history: list[float]) -> float:
+    """Compute annualized Sharpe ratio from UTC daily equity snapshots (365 days/yr)."""
+    if len(equity_history) < 2 or len(timestamps_ms) != len(equity_history):
+        return 0.0
+    daily_close_eq: dict[int, float] = {}
+    for ts, eq in zip(timestamps_ms, equity_history):
+        day_bucket = ts // 86_400_000
+        daily_close_eq[day_bucket] = eq
+    if len(daily_close_eq) < 2:
+        return 0.0
+    ordered_eq = np.array([daily_close_eq[d] for d in sorted(daily_close_eq)], dtype=float)
+    prev = ordered_eq[:-1]
+    valid = prev > 0
+    if not np.any(valid):
+        return 0.0
+    rets = np.diff(ordered_eq)[valid] / prev[valid]
+    if len(rets) < 2:
+        return 0.0
+    std_r = float(rets.std(ddof=1))
+    if std_r <= 0:
+        return 0.0
+    return float(rets.mean() / std_r * math.sqrt(365.0))
+
 
 class Backtester:
     """
-    Simulates the dual-MA confirmation strategy over historical data.
-
-    Strategy rules (mirrors TradingBot logic):
-      - MA alignment (MA7 > MA25 > MA60 for long, vice-versa for short) on HTF.
-      - Entry after `confirm_candles` consecutive LTF candles that close
-        on the correct side of MA7.
-      - Stop-loss: low of the signal candle (long) / high of the signal candle (short).
-      - Take-profit: entry ± (entry − SL) × rr_ratio.
-      - One position at a time per symbol.
+    Simulates MAStrategy faithfully over historical candles without look-ahead bias.
     """
 
     def __init__(self, exchange=None):
@@ -106,19 +115,12 @@ class Backtester:
         rr_ratio: float = 1.5,
         initial_capital: float = 10_000.0,
         risk_per_trade: float = 0.01,
+        leverage: int = 5,
+        fee_rate: float = 0.0004,
+        slippage_rate: float = 0.0001,
+        df_ltf_override: Optional[pd.DataFrame] = None,
+        df_htf_override: Optional[pd.DataFrame] = None,
     ) -> dict:
-        """
-        Run a full backtest and return a results dict.
-
-        Returns:
-            {
-              "total_trades", "win_trades", "loss_trades",
-              "win_rate", "total_pnl", "total_pnl_pct",
-              "max_drawdown", "sharpe_ratio",
-              "trades": [...],
-              "equity_curve": [{"time": ..., "equity": float}]
-            }
-        """
         start_dt = _parse_dt(start_date, is_end=False)
         end_dt = _parse_dt(end_date, is_end=True)
         since_ms = int(start_dt.timestamp() * 1000)
@@ -128,24 +130,25 @@ class Backtester:
         tf_ms = _timeframe_to_ms(timeframe)
         htf_ms = _timeframe_to_ms(htf_timeframe)
 
-        # Warmup buffer so MA60 is ready from the exact start_date even for short intraday ranges
-        ltf_fetch_since = since_ms - 70 * tf_ms
-        htf_fetch_since = since_ms - 70 * htf_ms
+        if df_ltf_override is not None:
+            df_ltf = df_ltf_override.copy().reset_index(drop=True)
+        else:
+            ltf_fetch_since = since_ms - 70 * tf_ms
+            logger.info("[Backtest] Fetching %s %s from %s to %s", symbol, timeframe, start_date, end_date)
+            raw_ltf = _fetch_ohlcv_all(self.exchange, symbol, timeframe, ltf_fetch_since, until_ms)
+            df_ltf = pd.DataFrame(raw_ltf, columns=["ts", "open", "high", "low", "close", "volume"])
 
-        # --- fetch LTF data ---
-        logger.info(f"[Backtest] Fetching {symbol} {timeframe} from {start_date} to {end_date}")
-        raw_ltf = _fetch_ohlcv_all(self.exchange, symbol, timeframe, ltf_fetch_since, until_ms)
-        if len(raw_ltf) < 70:
-            raise ValueError(f"Insufficient LTF data: {len(raw_ltf)} bars")
+        if len(df_ltf) < 70:
+            raise ValueError(f"Insufficient LTF data: {len(df_ltf)} bars")
 
-        # --- fetch HTF data ---
-        logger.info(f"[Backtest] Fetching HTF {symbol} {htf_timeframe}")
-        raw_htf = _fetch_ohlcv_all(self.exchange, symbol, htf_timeframe, htf_fetch_since, until_ms)
+        if df_htf_override is not None:
+            df_htf = df_htf_override.copy().reset_index(drop=True)
+        else:
+            htf_fetch_since = since_ms - 70 * htf_ms
+            logger.info("[Backtest] Fetching HTF %s %s", symbol, htf_timeframe)
+            raw_htf = _fetch_ohlcv_all(self.exchange, symbol, htf_timeframe, htf_fetch_since, until_ms)
+            df_htf = pd.DataFrame(raw_htf, columns=["ts", "open", "high", "low", "close", "volume"])
 
-        df_ltf = pd.DataFrame(raw_ltf, columns=["ts", "open", "high", "low", "close", "volume"])
-        df_htf = pd.DataFrame(raw_htf, columns=["ts", "open", "high", "low", "close", "volume"])
-
-        # If HTF is empty or too short, resample directly from LTF for perfect synchronization
         if len(df_htf) < 70 and len(df_ltf) >= 70:
             df_tmp = df_ltf.copy()
             df_tmp["dt"] = pd.to_datetime(df_tmp["ts"], unit="ms")
@@ -158,314 +161,238 @@ class Backtester:
         df_ltf["ma7"], df_ltf["ma25"], df_ltf["ma60"] = _compute_mas(df_ltf["close"])
         df_htf["ma7"], df_htf["ma25"], df_htf["ma60"] = _compute_mas(df_htf["close"])
 
-        # Build HTF index for fast lookup: ts_ms -> row index
-        htf_arr = df_htf[["ts", "ma7", "ma25", "ma60"]].values
+        # HTF array: [open_ts, close, ma7, ma25, ma60]
+        htf_ts_arr = df_htf["ts"].to_numpy(dtype=np.int64)
+        htf_close_arr = df_htf["close"].to_numpy(dtype=float)
+        htf_ma7_arr = df_htf["ma7"].to_numpy(dtype=float)
+        htf_ma25_arr = df_htf["ma25"].to_numpy(dtype=float)
+        htf_ma60_arr = df_htf["ma60"].to_numpy(dtype=float)
 
-        def get_htf_row(ts_ms: int):
-            """Return the most recent HTF row whose ts <= ts_ms."""
-            if len(htf_arr) == 0:
+        def get_closed_htf_direction(ltf_open_ts: int) -> Optional[str]:
+            """
+            Return HTF direction using ONLY the latest HTF candle that has FULLY CLOSED
+            at or before the current LTF candle's close time (ltf_open_ts + tf_ms).
+            Prevents look-ahead bias completely.
+            """
+            if len(htf_ts_arr) == 0:
                 return None
-            idx = np.searchsorted(htf_arr[:, 0], ts_ms, side="right") - 1
-            if idx < 0 or idx >= len(htf_arr):
+            max_closed_htf_open_ts = (ltf_open_ts + tf_ms) - htf_ms
+            idx = int(np.searchsorted(htf_ts_arr, max_closed_htf_open_ts, side="right")) - 1
+            if idx < 59 or idx >= len(htf_ts_arr):
                 return None
-            return htf_arr[idx]
+            return MAStrategy.check_htf_scalars(
+                htf_close_arr[idx], htf_ma7_arr[idx], htf_ma25_arr[idx], htf_ma60_arr[idx]
+            )
 
-        # --- Simulate ---
-        capital = initial_capital
+        # Extract LTF columns to numpy arrays for fast iteration
+        ltf_ts = df_ltf["ts"].to_numpy(dtype=np.int64)
+        ltf_open = df_ltf["open"].to_numpy(dtype=float)
+        ltf_high = df_ltf["high"].to_numpy(dtype=float)
+        ltf_low = df_ltf["low"].to_numpy(dtype=float)
+        ltf_close = df_ltf["close"].to_numpy(dtype=float)
+        ltf_ma7 = df_ltf["ma7"].to_numpy(dtype=float)
+        ltf_ma25 = df_ltf["ma25"].to_numpy(dtype=float)
+        ltf_ma60 = df_ltf["ma60"].to_numpy(dtype=float)
+
+        strategy = MAStrategy()
+
+        capital = float(initial_capital)
+        total_fees_paid = 0.0
         equity_history: list[float] = []
+        equity_ts: list[int] = []
         trades_result: list[dict] = []
 
         in_trade = False
         trade_direction: Optional[str] = None
         trade_entry: float = 0.0
         trade_sl: float = 0.0
-        trade_tp: float = 0.0        # activation threshold (1.5R level), not fixed exit
+        trade_tp: float = 0.0
+        trade_risk_r: float = 0.0
         trade_qty: float = 0.0
-        trade_entry_time: Optional[int] = None
-        trade_entry_idx: int = 0
-        confirm_count: int = 0
-        pending_direction: Optional[str] = None
-        trailing_active: bool = False  # True after price hits rr_ratio * R → break-even locked
+        trade_entry_time: int = 0
+        trade_entry_fee: float = 0.0
+        trailing_active: bool = False
 
-        min_idx = 60  # need at least 60 bars for MA60
+        def record_close(exit_raw_price: float, ts_ms: int, close_reason: str):
+            nonlocal capital, total_fees_paid, in_trade, trailing_active
+            if trade_direction == "long":
+                exit_fill = exit_raw_price * (1.0 - slippage_rate)
+                gross_pnl = (exit_fill - trade_entry) * trade_qty
+            else:
+                exit_fill = exit_raw_price * (1.0 + slippage_rate)
+                gross_pnl = (trade_entry - exit_fill) * trade_qty
+
+            exit_fee = exit_fill * trade_qty * fee_rate
+            trade_fee = trade_entry_fee + exit_fee
+            net_pnl = gross_pnl - trade_fee
+            notional = trade_entry * trade_qty
+            pnl_pct = (net_pnl / notional * 100.0) if notional > 0 else 0.0
+
+            capital += net_pnl
+            total_fees_paid += trade_fee
+            trades_result.append({
+                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
+                "exit_time": datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat(),
+                "direction": trade_direction,
+                "entry_price": round(trade_entry, 6),
+                "exit_price": round(exit_fill, 6),
+                "pnl": round(net_pnl, 4),
+                "pnl_pct": round(pnl_pct, 2),
+                "fee": round(trade_fee, 4),
+                "close_reason": close_reason,
+                "result": "win" if net_pnl > 0 else "loss",
+            })
+            in_trade = False
+            trailing_active = False
+
+        min_idx = 62  # need MA60 + 3-bar MA slope history
         sim_start_idx = min_idx
-        ltf_ts_col = df_ltf["ts"].values
-        while sim_start_idx < len(ltf_ts_col) and int(ltf_ts_col[sim_start_idx]) < since_ms:
+        while sim_start_idx < len(ltf_ts) and int(ltf_ts[sim_start_idx]) < since_ms:
             sim_start_idx += 1
 
-        for i in range(sim_start_idx, len(df_ltf)):
-            row = df_ltf.iloc[i]
-            ts = int(row["ts"])
-            o, h, l, c = row["open"], row["high"], row["low"], row["close"]
-            ma7, ma25, ma60 = row["ma7"], row["ma25"], row["ma60"]
+        for i in range(sim_start_idx, len(ltf_ts)):
+            ts = int(ltf_ts[i])
+            o, h, l, c = ltf_open[i], ltf_high[i], ltf_low[i], ltf_close[i]
+            ma7, ma25, ma60 = ltf_ma7[i], ltf_ma25[i], ltf_ma60[i]
 
             if math.isnan(ma7) or math.isnan(ma25) or math.isnan(ma60):
                 equity_history.append(capital)
+                equity_ts.append(ts)
                 continue
 
-            # Check HTF alignment
-            htf_row = get_htf_row(ts)
-            if htf_row is None:
-                equity_history.append(capital)
-                continue
-            htf_ma7, htf_ma25, htf_ma60 = htf_row[1], htf_row[2], htf_row[3]
-            if math.isnan(htf_ma7):
-                equity_history.append(capital)
-                continue
-
-            htf_long = _is_long_aligned(htf_ma7, htf_ma25, htf_ma60)
-            htf_short = _is_short_aligned(htf_ma7, htf_ma25, htf_ma60)
-
-            # ---- If in a trade, check exit conditions ----
+            # ---- 1. Manage open trade (identical tiers + MA60/MA7 exits to TradingBot) ----
             if in_trade:
                 if trade_direction == "long":
-                    if not trailing_active:
-                        # Phase 1: check SL first, then tiered profit lock & trailing activation
-                        if l <= trade_sl:
-                            # Stop loss (or profit-lock SL) hit
-                            exit_price = trade_sl
-                            pnl = (exit_price - trade_entry) * trade_qty
-                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                            capital += pnl
-                            trades_result.append({
-                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                                "direction": "long",
-                                "entry_price": trade_entry,
-                                "exit_price": exit_price,
-                                "pnl": round(pnl, 4),
-                                "pnl_pct": round(pnl_pct, 2),
-                                "result": "win" if pnl >= 0 else "loss",
-                            })
-                            in_trade = False
-                            trailing_active = False
-                        else:
-                            r_dist = abs(trade_tp - trade_entry) / rr_ratio if rr_ratio > 0 else 0.0
-                            if h >= trade_tp:
-                                # Tier 3: Profit hit rr_ratio * R → lock profit & switch to MA7 trailing
-                                lock_sl = max(trade_entry * 1.001, trade_entry + 0.5 * r_dist) if rr_ratio > 1.2 else trade_entry * 1.001
-                                trade_sl = max(trade_sl, lock_sl)
-                                trailing_active = True
-                            elif rr_ratio > 1.2 and r_dist > 0 and h >= trade_entry + 1.2 * r_dist:
-                                # Tier 2: Lock +0.5R profit
-                                trade_sl = max(trade_sl, trade_entry + 0.5 * r_dist)
-                            elif rr_ratio > 0.7 and r_dist > 0 and h >= trade_entry + 0.7 * r_dist:
-                                # Tier 1: Break-even + 0.1% fee buffer
-                                trade_sl = max(trade_sl, trade_entry * 1.001)
+                    if l <= trade_sl:
+                        reason = (
+                            "trailing_stop" if trailing_active
+                            else ("profit_lock_stop" if trade_sl > trade_entry else "stop_loss")
+                        )
+                        record_close(trade_sl, ts, reason)
+                    elif not trailing_active:
+                        if h >= trade_tp:
+                            lock_sl = (
+                                max(trade_entry * 1.001, trade_entry + 0.5 * trade_risk_r)
+                                if rr_ratio > 1.2
+                                else trade_entry * 1.001
+                            )
+                            trade_sl = max(trade_sl, lock_sl)
+                            trailing_active = True
+                        elif rr_ratio > 1.2 and trade_risk_r > 0 and h >= trade_entry + 1.2 * trade_risk_r:
+                            trade_sl = max(trade_sl, trade_entry + 0.5 * trade_risk_r)
+                        elif rr_ratio > 0.7 and trade_risk_r > 0 and h >= trade_entry + 0.7 * trade_risk_r:
+                            trade_sl = max(trade_sl, trade_entry * 1.001)
+                        # Bar-close MA60 cross check (matches live strategy.check_exit)
+                        if not trailing_active:
+                            exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma7, ma60, False)
+                            if exit_sig:
+                                record_close(c, ts, exit_sig)
                     else:
-                        # Phase 2: trailing mode — SL is at break-even or higher
-                        if l <= trade_sl:
-                            # Trailing SL hit (break-even or above) → exit
-                            exit_price = trade_sl
-                            pnl = (exit_price - trade_entry) * trade_qty
-                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                            capital += pnl
-                            trades_result.append({
-                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                                "direction": "long",
-                                "entry_price": trade_entry,
-                                "exit_price": exit_price,
-                                "pnl": round(pnl, 4),
-                                "pnl_pct": round(pnl_pct, 2),
-                                "result": "win" if pnl >= 0 else "loss",
-                            })
-                            in_trade = False
-                            trailing_active = False
-                        elif c < ma7:
-                            # Price closed below MA7 → trend over, exit at close
-                            exit_price = c
-                            pnl = (exit_price - trade_entry) * trade_qty
-                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                            capital += pnl
-                            trades_result.append({
-                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                                "direction": "long",
-                                "entry_price": trade_entry,
-                                "exit_price": exit_price,
-                                "pnl": round(pnl, 4),
-                                "pnl_pct": round(pnl_pct, 2),
-                                "result": "win" if pnl >= 0 else "loss",
-                            })
-                            in_trade = False
-                            trailing_active = False
+                        exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma7, ma60, True)
+                        if exit_sig:
+                            record_close(c, ts, exit_sig)
                         else:
-                            # Still above MA7 → keep trailing: raise SL to follow MA7 upward
-                            if not math.isnan(ma7):
-                                trade_sl = max(trade_sl, ma7 * 0.9995)
+                            trade_sl = max(trade_sl, ma7 * 0.9995)
                 else:  # short
-                    if not trailing_active:
-                        # Phase 1: check SL first, then tiered profit lock & trailing activation
-                        if h >= trade_sl:
-                            # Stop loss (or profit-lock SL) hit
-                            exit_price = trade_sl
-                            pnl = (trade_entry - exit_price) * trade_qty
-                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                            capital += pnl
-                            trades_result.append({
-                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                                "direction": "short",
-                                "entry_price": trade_entry,
-                                "exit_price": exit_price,
-                                "pnl": round(pnl, 4),
-                                "pnl_pct": round(pnl_pct, 2),
-                                "result": "win" if pnl >= 0 else "loss",
-                            })
-                            in_trade = False
-                            trailing_active = False
-                        else:
-                            r_dist = abs(trade_entry - trade_tp) / rr_ratio if rr_ratio > 0 else 0.0
-                            if l <= trade_tp:
-                                # Tier 3: Profit hit rr_ratio * R → lock profit & switch to MA7 trailing
-                                lock_sl = min(trade_entry * 0.999, trade_entry - 0.5 * r_dist) if rr_ratio > 1.2 else trade_entry * 0.999
-                                trade_sl = min(trade_sl, lock_sl)
-                                trailing_active = True
-                            elif rr_ratio > 1.2 and r_dist > 0 and l <= trade_entry - 1.2 * r_dist:
-                                # Tier 2: Lock +0.5R profit
-                                trade_sl = min(trade_sl, trade_entry - 0.5 * r_dist)
-                            elif rr_ratio > 0.7 and r_dist > 0 and l <= trade_entry - 0.7 * r_dist:
-                                # Tier 1: Break-even - 0.1% fee buffer
-                                trade_sl = min(trade_sl, trade_entry * 0.999)
+                    if h >= trade_sl:
+                        reason = (
+                            "trailing_stop" if trailing_active
+                            else ("profit_lock_stop" if trade_sl < trade_entry else "stop_loss")
+                        )
+                        record_close(trade_sl, ts, reason)
+                    elif not trailing_active:
+                        if l <= trade_tp:
+                            lock_sl = (
+                                min(trade_entry * 0.999, trade_entry - 0.5 * trade_risk_r)
+                                if rr_ratio > 1.2
+                                else trade_entry * 0.999
+                            )
+                            trade_sl = min(trade_sl, lock_sl)
+                            trailing_active = True
+                        elif rr_ratio > 1.2 and trade_risk_r > 0 and l <= trade_entry - 1.2 * trade_risk_r:
+                            trade_sl = min(trade_sl, trade_entry - 0.5 * trade_risk_r)
+                        elif rr_ratio > 0.7 and trade_risk_r > 0 and l <= trade_entry - 0.7 * trade_risk_r:
+                            trade_sl = min(trade_sl, trade_entry * 0.999)
+                        if not trailing_active:
+                            exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma7, ma60, False)
+                            if exit_sig:
+                                record_close(c, ts, exit_sig)
                     else:
-                        # Phase 2: trailing mode — SL is at break-even or lower (for short)
-                        if h >= trade_sl:
-                            # Trailing SL hit → exit
-                            exit_price = trade_sl
-                            pnl = (trade_entry - exit_price) * trade_qty
-                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                            capital += pnl
-                            trades_result.append({
-                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                                "direction": "short",
-                                "entry_price": trade_entry,
-                                "exit_price": exit_price,
-                                "pnl": round(pnl, 4),
-                                "pnl_pct": round(pnl_pct, 2),
-                                "result": "win" if pnl >= 0 else "loss",
-                            })
-                            in_trade = False
-                            trailing_active = False
-                        elif c > ma7:
-                            # Price closed above MA7 → trend over, exit at close
-                            exit_price = c
-                            pnl = (trade_entry - exit_price) * trade_qty
-                            pnl_pct = pnl / (trade_entry * trade_qty) * 100
-                            capital += pnl
-                            trades_result.append({
-                                "entry_time": datetime.fromtimestamp(trade_entry_time / 1000, tz=timezone.utc).isoformat(),
-                                "exit_time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                                "direction": "short",
-                                "entry_price": trade_entry,
-                                "exit_price": exit_price,
-                                "pnl": round(pnl, 4),
-                                "pnl_pct": round(pnl_pct, 2),
-                                "result": "win" if pnl >= 0 else "loss",
-                            })
-                            in_trade = False
-                            trailing_active = False
+                        exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma7, ma60, True)
+                        if exit_sig:
+                            record_close(c, ts, exit_sig)
                         else:
-                            # Still below MA7 → keep trailing: lower SL to follow MA7 downward
-                            if not math.isnan(ma7):
-                                trade_sl = min(trade_sl, ma7 * 1.0005)
+                            trade_sl = min(trade_sl, ma7 * 1.0005)
 
-            # ---- If not in a trade, look for signals ----
-            if not in_trade:
-                # Overextension / bias guard (anti-chasing: <=0.35% from MA25, <=0.60% from MA60)
-                overextended = (
-                    (ma25 > 0 and abs(c - ma25) / ma25 > 0.0035)
-                    or (ma60 > 0 and abs(c - ma60) / ma60 > 0.0060)
+            # ---- 2. Always feed MAStrategy bar-close signal state machine ----
+            htf_dir = get_closed_htf_direction(ts)
+            sig = strategy.evaluate_bar(
+                o=o,
+                h=h,
+                l=l,
+                c=c,
+                ma7_seq=(ltf_ma7[i - 2], ltf_ma7[i - 1], ma7),
+                ma25_seq=(ltf_ma25[i - 2], ltf_ma25[i - 1], ma25),
+                ma60=ma60,
+                htf_dir=htf_dir,
+                confirm_candles=confirm_candles,
+            )
+
+            if not in_trade and sig is not None and not sig.get("pending") and capital > 0:
+                direction = sig["direction"]
+                entry_fill = c * (1.0 + slippage_rate) if direction == "long" else c * (1.0 - slippage_rate)
+                sl, tp, risk_r = MAStrategy.compute_sl_tp(
+                    direction=direction,
+                    entry_price=entry_fill,
+                    ma60=ma60,
+                    candle_low=l,
+                    candle_high=h,
+                    rr_ratio=rr_ratio,
                 )
-                # LTF signal check
-                ltf_long = (c > ma7) and not overextended
-                ltf_short = (c < ma7) and not overextended
-
-                if htf_long and ltf_long:
-                    if pending_direction == "long":
-                        confirm_count += 1
-                    else:
-                        pending_direction = "long"
-                        confirm_count = 1
-                elif htf_short and ltf_short:
-                    if pending_direction == "short":
-                        confirm_count += 1
-                    else:
-                        pending_direction = "short"
-                        confirm_count = 1
-                else:
-                    pending_direction = None
-                    confirm_count = 0
-
-                if confirm_count >= confirm_candles and pending_direction is not None:
-                    # Enter trade
-                    trade_direction = pending_direction
-                    trade_entry = c
-                    trade_entry_time = ts
-
-                    if trade_direction == "long":
-                        sl_candidate = ma60 if not math.isnan(ma60) and ma60 < trade_entry else l
-                        trade_sl = min(sl_candidate, trade_entry * 0.997)
-                        price_risk = trade_entry - trade_sl
-                        if price_risk <= 0:
-                            pending_direction = None
-                            confirm_count = 0
-                            equity_history.append(capital)
-                            continue
-                        trade_tp = trade_entry + price_risk * rr_ratio
-                    else:
-                        sl_candidate = ma60 if not math.isnan(ma60) and ma60 > trade_entry else h
-                        trade_sl = max(sl_candidate, trade_entry * 1.003)
-                        price_risk = trade_sl - trade_entry
-                        if price_risk <= 0:
-                            pending_direction = None
-                            confirm_count = 0
-                            equity_history.append(capital)
-                            continue
-                        trade_tp = trade_entry - price_risk * rr_ratio
-
-                    risk_amount = initial_capital * risk_per_trade
-                    trade_qty = risk_amount / price_risk if price_risk > 0 else 0
-
-                    if trade_qty > 0:
+                if risk_r > 0:
+                    risk_amount = capital * risk_per_trade
+                    raw_qty = risk_amount / risk_r
+                    # Cap notional exposure within available margin * leverage (aligned with TradingBot)
+                    max_notional = capital * leverage * 0.95
+                    if raw_qty * entry_fill > max_notional:
+                        raw_qty = max_notional / entry_fill
+                    qty = round(raw_qty, 6)
+                    if qty > 0:
                         in_trade = True
                         trailing_active = False
-                        pending_direction = None
-                        confirm_count = 0
+                        trade_direction = direction
+                        trade_entry = entry_fill
+                        trade_sl = sl
+                        trade_tp = tp
+                        trade_risk_r = risk_r
+                        trade_qty = qty
+                        trade_entry_time = ts
+                        trade_entry_fee = entry_fill * qty * fee_rate
+                        strategy.reset()
 
             equity_history.append(capital)
+            equity_ts.append(ts)
 
         # ---- Compute statistics ----
         total = len(trades_result)
         wins = sum(1 for t in trades_result if t["result"] == "win")
         losses = total - wins
-        win_rate = wins / total * 100 if total > 0 else 0.0
+        win_rate = wins / total * 100.0 if total > 0 else 0.0
         total_pnl = sum(t["pnl"] for t in trades_result)
-        total_pnl_pct = total_pnl / initial_capital * 100
+        total_pnl_pct = (total_pnl / initial_capital * 100.0) if initial_capital > 0 else 0.0
 
-        # Max drawdown
-        equity_arr = np.array(equity_history) if equity_history else np.array([initial_capital])
+        equity_arr = np.array(equity_history, dtype=float) if equity_history else np.array([initial_capital], dtype=float)
         peak = np.maximum.accumulate(equity_arr)
-        drawdown = (peak - equity_arr) / peak
-        max_drawdown = float(drawdown.max()) * 100 if len(drawdown) else 0.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            drawdown = np.where(peak > 0, (peak - equity_arr) / peak, 0.0)
+        max_drawdown = float(drawdown.max()) * 100.0 if len(drawdown) else 0.0
 
-        # Sharpe ratio (daily returns approximation)
-        if len(equity_history) > 1:
-            eq = np.array(equity_history, dtype=float)
-            rets = np.diff(eq) / eq[:-1]
-            mean_r = rets.mean()
-            std_r = rets.std()
-            sharpe = float(mean_r / std_r * math.sqrt(len(rets))) if std_r > 0 else 0.0
-        else:
-            sharpe = 0.0
+        sharpe = _compute_daily_sharpe(equity_ts, equity_history)
 
-        # Equity curve (downsampled to ≤500 points)
         step = max(1, len(equity_history) // 500)
-        ltf_ts = df_ltf["ts"].values
         equity_curve = []
         for idx in range(0, len(equity_history), step):
-            ts_val = int(ltf_ts[sim_start_idx + idx]) if (sim_start_idx + idx) < len(ltf_ts) else int(ltf_ts[-1])
+            ts_val = equity_ts[idx]
             dt_str = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc).strftime("%m-%d %H:%M")
             equity_curve.append({
                 "time": dt_str,
@@ -481,6 +408,7 @@ class Backtester:
             "win_rate": round(win_rate, 2),
             "total_pnl": round(total_pnl, 4),
             "total_pnl_pct": round(total_pnl_pct, 2),
+            "total_fees": round(total_fees_paid, 4),
             "max_drawdown": round(max_drawdown, 2),
             "sharpe_ratio": round(sharpe, 4),
             "trades": trades_result,

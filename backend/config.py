@@ -4,6 +4,8 @@ Configuration management — read/write the 'settings' table.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Dict, Optional
 from sqlalchemy.orm import Session
 
@@ -13,15 +15,24 @@ from database import SettingModel, DEFAULT_SETTINGS, SessionLocal
 class ConfigManager:
     """
     Thin wrapper used by main.py via app.state.config.
-    Provides synchronous helpers that open their own DB session.
+    Caches settings in memory with a short TTL and explicit invalidation on write.
     """
 
+    def __init__(self, ttl_seconds: float = 30.0):
+        self._ttl = ttl_seconds
+        self._cache: Optional[Dict[str, str]] = None
+        self._cache_ts: float = 0.0
+        self._lock = threading.Lock()
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._cache = None
+            self._cache_ts = 0.0
+
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        db = SessionLocal()
-        try:
-            return get_setting(db, key, default)
-        finally:
-            db.close()
+        data = self.get_all_cached()
+        val = data.get(key)
+        return default if val is None else val
 
     def set(self, key: str, value: str) -> None:
         db = SessionLocal()
@@ -29,22 +40,35 @@ class ConfigManager:
             set_setting(db, key, value)
         finally:
             db.close()
+        self.invalidate()
 
     def all(self) -> Dict[str, str]:
         db = SessionLocal()
         try:
-            return get_all_settings(db)
+            data = get_all_settings(db)
         finally:
             db.close()
+        with self._lock:
+            self._cache = dict(data)
+            self._cache_ts = time.monotonic()
+        return data
 
     def get_all(self, db: Optional[Session] = None) -> Dict[str, str]:
-        """Alias for get_all_settings with optional injected db session."""
+        """Return all settings using an injected session if given, else the cached copy."""
         if db is not None:
-            return get_all_settings(db)
-        return self.all()
+            data = get_all_settings(db)
+            with self._lock:
+                self._cache = dict(data)
+                self._cache_ts = time.monotonic()
+            return data
+        return self.get_all_cached()
 
     def get_all_cached(self) -> Dict[str, str]:
-        """Return all settings as a dict."""
+        """Return cached settings dict, refreshing from SQLite when TTL expires."""
+        now = time.monotonic()
+        with self._lock:
+            if self._cache is not None and (now - self._cache_ts) < self._ttl:
+                return dict(self._cache)
         return self.all()
 
 

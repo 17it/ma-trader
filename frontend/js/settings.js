@@ -7,6 +7,16 @@ const SettingsManager = (() => {
   let modalInstance = null;
   let editingId = null;
 
+  function _esc(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   // ─── Init ────────────────────────────────────────────────────────────
   function init() {
     modalInstance = new bootstrap.Modal(document.getElementById('symbolModal'));
@@ -161,18 +171,19 @@ const SettingsManager = (() => {
     tbody.innerHTML = '';
     symbols.forEach(sym => {
       const tr = document.createElement('tr');
+      const idNum = Number(sym.id) || 0;
       tr.innerHTML = `
-        <td class="fw-bold">${sym.symbol}</td>
-        <td>${sym.timeframe}</td>
-        <td>${sym.htf_timeframe}</td>
-        <td>${sym.confirm_candles}</td>
-        <td>${sym.leverage}x</td>
-        <td>${(sym.risk_per_trade * 100).toFixed(1)}%</td>
-        <td>${sym.rr_ratio}</td>
+        <td class="fw-bold">${_esc(sym.symbol)}</td>
+        <td>${_esc(sym.timeframe)}</td>
+        <td>${_esc(sym.htf_timeframe)}</td>
+        <td>${_esc(sym.confirm_candles)}</td>
+        <td>${_esc(sym.leverage)}x</td>
+        <td>${(Number(sym.risk_per_trade) * 100).toFixed(1)}%</td>
+        <td>${_esc(sym.rr_ratio)}</td>
         <td>${sym.enabled ? '<span style="color:#3fb950">✅</span>' : '<span style="color:#f85149">❌</span>'}</td>
         <td>
-          <button class="btn btn-xs btn-outline-secondary me-1" onclick="SettingsManager.editSymbol(${sym.id})">编辑</button>
-          <button class="btn btn-xs btn-outline-danger" onclick="SettingsManager.deleteSymbol(${sym.id})">删除</button>
+          <button class="btn btn-xs btn-outline-secondary me-1" onclick="SettingsManager.editSymbol(${idNum})">编辑</button>
+          <button class="btn btn-xs btn-outline-danger" onclick="SettingsManager.deleteSymbol(${idNum})">删除</button>
         </td>
       `;
       tbody.appendChild(tr);
@@ -184,15 +195,16 @@ const SettingsManager = (() => {
     const list = document.getElementById('symbolList');
     list.innerHTML = '';
     symbols.forEach(sym => {
+      const safeSym = _esc(sym.symbol);
       const li = document.createElement('li');
       li.className = 'symbol-item';
       li.dataset.symbol = sym.symbol;
       li.innerHTML = `
         <div class="flex-fill">
-          <div class="symbol-name">${sym.symbol}</div>
-          <div class="symbol-price" id="price-${sym.symbol}">—</div>
+          <div class="symbol-name">${safeSym}</div>
+          <div class="symbol-price" id="price-${safeSym}">—</div>
         </div>
-        <div class="symbol-dir flat" id="dir-${sym.symbol}">—</div>
+        <div class="symbol-dir flat" id="dir-${safeSym}">—</div>
       `;
       li.addEventListener('click', () => AppController.switchSymbol(sym.symbol));
       list.appendChild(li);
@@ -206,13 +218,13 @@ const SettingsManager = (() => {
   // ─── Update other selects ──────────────────────────────────────────────
   function updateBacktestSymbolSelect() {
     const sel = document.getElementById('btSymbol');
-    sel.innerHTML = symbols.map(s => `<option value="${s.symbol}">${s.symbol}</option>`).join('');
+    sel.innerHTML = symbols.map(s => `<option value="${_esc(s.symbol)}">${_esc(s.symbol)}</option>`).join('');
   }
 
   function updateStatsSymbolSelect() {
     const sel = document.getElementById('statsSymbol');
     sel.innerHTML = '<option value="">全部交易对</option>' +
-      symbols.map(s => `<option value="${s.symbol}">${s.symbol}</option>`).join('');
+      symbols.map(s => `<option value="${_esc(s.symbol)}">${_esc(s.symbol)}</option>`).join('');
   }
 
   // ─── Add modal ────────────────────────────────────────────────────────

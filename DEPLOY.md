@@ -155,9 +155,10 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/opt/ma-trader
-ExecStart=/opt/ma-trader/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8080
+ExecStart=/opt/ma-trader/.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8080
 Restart=always
 RestartSec=5
+UMask=0077
 StandardOutput=journal
 StandardError=journal
 EnvironmentFile=-/opt/ma-trader/.env
@@ -232,14 +233,12 @@ sudo systemctl restart nginx
 
 ## 8. 防火墙与安全组配置
 
-确保服务器安全组或云厂商防火墙（如腾讯云、阿里云、AWS Security Groups、UFW）放行了端口：
+**强烈建议**不要将明文 8080 端口直接暴露到公网，仅通过 Nginx + HTTPS（443 端口）或 SSH 隧道访问：
 
-- **直连 8080**：放行 **TCP 8080**
-- **通过 Nginx**：放行 **TCP 80** 与 **TCP 443**
+- **通过 Nginx + HTTPS（推荐）**：仅放行 **TCP 80** 与 **TCP 443**（可用 `certbot --nginx` 免费申请 Let's Encrypt 证书）
 
 如果服务器启用了 UFW 防火墙：
 ```bash
-sudo ufw allow 8080/tcp
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw reload

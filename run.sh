@@ -2,8 +2,9 @@
 # ---------------------------------------------------------------------------
 # MA Auto Trader — startup script
 # Usage:
-#   ./run.sh           — production mode
+#   ./run.sh           — production mode (listens on 127.0.0.1:8080 by default)
 #   ./run.sh --reload  — development mode (auto-reload on file changes)
+#   HOST=0.0.0.0 ./run.sh — override bind address explicitly
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -11,9 +12,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ---------------------------------------------------------------------------
-# 1. Virtual environment
-# ---------------------------------------------------------------------------
 VENV_DIR="$SCRIPT_DIR/.venv"
 
 if [ ! -d "$VENV_DIR" ]; then
@@ -24,20 +22,13 @@ fi
 # shellcheck source=/dev/null
 source "$VENV_DIR/bin/activate"
 
-# ---------------------------------------------------------------------------
-# 2. Install / upgrade dependencies
-# ---------------------------------------------------------------------------
-if python -c "import fastapi, uvicorn, sqlalchemy, pydantic, ccxt, pandas" &>/dev/null; then
+if python -c "import fastapi, uvicorn, sqlalchemy, pydantic, ccxt, pandas, httpx" &>/dev/null; then
     echo "[run.sh] Dependencies already satisfied. Skipping pip install."
 else
-    echo "[run.sh] Installing dependencies from requirements.txt (with progress visible) ..."
-    # Use Tsinghua mirror with fallback to official PyPI for fast downloads in all regions
+    echo "[run.sh] Installing dependencies from requirements.txt ..."
     pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --extra-index-url https://pypi.org/simple
 fi
 
-# ---------------------------------------------------------------------------
-# 3. Load .env if present
-# ---------------------------------------------------------------------------
 if [ -f "$SCRIPT_DIR/.env" ]; then
     echo "[run.sh] Loading environment from .env ..."
     set -o allexport
@@ -46,23 +37,21 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set +o allexport
 fi
 
-# ---------------------------------------------------------------------------
-# 4. Ensure data directory exists
-# ---------------------------------------------------------------------------
 mkdir -p "$SCRIPT_DIR/data"
+chmod 700 "$SCRIPT_DIR/data"
 
-# ---------------------------------------------------------------------------
-# 5. Launch Uvicorn
-# ---------------------------------------------------------------------------
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-8080}"
+
 RELOAD_FLAG=""
 if [[ "${1:-}" == "--reload" ]]; then
     RELOAD_FLAG="--reload"
-    echo "[run.sh] Starting in DEVELOPMENT mode (--reload) ..."
+    echo "[run.sh] Starting in DEVELOPMENT mode (--reload) on ${HOST}:${PORT} ..."
 else
-    echo "[run.sh] Starting in PRODUCTION mode ..."
+    echo "[run.sh] Starting in PRODUCTION mode on ${HOST}:${PORT} ..."
 fi
 
 exec python -m uvicorn backend.main:app \
-    --host 0.0.0.0 \
-    --port 8080 \
+    --host "$HOST" \
+    --port "$PORT" \
     $RELOAD_FLAG
