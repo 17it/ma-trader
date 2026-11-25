@@ -39,6 +39,9 @@ const AppController = (() => {
     // 0. Setup Theme (Day / Night mode)
     setupTheme();
 
+    // 0.05 Setup collapsible sidebar (collapsed by default on small screens)
+    setupSidebar();
+
     // 0.1 Check Authentication (protect frontend dashboard)
     if (typeof AuthManager !== 'undefined') {
       AuthManager.init();
@@ -197,6 +200,12 @@ const AppController = (() => {
       btnThemeToggle.addEventListener('click', toggleTheme);
     }
 
+    // Sidebar collapse/expand toggle
+    const btnToggleSidebar = document.getElementById('btnToggleSidebar');
+    if (btnToggleSidebar) {
+      btnToggleSidebar.addEventListener('click', toggleSidebar);
+    }
+
     // Simulate Trade Buttons (if present in DOM)
     const btnSimLong = document.getElementById('btnSimLong');
     const btnSimShort = document.getElementById('btnSimShort');
@@ -206,6 +215,31 @@ const AppController = (() => {
     // Clear all trades button
     const btnClearTrades = document.getElementById('btnClearTrades');
     if (btnClearTrades) btnClearTrades.addEventListener('click', clearAllTrades);
+  }
+
+  // ─── Sidebar Collapse / Expand ─────────────────────────────────────
+  function setupSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    const isSmallScreen = window.innerWidth < 992;
+    const saved = localStorage.getItem('ma_sidebar_collapsed');
+    const shouldCollapse = isSmallScreen ? true : (saved === '1');
+    sidebar.classList.toggle('collapsed', shouldCollapse);
+  }
+
+  function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    const collapsed = sidebar.classList.toggle('collapsed');
+    if (window.innerWidth >= 992) {
+      localStorage.setItem('ma_sidebar_collapsed', collapsed ? '1' : '0');
+    }
+    setTimeout(() => {
+      window.dispatchEvent(new Event('resize'));
+      if (typeof ChartManager !== 'undefined' && ChartManager.resize) ChartManager.resize();
+      if (typeof StatsCharts !== 'undefined' && StatsCharts.resize) StatsCharts.resize();
+      if (typeof TradesEquityChart !== 'undefined' && TradesEquityChart.resize) TradesEquityChart.resize();
+    }, 220);
   }
 
   // ─── Theme Management (Day / Night Mode) ────────────────────────────

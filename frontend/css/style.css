@@ -250,6 +250,33 @@ html, body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width 0.2s ease, min-width 0.2s ease, opacity 0.18s ease;
+}
+
+.sidebar.collapsed {
+  width: 0 !important;
+  min-width: 0 !important;
+  border-right: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#btnToggleSidebar {
+  border: 1px solid var(--border);
+  color: var(--text-regular);
+  background: var(--bg-card);
+  padding: 4px 9px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+#btnToggleSidebar:hover {
+  background: var(--accent-blue-soft);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
 }
 
 .sidebar-header {
@@ -625,6 +652,9 @@ hr {
     align-items: center;
     padding: 4px 10px;
     gap: 8px;
+  }
+  .sidebar.collapsed {
+    display: none !important;
   }
   .sidebar-header {
     border-bottom: none;
