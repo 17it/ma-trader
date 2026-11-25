@@ -226,11 +226,12 @@ const SettingsManager = (() => {
     document.getElementById('symSymbol').value = '';
     document.getElementById('symTf').value     = '1m';
     document.getElementById('symHtf').value    = '15m';
-    document.getElementById('symConfirm').value = 2;
-    document.getElementById('symConfirmVal').textContent = '2';
-    document.getElementById('symLeverage').value = 5;
-    document.getElementById('symRisk').value     = 1;
+    document.getElementById('symConfirm').value = 3;
+    document.getElementById('symConfirmVal').textContent = '3';
+    document.getElementById('symLeverage').value = 8;
+    document.getElementById('symRisk').value     = 1.2;
     document.getElementById('symRR').value       = 1.5;
+    document.getElementById('symEnabled').checked = true;
     document.getElementById('symSymbol').disabled = false;
     modalInstance.show();
   }
@@ -249,6 +250,7 @@ const SettingsManager = (() => {
     document.getElementById('symLeverage').value = sym.leverage;
     document.getElementById('symRisk').value     = (sym.risk_per_trade * 100).toFixed(1);
     document.getElementById('symRR').value       = sym.rr_ratio;
+    document.getElementById('symEnabled').checked = Boolean(sym.enabled);
     document.getElementById('symSymbol').disabled = true;
     modalInstance.show();
   }
@@ -276,7 +278,7 @@ const SettingsManager = (() => {
       leverage:        parseInt(document.getElementById('symLeverage').value),
       risk_per_trade:  parseFloat(document.getElementById('symRisk').value) / 100,
       rr_ratio:        parseFloat(document.getElementById('symRR').value),
-      enabled:         true
+      enabled:         Boolean(document.getElementById('symEnabled').checked)
     };
 
     try {

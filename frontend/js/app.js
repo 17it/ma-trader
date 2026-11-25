@@ -830,13 +830,24 @@ const AppController = (() => {
     TradesEquityChart.render(dates, equities, pnls);
   }
 
+  function _fmtTradeTime(isoStr) {
+    if (!isoStr) return '—';
+    const s = String(isoStr).trim();
+    // Backend stores UTC timestamps (sometimes naive); ensure 'Z' so browser converts to local time
+    const normalized = (s.includes('Z') || s.includes('+')) ? s : (s.replace(' ', 'T') + 'Z');
+    const d = new Date(normalized);
+    if (isNaN(d.getTime())) return s.replace('T', ' ').slice(5, 16);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   function renderTradesTable(trades) {
     const tbody = document.getElementById('tradesTableBody');
     if (!tbody) return;
     tbody.innerHTML = '';
 
     if (!trades || trades.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="12" class="text-center text-secondary py-4">暂无交易记录</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="14" class="text-center text-secondary py-4">暂无交易记录</td></tr>';
       return;
     }
 
@@ -888,7 +899,22 @@ const AppController = (() => {
         ? '<span class="badge el-tag-paper" title="Paper Trading">模拟</span>'
         : '<span class="badge bg-danger-subtle text-danger border border-danger-subtle" title="Live Trading">实盘</span>';
 
-      const timeStr = t.open_time ? t.open_time.replace('T', ' ').slice(5, 16) : '—';
+      const reasonMap = {
+        stop_loss:        '<span class="badge bg-danger-subtle text-danger border border-danger-subtle">初始止损</span>',
+        profit_lock_stop: '<span class="badge bg-success-subtle text-success border border-success-subtle">阶梯锁盈</span>',
+        trailing_stop:    '<span class="badge bg-success-subtle text-success border border-success-subtle">移动止损</span>',
+        ma7_trailing:     '<span class="badge bg-success-subtle text-success border border-success-subtle">MA7 止盈</span>',
+        ma60_cross:       '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">MA60 穿线</span>',
+        take_profit:      '<span class="badge bg-success-subtle text-success border border-success-subtle">目标止盈</span>',
+        manual:           '<span class="badge el-tag-paper">手动平仓</span>',
+        time_stop:        '<span class="badge el-tag-paper">超时平仓</span>',
+      };
+      const reasonBadge = t.status === 'open'
+        ? '<span class="text-secondary">—</span>'
+        : (reasonMap[t.close_reason] || (t.close_reason ? `<span class="badge el-tag-paper">${t.close_reason}</span>` : '<span class="text-secondary">—</span>'));
+
+      const openTimeStr = _fmtTradeTime(t.open_time);
+      const closeTimeStr = t.status === 'open' ? '—' : _fmtTradeTime(t.close_time);
 
       // Action column
       let actionBtn = `
@@ -918,7 +944,9 @@ const AppController = (() => {
         <td class="text-secondary small">${t.take_profit?.toFixed(2) ?? '—'}</td>
         <td>${pnlText}</td>
         <td>${statusBadge}</td>
-        <td class="small text-secondary">${timeStr}</td>
+        <td class="small text-secondary">${openTimeStr}</td>
+        <td class="small text-secondary">${closeTimeStr}</td>
+        <td>${reasonBadge}</td>
         <td>${typeBadge}</td>
         <td class="text-end text-nowrap">${actionBtn}</td>
       `;
@@ -941,7 +969,7 @@ const AppController = (() => {
         const sign = unrealizedPnl >= 0 ? '+' : '';
         const color = unrealizedPnl >= 0 ? 'text-success' : 'text-danger';
         el.className = `${color} fw-bold open-pnl-cell`;
-        el.innerHTML = `${sign}$${unrealizedPnl.toFixed(2)} (${sign}${unrealizedPct.toFixed(1)}%) <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-1" style="font-size:10px;">持仓浮动</span>`;
+        el.textContent = `${sign}$${unrealizedPnl.toFixed(2)} (${sign}${unrealizedPct.toFixed(1)}%)`;
       }
     });
   }

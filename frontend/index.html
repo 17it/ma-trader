@@ -589,7 +589,9 @@
                       <th>止盈</th>
                       <th>盈亏</th>
                       <th>状态</th>
-                      <th>时间</th>
+                      <th>开仓时间</th>
+                      <th>平仓时间</th>
+                      <th>平仓原因</th>
                       <th>类型</th>
                       <th class="text-end pe-3">操作</th>
                     </tr>
@@ -640,21 +642,30 @@
             </div>
           </div>
           <div class="mb-3">
-            <label class="form-label small">确认K线数 <span id="symConfirmVal">2</span></label>
-            <input type="range" class="form-range" id="symConfirm" min="1" max="10" value="2" />
+            <label class="form-label small">确认K线数 <span id="symConfirmVal">3</span></label>
+            <input type="range" class="form-range" id="symConfirm" min="1" max="10" value="3" />
           </div>
           <div class="row g-2 mb-3">
             <div class="col">
               <label class="form-label small">杠杆 (1~20)</label>
-              <input type="number" class="form-control form-control-sm" id="symLeverage" min="1" max="20" value="5" />
+              <input type="number" class="form-control form-control-sm" id="symLeverage" min="1" max="20" value="8" />
             </div>
             <div class="col">
               <label class="form-label small">风险比例 (%)</label>
-              <input type="number" class="form-control form-control-sm" id="symRisk" min="0.1" max="100" step="0.1" value="1" />
+              <input type="number" class="form-control form-control-sm" id="symRisk" min="0.1" max="100" step="0.1" value="1.2" />
             </div>
             <div class="col">
               <label class="form-label small">盈亏比</label>
               <input type="number" class="form-control form-control-sm" id="symRR" min="0.5" max="20" step="0.1" value="1.5" />
+            </div>
+          </div>
+          <div class="d-flex align-items-center justify-content-between pt-2 border-top">
+            <div>
+              <label class="form-label small mb-0" for="symEnabled">启用交易</label>
+              <div class="text-secondary" style="font-size:11px">关闭后在模拟与实盘中均不参与监控和开单</div>
+            </div>
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" role="switch" id="symEnabled" checked style="width: 2.4em; height: 1.25em; cursor: pointer;" />
             </div>
           </div>
         </form>
@@ -724,10 +735,10 @@
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/auth.js?v=20261125_02"></script>
-<script src="js/chart.js?v=20261125_02"></script>
-<script src="js/settings.js?v=20261125_02"></script>
-<script src="js/backtest.js?v=20261125_02"></script>
-<script src="js/app.js?v=20261125_02"></script>
+<script src="js/auth.js?v=20261125_08"></script>
+<script src="js/chart.js?v=20261125_08"></script>
+<script src="js/settings.js?v=20261125_08"></script>
+<script src="js/backtest.js?v=20261125_08"></script>
+<script src="js/app.js?v=20261125_08"></script>
 </body>
 </html>

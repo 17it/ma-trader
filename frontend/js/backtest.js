@@ -251,6 +251,16 @@ const BacktestManager = (() => {
     }
   }
 
+  function _fmtHistoryDt(val) {
+    if (!val) return '—';
+    const s = String(val).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s.replace('T', ' ').slice(0, 16);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   function renderHistory(runs) {
     const tbody = document.getElementById('btHistoryBody');
     tbody.innerHTML = '';
@@ -274,7 +284,8 @@ const BacktestManager = (() => {
       const wrVal  = wr != null ? (wr > 1 ? wr : wr * 100).toFixed(1) : '—';
       const wrStr  = wrVal !== '—' ? `${wrVal}%` : '—';
 
-      const titleStr = run.title ? `<span class="fw-semibold text-light">${escapeHtml(run.title)}</span>` : '<span class="text-secondary">—</span>';
+      const titleStr = run.title ? `<span class="fw-semibold">${escapeHtml(run.title)}</span>` : '<span class="text-secondary">—</span>';
+      const rangeStr = `${_fmtHistoryDt(run.start_date)} ~ ${_fmtHistoryDt(run.end_date)}`;
 
       const tr = document.createElement('tr');
       tr.style.cursor = 'pointer';
@@ -283,7 +294,7 @@ const BacktestManager = (() => {
         <td>${titleStr}</td>
         <td>${run.symbol}</td>
         <td>${run.timeframe}</td>
-        <td>${run.start_date} ~ ${run.end_date}</td>
+        <td class="small">${rangeStr}</td>
         <td>${statusBadge}</td>
         <td>${pnlStr}</td>
         <td>${wrStr}</td>
