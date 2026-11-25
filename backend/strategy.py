@@ -85,6 +85,31 @@ class MAStrategy:
         return wick > body * 1.5
 
     # ------------------------------------------------------------------
+    # Overextension / Bias guard (anti-chasing)
+    # ------------------------------------------------------------------
+    def check_overextended(
+        self,
+        df: pd.DataFrame,
+        max_ma25_bias: float = 0.0035,
+        max_ma60_bias: float = 0.0060,
+    ) -> bool:
+        """
+        Return True when price has already moved too far from MA25 (>0.35%) or MA60 (>0.60%),
+        preventing chasing at the end of a short-term spike/dump.
+        """
+        if df.empty:
+            return False
+        last = df.iloc[-1]
+        close = float(last["close"])
+        ma25 = float(last["ma25"])
+        ma60 = float(last["ma60"])
+        if ma25 > 0 and abs(close - ma25) / ma25 > max_ma25_bias:
+            return True
+        if ma60 > 0 and abs(close - ma60) / ma60 > max_ma60_bias:
+            return True
+        return False
+
+    # ------------------------------------------------------------------
     # Higher time-frame direction filter
     # ------------------------------------------------------------------
     def check_htf_direction(self, df_htf: pd.DataFrame) -> Optional[str]:
@@ -146,6 +171,12 @@ class MAStrategy:
 
         # False breakout guard
         if self.check_false_breakout(df_1m):
+            self.confirm_count = 0
+            self._last_direction = None
+            return None
+
+        # Overextension / bias guard (do not chase overextended moves)
+        if self.check_overextended(df_1m):
             self.confirm_count = 0
             self._last_direction = None
             return None

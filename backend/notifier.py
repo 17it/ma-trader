@@ -85,7 +85,6 @@ class TelegramNotifier:
         payload = {
             "chat_id": self.chat_id,
             "text": message,
-            "parse_mode": "Markdown",
             "disable_web_page_preview": True,
         }
         proxies = None

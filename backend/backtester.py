@@ -373,9 +373,14 @@ class Backtester:
 
             # ---- If not in a trade, look for signals ----
             if not in_trade:
+                # Overextension / bias guard (anti-chasing: <=0.35% from MA25, <=0.60% from MA60)
+                overextended = (
+                    (ma25 > 0 and abs(c - ma25) / ma25 > 0.0035)
+                    or (ma60 > 0 and abs(c - ma60) / ma60 > 0.0060)
+                )
                 # LTF signal check
-                ltf_long = c > ma7
-                ltf_short = c < ma7
+                ltf_long = (c > ma7) and not overextended
+                ltf_short = (c < ma7) and not overextended
 
                 if htf_long and ltf_long:
                     if pending_direction == "long":
