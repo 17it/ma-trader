@@ -198,9 +198,9 @@ class Backtester:
             if in_trade:
                 if trade_direction == "long":
                     if not trailing_active:
-                        # Phase 1: waiting to hit rr_ratio * R activation threshold
+                        # Phase 1: check SL first, then tiered profit lock & trailing activation
                         if l <= trade_sl:
-                            # Stop loss hit → loss
+                            # Stop loss (or profit-lock SL) hit
                             exit_price = trade_sl
                             pnl = (exit_price - trade_entry) * trade_qty
                             pnl_pct = pnl / (trade_entry * trade_qty) * 100
@@ -213,15 +213,23 @@ class Backtester:
                                 "exit_price": exit_price,
                                 "pnl": round(pnl, 4),
                                 "pnl_pct": round(pnl_pct, 2),
-                                "result": "loss",
+                                "result": "win" if pnl >= 0 else "loss",
                             })
                             in_trade = False
                             trailing_active = False
-                        elif h >= trade_tp:
-                            # Profit hit rr_ratio * R → lock break-even, switch to trailing mode
-                            trade_sl = trade_entry  # move SL to break-even
-                            trailing_active = True
-                            # Do NOT exit; let profit run with MA7 trailing
+                        else:
+                            r_dist = abs(trade_tp - trade_entry) / rr_ratio if rr_ratio > 0 else 0.0
+                            if h >= trade_tp:
+                                # Tier 3: Profit hit rr_ratio * R → lock profit & switch to MA7 trailing
+                                lock_sl = max(trade_entry * 1.001, trade_entry + 0.5 * r_dist) if rr_ratio > 1.2 else trade_entry * 1.001
+                                trade_sl = max(trade_sl, lock_sl)
+                                trailing_active = True
+                            elif rr_ratio > 1.2 and r_dist > 0 and h >= trade_entry + 1.2 * r_dist:
+                                # Tier 2: Lock +0.5R profit
+                                trade_sl = max(trade_sl, trade_entry + 0.5 * r_dist)
+                            elif rr_ratio > 0.7 and r_dist > 0 and h >= trade_entry + 0.7 * r_dist:
+                                # Tier 1: Break-even + 0.1% fee buffer
+                                trade_sl = max(trade_sl, trade_entry * 1.001)
                     else:
                         # Phase 2: trailing mode — SL is at break-even or higher
                         if l <= trade_sl:
@@ -266,9 +274,9 @@ class Backtester:
                                 trade_sl = max(trade_sl, ma7 * 0.9995)
                 else:  # short
                     if not trailing_active:
-                        # Phase 1: waiting to hit rr_ratio * R activation threshold
+                        # Phase 1: check SL first, then tiered profit lock & trailing activation
                         if h >= trade_sl:
-                            # Stop loss hit → loss
+                            # Stop loss (or profit-lock SL) hit
                             exit_price = trade_sl
                             pnl = (trade_entry - exit_price) * trade_qty
                             pnl_pct = pnl / (trade_entry * trade_qty) * 100
@@ -281,15 +289,23 @@ class Backtester:
                                 "exit_price": exit_price,
                                 "pnl": round(pnl, 4),
                                 "pnl_pct": round(pnl_pct, 2),
-                                "result": "loss",
+                                "result": "win" if pnl >= 0 else "loss",
                             })
                             in_trade = False
                             trailing_active = False
-                        elif l <= trade_tp:
-                            # Profit hit rr_ratio * R → lock break-even, switch to trailing mode
-                            trade_sl = trade_entry  # move SL to break-even
-                            trailing_active = True
-                            # Do NOT exit; let profit run with MA7 trailing
+                        else:
+                            r_dist = abs(trade_entry - trade_tp) / rr_ratio if rr_ratio > 0 else 0.0
+                            if l <= trade_tp:
+                                # Tier 3: Profit hit rr_ratio * R → lock profit & switch to MA7 trailing
+                                lock_sl = min(trade_entry * 0.999, trade_entry - 0.5 * r_dist) if rr_ratio > 1.2 else trade_entry * 0.999
+                                trade_sl = min(trade_sl, lock_sl)
+                                trailing_active = True
+                            elif rr_ratio > 1.2 and r_dist > 0 and l <= trade_entry - 1.2 * r_dist:
+                                # Tier 2: Lock +0.5R profit
+                                trade_sl = min(trade_sl, trade_entry - 0.5 * r_dist)
+                            elif rr_ratio > 0.7 and r_dist > 0 and l <= trade_entry - 0.7 * r_dist:
+                                # Tier 1: Break-even - 0.1% fee buffer
+                                trade_sl = min(trade_sl, trade_entry * 0.999)
                     else:
                         # Phase 2: trailing mode — SL is at break-even or lower (for short)
                         if h >= trade_sl:

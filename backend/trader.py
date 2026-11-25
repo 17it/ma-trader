@@ -505,6 +505,7 @@ class TradingBot:
                     "exchange_order_id": exchange_order_id,
                     "sl_order_id": sl_order_id,
                     "trailing_active": False,
+                    "risk_r": sl_distance,
                 }
 
                 trade_dict = {
@@ -569,43 +570,120 @@ class TradingBot:
                 timeframe = pos.get("timeframe", "1m") if isinstance(pos, dict) else getattr(pos, "timeframe", "1m")
                 trailing_active = bool(pos.get("trailing_active", False)) if isinstance(pos, dict) else False
 
-                # 1. Check Stop Loss / Take Profit activation via zero-HTTP ticker cache
+                # Determine initial 1R distance
+                risk_r = pos.get("risk_r") if isinstance(pos, dict) else None
+                if not risk_r or risk_r <= 0:
+                    if (direction == "long" and stop_loss < entry_price) or (direction == "short" and stop_loss > entry_price):
+                        risk_r = abs(entry_price - stop_loss)
+                    else:
+                        risk_r = abs(take_profit - entry_price) / 1.5
+                    if isinstance(pos, dict):
+                        pos["risk_r"] = risk_r
+
+                # 1. Check Stop Loss / Tiered Profit Locking / MA7 Trailing activation via zero-HTTP ticker cache
                 price = await asyncio.to_thread(self.data_feed.get_ticker, symbol)
                 close_reason = None
                 sl_updated = False
 
-                if price is not None:
+                if price is not None and risk_r > 0:
                     if direction == "long":
                         if price <= stop_loss:
-                            close_reason = "trailing_stop" if trailing_active else "stop_loss"
-                        elif not trailing_active and price >= take_profit:
-                            # Activate break-even + MA7 trailing (matching Backtester)
-                            trailing_active = True
-                            stop_loss = entry_price
-                            sl_updated = True
-                            if isinstance(pos, dict):
-                                pos["trailing_active"] = True
-                                pos["stop_loss"] = stop_loss
-                            self.broadcast({
-                                "type": "log",
-                                "level": "info",
-                                "message": f"🔒 [{symbol}] 达到盈亏比目标，已移动止损至保本位 ({entry_price:.4f}) 并开启 MA7 移动止盈",
-                            })
-                    else:
+                            if trailing_active:
+                                close_reason = "trailing_stop"
+                            elif stop_loss > entry_price:
+                                close_reason = "profit_lock_stop"
+                            else:
+                                close_reason = "stop_loss"
+                        elif not trailing_active:
+                            # Tier 3: Reached take_profit (rr_ratio * R) -> activate MA7 trailing
+                            if price >= take_profit:
+                                trailing_active = True
+                                lock_sl = max(entry_price * 1.001, entry_price + 0.5 * risk_r) if (take_profit - entry_price) > 1.2 * risk_r else entry_price * 1.001
+                                stop_loss = max(stop_loss, lock_sl)
+                                sl_updated = True
+                                if isinstance(pos, dict):
+                                    pos["trailing_active"] = True
+                                    pos["stop_loss"] = stop_loss
+                                self.broadcast({
+                                    "type": "log",
+                                    "level": "info",
+                                    "message": f"🔒 [{symbol}] 达到盈亏比目标，止损上移至 {stop_loss:.4f} 并开启 MA7 移动止盈",
+                                })
+                            # Tier 2: Reached 1.2R -> lock +0.5R profit
+                            elif (take_profit - entry_price) > 1.2 * risk_r and price >= entry_price + 1.2 * risk_r:
+                                new_sl = entry_price + 0.5 * risk_r
+                                if new_sl > stop_loss:
+                                    stop_loss = new_sl
+                                    sl_updated = True
+                                    if isinstance(pos, dict):
+                                        pos["stop_loss"] = stop_loss
+                                    self.broadcast({
+                                        "type": "log",
+                                        "level": "info",
+                                        "message": f"💰 [{symbol}] 浮盈达 1.2R，止损已锁定 +0.5R 利润 ({stop_loss:.4f})",
+                                    })
+                            # Tier 1: Reached 0.7R -> move SL to break-even + 0.1% fee buffer
+                            elif (take_profit - entry_price) > 0.7 * risk_r and price >= entry_price + 0.7 * risk_r:
+                                new_sl = entry_price * 1.001
+                                if new_sl > stop_loss:
+                                    stop_loss = new_sl
+                                    sl_updated = True
+                                    if isinstance(pos, dict):
+                                        pos["stop_loss"] = stop_loss
+                                    self.broadcast({
+                                        "type": "log",
+                                        "level": "info",
+                                        "message": f"🛡️ [{symbol}] 浮盈达 0.7R，止损已上移至保本微赚位 ({stop_loss:.4f})",
+                                    })
+                    else:  # short
                         if price >= stop_loss:
-                            close_reason = "trailing_stop" if trailing_active else "stop_loss"
-                        elif not trailing_active and price <= take_profit:
-                            trailing_active = True
-                            stop_loss = entry_price
-                            sl_updated = True
-                            if isinstance(pos, dict):
-                                pos["trailing_active"] = True
-                                pos["stop_loss"] = stop_loss
-                            self.broadcast({
-                                "type": "log",
-                                "level": "info",
-                                "message": f"🔒 [{symbol}] 达到盈亏比目标，已移动止损至保本位 ({entry_price:.4f}) 并开启 MA7 移动止盈",
-                            })
+                            if trailing_active:
+                                close_reason = "trailing_stop"
+                            elif stop_loss < entry_price:
+                                close_reason = "profit_lock_stop"
+                            else:
+                                close_reason = "stop_loss"
+                        elif not trailing_active:
+                            # Tier 3: Reached take_profit (rr_ratio * R) -> activate MA7 trailing
+                            if price <= take_profit:
+                                trailing_active = True
+                                lock_sl = min(entry_price * 0.999, entry_price - 0.5 * risk_r) if (entry_price - take_profit) > 1.2 * risk_r else entry_price * 0.999
+                                stop_loss = min(stop_loss, lock_sl)
+                                sl_updated = True
+                                if isinstance(pos, dict):
+                                    pos["trailing_active"] = True
+                                    pos["stop_loss"] = stop_loss
+                                self.broadcast({
+                                    "type": "log",
+                                    "level": "info",
+                                    "message": f"🔒 [{symbol}] 达到盈亏比目标，止损下移至 {stop_loss:.4f} 并开启 MA7 移动止盈",
+                                })
+                            # Tier 2: Reached 1.2R -> lock +0.5R profit
+                            elif (entry_price - take_profit) > 1.2 * risk_r and price <= entry_price - 1.2 * risk_r:
+                                new_sl = entry_price - 0.5 * risk_r
+                                if new_sl < stop_loss:
+                                    stop_loss = new_sl
+                                    sl_updated = True
+                                    if isinstance(pos, dict):
+                                        pos["stop_loss"] = stop_loss
+                                    self.broadcast({
+                                        "type": "log",
+                                        "level": "info",
+                                        "message": f"💰 [{symbol}] 浮盈达 1.2R，止损已锁定 +0.5R 利润 ({stop_loss:.4f})",
+                                    })
+                            # Tier 1: Reached 0.7R -> move SL to break-even - 0.1% fee buffer
+                            elif (entry_price - take_profit) > 0.7 * risk_r and price <= entry_price - 0.7 * risk_r:
+                                new_sl = entry_price * 0.999
+                                if new_sl < stop_loss:
+                                    stop_loss = new_sl
+                                    sl_updated = True
+                                    if isinstance(pos, dict):
+                                        pos["stop_loss"] = stop_loss
+                                    self.broadcast({
+                                        "type": "log",
+                                        "level": "info",
+                                        "message": f"🛡️ [{symbol}] 浮盈达 0.7R，止损已下移至保本微赚位 ({stop_loss:.4f})",
+                                    })
 
                 if close_reason:
                     await self._close_trade(symbol, pos, close_reason, price)
