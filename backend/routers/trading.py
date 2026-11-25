@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from database import get_db, Trade, SymbolConfig, SettingModel, OperationLog, record_operation_log
-from models import TradeResponse, TradingStatus, OperationLogResponse
+from models import TradeResponse, TradingStatus, OperationLogResponse, OperationLogPageResponse
 from executor import Executor
 from notifier import TelegramNotifier
 
@@ -511,18 +511,33 @@ async def get_klines(
 # Operation Logs
 # ---------------------------------------------------------------------------
 
-@router.get("/logs", response_model=list[OperationLogResponse])
+@router.get("/logs", response_model=OperationLogPageResponse)
 def list_operation_logs(
     log_type: Optional[str] = Query(None, description="Filter by log_type: open, close, start, stop"),
-    limit: int = Query(200, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    """Return persistent operation logs ordered newest first."""
+    """Return paginated persistent operation logs ordered newest first."""
     q = db.query(OperationLog)
     if log_type:
         q = q.filter(OperationLog.log_type == log_type)
-    return q.order_by(OperationLog.id.desc()).offset(offset).limit(limit).all()
+    total = q.count()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current_page = min(page, total_pages)
+    items = (
+        q.order_by(OperationLog.id.desc())
+        .offset((current_page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return OperationLogPageResponse(
+        items=items,
+        total=total,
+        page=current_page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 @router.delete("/logs")

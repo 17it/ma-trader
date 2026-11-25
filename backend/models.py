@@ -189,3 +189,11 @@ class OperationLogResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class OperationLogPageResponse(BaseModel):
+    items: List[OperationLogResponse] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+    total_pages: int = 1

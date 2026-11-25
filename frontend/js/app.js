@@ -21,7 +21,11 @@ const AppController = (() => {
     tradingMode: 'paper',
     tradesMode: 'paper',
     logs: [],
-    logsTypeFilter: ''
+    logsTypeFilter: '',
+    logsPage: 1,
+    logsPageSize: 20,
+    logsTotal: 0,
+    logsTotalPages: 1
   };
 
   // ─── Initialization ────────────────────────────────────────────────
@@ -163,6 +167,7 @@ const AppController = (() => {
       logsTypeWrap.querySelectorAll('button[data-log-type]').forEach(btn => {
         btn.addEventListener('click', () => {
           state.logsTypeFilter = btn.getAttribute('data-log-type') || '';
+          state.logsPage = 1;
           logsTypeWrap.querySelectorAll('button[data-log-type]').forEach(b => {
             const isActive = b === btn;
             b.className = isActive ? 'btn btn-primary active' : 'btn btn-outline-secondary';
@@ -919,24 +924,83 @@ const AppController = (() => {
 
   async function loadOperationLogs() {
     try {
-      let url = '/api/logs?limit=200';
+      let url = `/api/logs?page=${state.logsPage}&page_size=${state.logsPageSize}`;
       if (state.logsTypeFilter) {
         url += `&log_type=${encodeURIComponent(state.logsTypeFilter)}`;
       }
       const res = await fetch(url);
       if (!res.ok) return;
-      const logs = await res.json();
-      state.logs = Array.isArray(logs) ? logs : [];
+      const data = await res.json();
+      const items = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : []);
+      state.logs = items;
+      state.logsTotal = data?.total ?? items.length;
+      state.logsPage = data?.page ?? state.logsPage;
+      state.logsTotalPages = data?.total_pages ?? 1;
       renderOperationLogs(state.logs);
+      renderLogsPagination();
     } catch (err) {
       console.warn('[App] Load operation logs error:', err);
     }
   }
 
+  function goToLogsPage(page) {
+    const target = Math.max(1, Math.min(page, state.logsTotalPages || 1));
+    if (target === state.logsPage) return;
+    state.logsPage = target;
+    loadOperationLogs();
+  }
+
+  function renderLogsPagination() {
+    const infoEl = document.getElementById('logsPageInfo');
+    const ulEl = document.getElementById('logsPagination');
+    const page = state.logsPage || 1;
+    const totalPages = state.logsTotalPages || 1;
+    if (infoEl) {
+      infoEl.textContent = `第 ${page} / ${totalPages} 页 · 每页 ${state.logsPageSize} 条`;
+    }
+    if (!ulEl) return;
+
+    const buildItem = (label, targetPage, disabled, active) => {
+      const liCls = `page-item${disabled ? ' disabled' : ''}${active ? ' active' : ''}`;
+      if (disabled || active) {
+        return `<li class="${liCls}"><span class="page-link">${label}</span></li>`;
+      }
+      return `<li class="${liCls}"><button type="button" class="page-link" data-page="${targetPage}">${label}</button></li>`;
+    };
+
+    const parts = [];
+    parts.push(buildItem('上一页', page - 1, page <= 1, false));
+
+    const pages = [];
+    for (let p = 1; p <= totalPages; p++) {
+      if (p === 1 || p === totalPages || Math.abs(p - page) <= 2) {
+        pages.push(p);
+      } else if (pages[pages.length - 1] !== '...') {
+        pages.push('...');
+      }
+    }
+    for (const p of pages) {
+      if (p === '...') {
+        parts.push('<li class="page-item disabled"><span class="page-link">…</span></li>');
+      } else {
+        parts.push(buildItem(String(p), p, false, p === page));
+      }
+    }
+
+    parts.push(buildItem('下一页', page + 1, page >= totalPages, false));
+    ulEl.innerHTML = parts.join('');
+    ulEl.querySelectorAll('button[data-page]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const p = parseInt(btn.getAttribute('data-page'), 10);
+        if (!isNaN(p)) goToLogsPage(p);
+      });
+    });
+  }
+
   function renderOperationLogs(logs) {
     const tbody = document.getElementById('logsTableBody');
     const countEl = document.getElementById('logCount');
-    if (countEl) countEl.textContent = `共 ${(logs || []).length} 条`;
+    if (countEl) countEl.textContent = `共 ${state.logsTotal ?? (logs || []).length} 条`;
     if (!tbody) return;
 
     if (!logs || logs.length === 0) {
@@ -978,6 +1042,7 @@ const AppController = (() => {
     try {
       const res = await fetch('/api/logs/clear', { method: 'POST' });
       if (res.ok) {
+        state.logsPage = 1;
         loadOperationLogs();
       }
     } catch (err) {
