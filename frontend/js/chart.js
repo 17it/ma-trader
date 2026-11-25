@@ -417,6 +417,7 @@ const StatsCharts = (() => {
     if (!el) return;
     const cfg = getThemeConfig();
     if (!dailyChart) dailyChart = echarts.init(el, cfg.echartsTheme);
+    else dailyChart.resize();
     dailyChart.setOption({
       backgroundColor: 'transparent',
       animation: false,
@@ -430,6 +431,8 @@ const StatsCharts = (() => {
         barMaxWidth: 20
       }]
     });
+    requestAnimationFrame(() => dailyChart?.resize());
+    setTimeout(() => dailyChart?.resize(), 60);
   }
 
   function renderSymbol(symbols, pnls) {
@@ -438,6 +441,7 @@ const StatsCharts = (() => {
     if (!el) return;
     const cfg = getThemeConfig();
     if (!symbolChart) symbolChart = echarts.init(el, cfg.echartsTheme);
+    else symbolChart.resize();
     symbolChart.setOption({
       backgroundColor: 'transparent',
       animation: false,
@@ -451,6 +455,8 @@ const StatsCharts = (() => {
         barMaxWidth: 20
       }]
     });
+    requestAnimationFrame(() => symbolChart?.resize());
+    setTimeout(() => symbolChart?.resize(), 60);
   }
 
   function updateTheme() {
@@ -472,7 +478,7 @@ const StatsCharts = (() => {
   }
 
   window.addEventListener('resize', resize);
-  return { renderDaily, renderSymbol, updateTheme };
+  return { renderDaily, renderSymbol, updateTheme, resize };
 })();
 
 // ─── Backtest equity chart ─────────────────────────────────────────────

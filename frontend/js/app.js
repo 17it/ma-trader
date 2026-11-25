@@ -105,7 +105,12 @@ const AppController = (() => {
     // Tab switch triggers
     const tabStatsLink = document.querySelector('a[href="#tabStats"]');
     if (tabStatsLink) {
-      tabStatsLink.addEventListener('shown.bs.tab', loadStats);
+      tabStatsLink.addEventListener('shown.bs.tab', () => {
+        loadStats();
+        if (typeof StatsCharts !== 'undefined' && StatsCharts.resize) {
+          setTimeout(() => StatsCharts.resize(), 60);
+        }
+      });
     }
     const tabTradesLink = document.querySelector('a[href="#tabTrades"]');
     if (tabTradesLink) {
