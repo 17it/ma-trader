@@ -289,23 +289,6 @@
                     <div class="form-text text-secondary" style="font-size:11px">在 Telegram 给机器人发消息后点击上方“测试”可自动获取并绑定数字 ID</div>
                   </div>
                   <div class="mb-3">
-                    <label class="form-label small">交易模式</label>
-                    <div class="d-flex gap-3">
-                      <div class="form-check">
-                        <input class="form-check-input" type="radio" name="tradingMode" id="modePaper" value="paper" checked />
-                        <label class="form-check-label" for="modePaper">
-                          <span class="badge bg-secondary">P</span> 模拟
-                        </label>
-                      </div>
-                      <div class="form-check">
-                        <input class="form-check-input" type="radio" name="tradingMode" id="modeLive" value="live" />
-                        <label class="form-check-label" for="modeLive">
-                          <span class="badge bg-danger">L</span> 实盘
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="mb-3">
                     <label class="form-label small">每日最大亏损 (%)</label>
                     <input type="number" class="form-control form-control-sm" id="maxDailyLoss" min="0.1" max="100" step="0.1" value="5" />
                   </div>
@@ -393,12 +376,12 @@
                   <label class="form-label small">结束时间</label>
                   <input type="datetime-local" class="form-control form-control-sm" id="btEndDate" />
                 </div>
-                <div class="col-md-2">
+              </div>
+              <div class="row g-2 align-items-end mt-1">
+                <div class="col-md-4">
                   <label class="form-label small">回测标题</label>
                   <input type="text" class="form-control form-control-sm" id="btTitle" placeholder="可选，如: 5m/15m趋势追踪" />
                 </div>
-              </div>
-              <div class="row g-2 align-items-end mt-1">
                 <div class="col-md-2">
                   <label class="form-label small">确认K线 <span id="btConfirmLabel">2</span></label>
                   <input type="range" class="form-range" id="btConfirm" min="1" max="10" value="2" />
@@ -968,10 +951,10 @@
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/auth.js?v=20261125_14"></script>
-<script src="js/chart.js?v=20261125_14"></script>
-<script src="js/settings.js?v=20261125_14"></script>
-<script src="js/backtest.js?v=20261125_14"></script>
-<script src="js/app.js?v=20261125_14"></script>
+<script src="js/auth.js?v=20261125_15"></script>
+<script src="js/chart.js?v=20261125_15"></script>
+<script src="js/settings.js?v=20261125_15"></script>
+<script src="js/backtest.js?v=20261125_15"></script>
+<script src="js/app.js?v=20261125_15"></script>
 </body>
 </html>

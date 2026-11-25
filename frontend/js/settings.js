@@ -84,8 +84,6 @@ const SettingsManager = (() => {
     document.getElementById('telegramToken').value    = data.telegram_token   || '';
     document.getElementById('telegramChatId').value   = data.telegram_chat_id || '';
     document.getElementById('maxDailyLoss').value     = data.max_daily_loss   || 5;
-    const mode = data.trading_mode || 'paper';
-    document.querySelector(`input[name="tradingMode"][value="${mode}"]`).checked = true;
   }
 
   // ─── Save global settings ────────────────────────────────────────────
@@ -104,7 +102,6 @@ const SettingsManager = (() => {
       http_proxy:       (document.getElementById('httpProxy')?.value || '').trim(),
       telegram_token:   document.getElementById('telegramToken').value.trim(),
       telegram_chat_id: document.getElementById('telegramChatId').value.trim(),
-      trading_mode:     document.querySelector('input[name="tradingMode"]:checked')?.value || 'paper',
       max_daily_loss:   document.getElementById('maxDailyLoss').value.trim() || '5'
     };
 
