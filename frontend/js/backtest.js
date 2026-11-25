@@ -4,17 +4,42 @@
 
 const BacktestManager = (() => {
 
-  function init() {
-    // Default date range: 1st day of current month ~ today
-    const now = new Date();
+  function _toLocalInputVal(dateObj) {
     const pad = (n) => String(n).padStart(2, '0');
-    const y = now.getFullYear();
-    const m = pad(now.getMonth() + 1);
-    const d = pad(now.getDate());
+    return `${dateObj.getFullYear()}-${pad(dateObj.getMonth() + 1)}-${pad(dateObj.getDate())}T${pad(dateObj.getHours())}:${pad(dateObj.getMinutes())}`;
+  }
+
+  function _toIsoWithOffset(localVal) {
+    if (!localVal) return localVal;
+    const d = new Date(localVal);
+    if (isNaN(d.getTime())) return localVal;
+    const pad = (n) => String(n).padStart(2, '0');
+    const offsetMin = -d.getTimezoneOffset();
+    const sign = offsetMin >= 0 ? '+' : '-';
+    const absMin = Math.abs(offsetMin);
+    const tz = `${sign}${pad(Math.floor(absMin / 60))}:${pad(absMin % 60)}`;
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00${tz}`;
+  }
+
+  function _formatForInput(val, isEnd = false) {
+    if (!val) return '';
+    const s = String(val).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      return isEnd ? `${s}T23:59` : `${s}T00:00`;
+    }
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) return _toLocalInputVal(d);
+    return s.slice(0, 16);
+  }
+
+  function init() {
+    // Default date-time range: 1st day of current month 00:00 ~ now (down to minute)
+    const now = new Date();
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0);
     const startEl = document.getElementById('btStartDate');
     const endEl = document.getElementById('btEndDate');
-    if (startEl) startEl.value = `${y}-${m}-01`;
-    if (endEl) endEl.value = `${y}-${m}-${d}`;
+    if (startEl) startEl.value = _toLocalInputVal(firstDay);
+    if (endEl) endEl.value = _toLocalInputVal(now);
 
     // confirm slider label
     document.getElementById('btConfirm').addEventListener('input', (e) => {
@@ -48,8 +73,8 @@ const BacktestManager = (() => {
       symbol:        document.getElementById('btSymbol').value,
       timeframe:     document.getElementById('btTimeframe').value,
       htf_timeframe: document.getElementById('btHtf').value,
-      start_date:    document.getElementById('btStartDate').value,
-      end_date:      document.getElementById('btEndDate').value,
+      start_date:    _toIsoWithOffset(document.getElementById('btStartDate').value),
+      end_date:      _toIsoWithOffset(document.getElementById('btEndDate').value),
       confirm_candles: parseInt(document.getElementById('btConfirm').value),
       rr_ratio:      parseFloat(document.getElementById('btRR').value),
       initial_capital: parseFloat(document.getElementById('btCapital').value)
@@ -343,16 +368,16 @@ const BacktestManager = (() => {
       if (el) el.value = htf;
     }
 
-    // 开始/结束日期
+    // 开始/结束时间
     const startDate = run.start_date || params.start_date;
     if (startDate) {
       const el = document.getElementById('btStartDate');
-      if (el) el.value = startDate;
+      if (el) el.value = _formatForInput(startDate, false);
     }
     const endDate = run.end_date || params.end_date;
     if (endDate) {
       const el = document.getElementById('btEndDate');
-      if (el) el.value = endDate;
+      if (el) el.value = _formatForInput(endDate, true);
     }
 
     // 回测标题

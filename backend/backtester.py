@@ -56,6 +56,18 @@ def _fetch_ohlcv_all(exchange, symbol: str, timeframe: str, since_ms: int, until
     return result
 
 
+def _parse_dt(val: str, is_end: bool = False) -> datetime:
+    """Parse YYYY-MM-DD or ISO datetime string (with optional tz) into UTC datetime."""
+    s = (val or "").strip()
+    if len(s) == 10:
+        dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return dt + timedelta(days=1) if is_end else dt
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _timeframe_to_ms(tf: str) -> int:
     units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
     num = int(tf[:-1])
@@ -107,22 +119,28 @@ class Backtester:
               "equity_curve": [{"time": ..., "equity": float}]
             }
         """
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        start_dt = _parse_dt(start_date, is_end=False)
+        end_dt = _parse_dt(end_date, is_end=True)
         since_ms = int(start_dt.timestamp() * 1000)
         until_ms = int(end_dt.timestamp() * 1000)
+        if until_ms <= since_ms:
+            raise ValueError("结束时间必须晚于开始时间")
         tf_ms = _timeframe_to_ms(timeframe)
         htf_ms = _timeframe_to_ms(htf_timeframe)
 
+        # Warmup buffer so MA60 is ready from the exact start_date even for short intraday ranges
+        ltf_fetch_since = since_ms - 70 * tf_ms
+        htf_fetch_since = since_ms - 70 * htf_ms
+
         # --- fetch LTF data ---
         logger.info(f"[Backtest] Fetching {symbol} {timeframe} from {start_date} to {end_date}")
-        raw_ltf = _fetch_ohlcv_all(self.exchange, symbol, timeframe, since_ms, until_ms)
+        raw_ltf = _fetch_ohlcv_all(self.exchange, symbol, timeframe, ltf_fetch_since, until_ms)
         if len(raw_ltf) < 70:
             raise ValueError(f"Insufficient LTF data: {len(raw_ltf)} bars")
 
         # --- fetch HTF data ---
         logger.info(f"[Backtest] Fetching HTF {symbol} {htf_timeframe}")
-        raw_htf = _fetch_ohlcv_all(self.exchange, symbol, htf_timeframe, since_ms, until_ms)
+        raw_htf = _fetch_ohlcv_all(self.exchange, symbol, htf_timeframe, htf_fetch_since, until_ms)
 
         df_ltf = pd.DataFrame(raw_ltf, columns=["ts", "open", "high", "low", "close", "volume"])
         df_htf = pd.DataFrame(raw_htf, columns=["ts", "open", "high", "low", "close", "volume"])
@@ -170,8 +188,12 @@ class Backtester:
         trailing_active: bool = False  # True after price hits rr_ratio * R → break-even locked
 
         min_idx = 60  # need at least 60 bars for MA60
+        sim_start_idx = min_idx
+        ltf_ts_col = df_ltf["ts"].values
+        while sim_start_idx < len(ltf_ts_col) and int(ltf_ts_col[sim_start_idx]) < since_ms:
+            sim_start_idx += 1
 
-        for i in range(min_idx, len(df_ltf)):
+        for i in range(sim_start_idx, len(df_ltf)):
             row = df_ltf.iloc[i]
             ts = int(row["ts"])
             o, h, l, c = row["open"], row["high"], row["low"], row["close"]
@@ -438,7 +460,7 @@ class Backtester:
         ltf_ts = df_ltf["ts"].values
         equity_curve = []
         for idx in range(0, len(equity_history), step):
-            ts_val = int(ltf_ts[min_idx + idx]) if (min_idx + idx) < len(ltf_ts) else int(ltf_ts[-1])
+            ts_val = int(ltf_ts[sim_start_idx + idx]) if (sim_start_idx + idx) < len(ltf_ts) else int(ltf_ts[-1])
             dt_str = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc).strftime("%m-%d %H:%M")
             equity_curve.append({
                 "time": dt_str,
