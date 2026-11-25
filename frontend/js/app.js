@@ -12,6 +12,8 @@ const AppController = (() => {
     symbols: [],
     trades: [],
     botRunning: false,
+    paperRunning: false,
+    liveRunning: false,
     ws: null,
     wsPingInterval: null,
     wsReconnectTimeout: null,
@@ -91,9 +93,11 @@ const AppController = (() => {
       });
     });
 
-    // Bot Toggle (Start / Stop) with Modal Confirm
-    const btnBotToggle = document.getElementById('btnBotToggle');
-    if (btnBotToggle) btnBotToggle.addEventListener('click', handleBotToggleClick);
+    // Dual Bot Toggles (Paper & Live independent start / stop with Modal Confirm)
+    const btnPaperToggle = document.getElementById('btnPaperToggle');
+    const btnLiveToggle  = document.getElementById('btnLiveToggle');
+    if (btnPaperToggle) btnPaperToggle.addEventListener('click', () => handleBotToggleClick('paper'));
+    if (btnLiveToggle)  btnLiveToggle.addEventListener('click', () => handleBotToggleClick('live'));
 
     // Refresh symbols
     const btnRefSym = document.getElementById('btnRefreshSymbols');
@@ -528,7 +532,7 @@ const AppController = (() => {
         if (status.mode) {
           state.tradingMode = status.mode;
         }
-        updateBotUI(status.running);
+        updateBotUI(status);
       }
     } catch (err) {
       console.warn('[App] Check bot status error:', err);
@@ -538,7 +542,7 @@ const AppController = (() => {
   // ─── Bot Start / Stop Toggle & Modal Confirm ────────────────────────
   let botConfirmModalInstance = null;
 
-  async function handleBotToggleClick() {
+  async function handleBotToggleClick(mode = 'paper') {
     const modalEl = document.getElementById('botConfirmModal');
     if (!modalEl || typeof bootstrap === 'undefined') return;
 
@@ -554,52 +558,45 @@ const AppController = (() => {
     const newBtnAction = btnAction.cloneNode(true);
     btnAction.parentNode.replaceChild(newBtnAction, btnAction);
 
-    // 1. If currently RUNNING -> Confirm to STOP
-    if (state.botRunning) {
-      titleEl.innerHTML = '<i class="fa-solid fa-stop text-danger"></i><span>停止自动交易监控</span>';
+    const isLive = (mode === 'live');
+    const modeName = isLive ? '实盘' : '模拟';
+    const isRunning = isLive ? state.liveRunning : state.paperRunning;
+
+    // 1. If this mode is currently RUNNING -> Confirm to STOP
+    if (isRunning) {
+      titleEl.innerHTML = `<i class="fa-solid fa-stop text-danger"></i><span>停止${modeName}自动交易监控</span>`;
       bodyEl.innerHTML = `
         <div class="text-center my-2">
-          <span class="badge bg-danger fs-6 px-3 py-1 mb-2">已开启</span>
+          <span class="badge ${isLive ? 'bg-danger' : 'bg-secondary'} fs-6 px-3 py-1 mb-2">${modeName}运行中</span>
           <div class="text-secondary small mt-1">
-            停止后系统将立即暂停后台行情监控与自动开仓，当前若有未平仓订单将保持现有止盈止损状态。
+            停止后系统将立即暂停<b>${modeName}</b>后台监控与自动开仓（不影响另一模式），当前未平仓订单将保持现有止盈止损状态。
           </div>
         </div>
         <div class="alert alert-warning py-2 px-3 small mb-0 mt-3 d-flex align-items-center">
           <i class="fa-solid fa-triangle-exclamation text-warning me-2 fs-5"></i>
-          <div>确定要停止自动交易监控吗？</div>
+          <div>确定要停止${modeName}自动交易吗？</div>
         </div>
       `;
 
       newBtnAction.className = 'btn btn-danger btn-sm';
-      newBtnAction.innerHTML = '<i class="fa-solid fa-stop me-1"></i>确认停止';
+      newBtnAction.innerHTML = `<i class="fa-solid fa-stop me-1"></i>确认停止${modeName}`;
       newBtnAction.onclick = async () => {
         botConfirmModalInstance.hide();
-        await stopBot();
+        await stopBot(mode);
       };
 
       botConfirmModalInstance.show();
       return;
     }
 
-    // 2. If currently STOPPED -> Check latest mode and Confirm to START
-    try {
-      // Pull latest settings to guarantee trading_mode is accurate
-      const statusRes = await fetch('/api/trading/status');
-      if (statusRes.ok) {
-        const status = await statusRes.json();
-        if (status.mode) state.tradingMode = status.mode;
-      }
-    } catch (_) {}
-
-    const isLive = state.tradingMode === 'live';
-
+    // 2. If currently STOPPED -> Confirm to START
     if (isLive) {
       titleEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation text-danger"></i><span>启动自动交易（实盘）</span>';
       bodyEl.innerHTML = `
         <div class="text-center my-2">
           <span class="badge bg-danger fs-6 px-3 py-1 mb-2">⚠️ 实盘模式 (LIVE)</span>
           <div class="text-secondary small mt-2">
-            当前交易模式为 <b>实盘模式</b>，开启后系统将按照策略信号通过 Binance API <b>使用真实资金下单交易</b>！
+            开启后<b>实盘机器人</b>将按照策略信号通过 Binance API <b>使用真实资金下单交易</b>（可与模拟盘同时运行，共享行情流）。
           </div>
         </div>
         <div class="alert alert-danger py-2 px-3 small mb-0 mt-3 d-flex align-items-center">
@@ -615,7 +612,7 @@ const AppController = (() => {
         <div class="text-center my-2">
           <span class="badge bg-secondary fs-6 px-3 py-1 mb-2">模拟交易 (PAPER)</span>
           <div class="text-secondary small mt-2">
-            当前交易模式为 <b>模拟交易模式</b>，开启后系统将在后台自动监控行情并记录虚拟订单，不涉及真实资产。
+            开启后<b>模拟机器人</b>将在后台自动监控行情并记录虚拟订单，不涉及真实资产（可与实盘同时运行，共享行情流）。
           </div>
         </div>
         <div class="alert alert-info py-2 px-3 small mb-0 mt-3 d-flex align-items-center">
@@ -629,39 +626,41 @@ const AppController = (() => {
 
     newBtnAction.onclick = async () => {
       botConfirmModalInstance.hide();
-      await startBot();
+      await startBot(mode);
     };
 
     botConfirmModalInstance.show();
   }
 
-  async function startBot() {
+  async function startBot(mode = 'paper') {
+    const label = mode === 'live' ? '实盘' : '模拟';
     try {
-      const res = await fetch('/api/trading/start', { method: 'POST' });
+      const res = await fetch(`/api/trading/start?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
       if (res.ok) {
-        updateBotUI(true);
-        appendLog('交易监控已启动', 'info');
+        await checkBotStatus();
+        appendLog(`${label}交易监控已启动`, 'info');
       } else {
-        const err = await res.json();
-        alert('启动失败: ' + (err.detail || '未知错误'));
+        const err = await res.json().catch(() => ({}));
+        alert(`启动${label}失败: ` + (err.detail || '未知错误'));
       }
     } catch (err) {
-      console.error('启动交易失败', err);
+      console.error(`启动${label}交易失败`, err);
     }
   }
 
-  async function stopBot() {
+  async function stopBot(mode = 'paper') {
+    const label = mode === 'live' ? '实盘' : '模拟';
     try {
-      const res = await fetch('/api/trading/stop', { method: 'POST' });
+      const res = await fetch(`/api/trading/stop?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
       if (res.ok) {
-        updateBotUI(false);
-        appendLog('交易监控已停止', 'warning');
+        await checkBotStatus();
+        appendLog(`${label}交易监控已停止`, 'warning');
       } else {
-        const err = await res.json();
-        alert('停止失败: ' + (err.detail || '未知错误'));
+        const err = await res.json().catch(() => ({}));
+        alert(`停止${label}失败: ` + (err.detail || '未知错误'));
       }
     } catch (err) {
-      console.error('停止交易失败', err);
+      console.error(`停止${label}交易失败`, err);
     }
   }
 
@@ -769,24 +768,57 @@ const AppController = (() => {
   }
 
   // ─── UI Rendering ──────────────────────────────────────────────────
-  function updateBotUI(running) {
-    state.botRunning = running;
+  function updateBotUI(statusOrBool) {
+    let paperRunning = state.paperRunning;
+    let liveRunning = state.liveRunning;
+    if (typeof statusOrBool === 'object' && statusOrBool !== null) {
+      if ('paper_running' in statusOrBool) paperRunning = Boolean(statusOrBool.paper_running);
+      if ('live_running' in statusOrBool)  liveRunning  = Boolean(statusOrBool.live_running);
+      if (!('paper_running' in statusOrBool) && !('live_running' in statusOrBool)) {
+        paperRunning = Boolean(statusOrBool.running);
+      }
+    } else {
+      paperRunning = Boolean(statusOrBool);
+    }
+    const anyRunning = paperRunning || liveRunning;
+    state.paperRunning = paperRunning;
+    state.liveRunning = liveRunning;
+    state.botRunning = anyRunning;
+
     const dot   = document.getElementById('statusDot');
     const label = document.getElementById('statusLabel');
-    const toggleBtn = document.getElementById('btnBotToggle');
+    const paperBtn = document.getElementById('btnPaperToggle');
+    const liveBtn  = document.getElementById('btnLiveToggle');
 
-    if (dot)   dot.className = 'status-dot ' + (running ? 'running' : 'stopped');
-    if (label) label.textContent = running ? '运行中' : '已停止';
+    if (dot) dot.className = 'status-dot ' + (anyRunning ? 'running' : 'stopped');
+    if (label) {
+      if (paperRunning && liveRunning) label.textContent = '模拟+实盘运行中';
+      else if (liveRunning)            label.textContent = '实盘运行中';
+      else if (paperRunning)           label.textContent = '模拟运行中';
+      else                             label.textContent = '已停止';
+    }
 
-    if (toggleBtn) {
-      if (running) {
-        toggleBtn.className = 'btn btn-sm btn-danger d-inline-flex align-items-center';
-        toggleBtn.innerHTML = '<i class="fa-solid fa-stop me-1"></i>停止';
-        toggleBtn.title = '点击停止自动交易监控';
+    if (paperBtn) {
+      if (paperRunning) {
+        paperBtn.className = 'btn btn-sm btn-danger d-inline-flex align-items-center';
+        paperBtn.innerHTML = '<i class="fa-solid fa-stop me-1"></i>模拟';
+        paperBtn.title = '模拟盘运行中，点击停止';
       } else {
-        toggleBtn.className = 'btn btn-sm btn-success d-inline-flex align-items-center';
-        toggleBtn.innerHTML = '<i class="fa-solid fa-play me-1"></i>启动';
-        toggleBtn.title = '点击启动自动交易监控';
+        paperBtn.className = 'btn btn-sm btn-success d-inline-flex align-items-center';
+        paperBtn.innerHTML = '<i class="fa-solid fa-play me-1"></i>模拟';
+        paperBtn.title = '点击启动模拟自动交易';
+      }
+    }
+
+    if (liveBtn) {
+      if (liveRunning) {
+        liveBtn.className = 'btn btn-sm btn-danger d-inline-flex align-items-center';
+        liveBtn.innerHTML = '<i class="fa-solid fa-stop me-1"></i>实盘';
+        liveBtn.title = '实盘运行中，点击停止';
+      } else {
+        liveBtn.className = 'btn btn-sm btn-outline-danger d-inline-flex align-items-center';
+        liveBtn.innerHTML = '<i class="fa-solid fa-play me-1"></i>实盘';
+        liveBtn.title = '点击启动实盘自动交易';
       }
     }
   }
@@ -1492,7 +1524,7 @@ const AppController = (() => {
       }
 
       case 'bot_status': {
-        updateBotUI(Boolean(msg.running));
+        updateBotUI(msg);
         break;
       }
 

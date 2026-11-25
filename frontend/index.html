@@ -99,9 +99,14 @@
       <i class="fa-solid fa-sun" id="themeIcon"></i>
       <span class="d-none d-md-inline ms-1" id="themeLabel">日间模式</span>
     </button>
-    <button class="btn btn-sm btn-success" id="btnBotToggle" title="启动自动交易">
-      <i class="fa-solid fa-play me-1"></i>启动
-    </button>
+    <div class="btn-group btn-group-sm" role="group" aria-label="交易控制">
+      <button class="btn btn-sm btn-success" id="btnPaperToggle" title="启动模拟自动交易">
+        <i class="fa-solid fa-play me-1"></i>模拟
+      </button>
+      <button class="btn btn-sm btn-outline-danger" id="btnLiveToggle" title="启动实盘自动交易">
+        <i class="fa-solid fa-play me-1"></i>实盘
+      </button>
+    </div>
     <span class="text-secondary small ms-2 d-none d-lg-inline" id="clockDisplay"></span>
   </div>
 </nav>
@@ -963,10 +968,10 @@
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/auth.js?v=20261125_13"></script>
-<script src="js/chart.js?v=20261125_13"></script>
-<script src="js/settings.js?v=20261125_13"></script>
-<script src="js/backtest.js?v=20261125_13"></script>
-<script src="js/app.js?v=20261125_13"></script>
+<script src="js/auth.js?v=20261125_14"></script>
+<script src="js/chart.js?v=20261125_14"></script>
+<script src="js/settings.js?v=20261125_14"></script>
+<script src="js/backtest.js?v=20261125_14"></script>
+<script src="js/app.js?v=20261125_14"></script>
 </body>
 </html>

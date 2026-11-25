@@ -54,11 +54,25 @@ class TradingBot:
         Object with ``send(message: str)`` for Telegram / other alerts.
     """
 
-    def __init__(self, db_session_factory, data_feed, executor, notifier):
+    def __init__(
+        self,
+        db_session_factory,
+        data_feed,
+        executor,
+        notifier,
+        ws_streamer: Optional[BinanceWSStreamer] = None,
+        is_paper: Optional[bool] = None,
+    ):
         self.db_session_factory = db_session_factory
         self.data_feed = data_feed
         self.executor = executor
         self.notifier = notifier
+        if is_paper is not None:
+            self.is_paper = bool(is_paper)
+        elif executor is not None and hasattr(executor, "is_paper"):
+            self.is_paper = bool(executor.is_paper)
+        else:
+            self.is_paper = True
 
         self.running: bool = False
         self.strategies: Dict[str, MAStrategy] = {}   # symbol → MAStrategy
@@ -69,9 +83,14 @@ class TradingBot:
         self._tasks: Dict[str, asyncio.Task] = {}
         self._exit_task: Optional[asyncio.Task] = None
 
-        # Real-time WebSocket streamer for zero-latency, zero-HTTP prices
-        self.ws_streamer = BinanceWSStreamer()
-        self.ws_streamer.register_callback(lambda msg: self.broadcast(msg))
+        # Real-time WebSocket streamer (shared across bots when injected, or standalone)
+        if ws_streamer is not None:
+            self.ws_streamer = ws_streamer
+            self._owns_ws_streamer = False
+        else:
+            self.ws_streamer = BinanceWSStreamer()
+            self.ws_streamer.register_callback(lambda msg: self.broadcast(msg))
+            self._owns_ws_streamer = True
         if hasattr(self.data_feed, "set_ws_streamer"):
             self.data_feed.set_ws_streamer(self.ws_streamer)
 
@@ -90,9 +109,12 @@ class TradingBot:
 
         symbol_configs = self._load_symbol_configs()
 
-        # Start real-time Binance WebSocket stream for all active symbols
+        # Start or update real-time Binance WebSocket stream for all active symbols
         active_symbols = [c.symbol for c in symbol_configs if getattr(c, "symbol", None)]
-        self.ws_streamer.start(active_symbols)
+        if not getattr(self.ws_streamer, "_running", False):
+            self.ws_streamer.start(active_symbols)
+        else:
+            self.ws_streamer.update_symbols(active_symbols)
 
         # Persist system start log
         try:
@@ -100,7 +122,7 @@ class TradingBot:
                 from backend.database import record_operation_log
             except ImportError:
                 from database import record_operation_log
-            is_paper = getattr(self.executor, "is_paper", True)
+            is_paper = self.is_paper
             mode_str = "paper" if is_paper else "live"
             mode_label = "模拟交易" if is_paper else "实盘交易"
             syms_label = ", ".join(active_symbols) if active_symbols else "无"
@@ -115,7 +137,7 @@ class TradingBot:
         except Exception:
             pass
 
-        # Restore open trades from DB into memory
+        # Restore open trades from DB into memory (strictly scoped by is_paper)
         try:
             try:
                 from backend.database import Trade
@@ -123,7 +145,7 @@ class TradingBot:
                 from database import Trade
             session = self.db_session_factory()
             try:
-                open_trades = session.query(Trade).filter_by(status="open").all()
+                open_trades = session.query(Trade).filter_by(status="open", is_paper=self.is_paper).all()
                 for ot in open_trades:
                     self.positions[ot.symbol] = {
                         "id": ot.id,
@@ -158,7 +180,8 @@ class TradingBot:
         """Cancel all monitoring tasks and mark bot as stopped."""
         self.running = False
 
-        await self.ws_streamer.stop()
+        if getattr(self, "_owns_ws_streamer", True):
+            await self.ws_streamer.stop()
 
         for sym, task in list(self._tasks.items()):
             task.cancel()
@@ -448,9 +471,7 @@ class TradingBot:
         else:
             take_profit = entry_price - tp_distance
 
-        is_paper = True
-        if self.executor is not None:
-            is_paper = self.executor.config.get("trading_mode", "paper") == "paper"
+        is_paper = self.is_paper
 
         # Balance-based position sizing (never fall back to fake balance in live mode)
         if is_paper:

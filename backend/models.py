@@ -166,7 +166,9 @@ class StatsResponse(BaseModel):
 
 class TradingStatus(BaseModel):
     running: bool
-    mode: str                          # "paper" or "live"
+    paper_running: bool = False
+    live_running: bool = False
+    mode: str                          # "paper" or "live" or "both"
     active_symbols: List[str] = Field(default_factory=list)
     open_trades: int = 0
     daily_pnl: float = 0.0

@@ -66,6 +66,13 @@ def list_symbols(db: Session = Depends(get_db)):
     return db.query(SymbolConfig).all()
 
 
+async def _reload_running_bots(request: Request) -> None:
+    bots = getattr(request.app.state, "bots", {}) or {}
+    for bot in bots.values():
+        if bot is not None and getattr(bot, "running", False) and hasattr(bot, "reload_symbols"):
+            await bot.reload_symbols()
+
+
 @router.post(
     "/symbols",
     response_model=SymbolConfigResponse,
@@ -94,8 +101,7 @@ async def create_symbol(body: SymbolConfigCreate, request: Request, db: Session 
     db.refresh(obj)
 
     bot = getattr(request.app.state, "bot", None)
-    if bot is not None and bot.running and hasattr(bot, "reload_symbols"):
-        await bot.reload_symbols()
+    await _reload_running_bots(request)
 
     return obj
 
@@ -115,8 +121,7 @@ async def update_symbol(symbol_id: int, body: SymbolConfigUpdate, request: Reque
     db.refresh(obj)
 
     bot = getattr(request.app.state, "bot", None)
-    if bot is not None and bot.running and hasattr(bot, "reload_symbols"):
-        await bot.reload_symbols()
+    await _reload_running_bots(request)
 
     return obj
 
@@ -134,8 +139,7 @@ async def delete_symbol(symbol_id: int, request: Request, db: Session = Depends(
     db.commit()
 
     bot = getattr(request.app.state, "bot", None)
-    if bot is not None and bot.running and hasattr(bot, "reload_symbols"):
-        await bot.reload_symbols()
+    await _reload_running_bots(request)
 
 
 # ---------------------------------------------------------------------------

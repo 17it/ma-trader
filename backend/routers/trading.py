@@ -25,8 +25,25 @@ router = APIRouter(tags=["trading"])
 # Dependency helpers
 # ---------------------------------------------------------------------------
 
-def _get_bot(request: Request):
-    return getattr(request.app.state, "bot", None)
+def _get_bots(request: Request) -> dict:
+    bots = getattr(request.app.state, "bots", None)
+    if bots is None:
+        bots = {"paper": None, "live": None}
+        request.app.state.bots = bots
+    return bots
+
+
+def _bot_status_payload(bots: dict) -> dict:
+    paper_bot = bots.get("paper")
+    live_bot = bots.get("live")
+    paper_running = bool(paper_bot is not None and paper_bot.running)
+    live_running = bool(live_bot is not None and live_bot.running)
+    return {
+        "type": "bot_status",
+        "running": paper_running or live_running,
+        "paper_running": paper_running,
+        "live_running": live_running,
+    }
 
 
 def _get_ws_manager(request: Request):
@@ -67,33 +84,46 @@ def _build_exchange(settings: dict, require_auth: bool = False) -> Optional[obje
 # ---------------------------------------------------------------------------
 
 @router.post("/trading/start")
-async def start_trading(request: Request, db: Session = Depends(get_db)):
-    """Start the TradingBot."""
+async def start_trading(
+    request: Request,
+    mode: str = Query("paper", pattern="^(paper|live)$"),
+    db: Session = Depends(get_db),
+):
+    """Start the TradingBot for the requested mode ('paper' or 'live'), sharing the WS market stream."""
     from trader import TradingBot
     from data_feed import DataFeed
     from database import SessionLocal
 
     app = request.app
-    if app.state.bot is not None and app.state.bot.running:
-        return {"status": "already_running"}
+    bots = _get_bots(request)
+    existing = bots.get(mode)
+    if existing is not None and existing.running:
+        return {"status": "already_running", "mode": mode}
 
     cfg: dict = app.state.config.get_all(db)
-    is_paper = cfg.get("trading_mode", "paper") == "paper"
+    is_paper = (mode == "paper")
+    if not is_paper and (not (cfg.get("binance_key") or "").strip() or not (cfg.get("binance_secret") or "").strip()):
+        raise HTTPException(status_code=400, detail="实盘启动失败：请先在设置中配置 Binance API Key 和 Secret")
+
     exchange = _build_exchange(cfg, require_auth=not is_paper)
+    if not is_paper and exchange is None:
+        raise HTTPException(status_code=400, detail="实盘启动失败：无法初始化 Binance 交易所实例")
 
     notifier = TelegramNotifier(
         token=cfg.get("telegram_token"),
         chat_id=cfg.get("telegram_chat_id"),
     )
 
+    shared_ws = getattr(app.state, "ws_streamer", None)
     data_feed = DataFeed(
         api_key=cfg.get("binance_key") if not is_paper else None,
         secret=cfg.get("binance_secret") if not is_paper else None,
         use_futures=True,
         proxy=cfg.get("http_proxy"),
+        ws_streamer=shared_ws,
     )
 
-    executor = Executor(exchange=exchange, config=cfg)
+    executor = Executor(exchange=exchange, config=cfg, is_paper=is_paper)
     ws_manager = _get_ws_manager(request)
 
     bot = TradingBot(
@@ -101,30 +131,48 @@ async def start_trading(request: Request, db: Session = Depends(get_db)):
         data_feed=data_feed,
         executor=executor,
         notifier=notifier,
+        ws_streamer=shared_ws,
+        is_paper=is_paper,
     )
-    # Register WS broadcast
     bot.register_ws_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
-    app.state.bot = bot
+    bots[mode] = bot
 
     await bot.start()
 
-    await ws_manager.broadcast({"type": "bot_status", "running": True})
+    await ws_manager.broadcast(_bot_status_payload(bots))
     await notifier.notify_bot_started()
 
-    return {"status": "started", "mode": "paper" if is_paper else "live"}
+    return {"status": "started", "mode": mode}
 
 
 @router.post("/trading/stop")
-async def stop_trading(request: Request):
-    """Stop the TradingBot."""
-    bot = _get_bot(request)
+async def stop_trading(
+    request: Request,
+    mode: Optional[str] = Query(None, pattern="^(paper|live)$"),
+):
+    """Stop the TradingBot for the given mode ('paper' or 'live'), or all running bots if omitted."""
+    bots = _get_bots(request)
     ws_manager = _get_ws_manager(request)
+    targets = [mode] if mode else ["paper", "live"]
 
-    if bot is None or not bot.running:
-        return {"status": "not_running"}
+    stopped_any = False
+    for m in targets:
+        bot = bots.get(m)
+        if bot is not None and bot.running:
+            await bot.stop()
+            stopped_any = True
 
-    await bot.stop()
-    await ws_manager.broadcast({"type": "bot_status", "running": False})
+    if not stopped_any:
+        return {"status": "not_running", "mode": mode}
+
+    # Stop shared market stream only when both bots are stopped
+    status_payload = _bot_status_payload(bots)
+    if not status_payload["running"]:
+        shared_ws = getattr(request.app.state, "ws_streamer", None)
+        if shared_ws is not None:
+            await shared_ws.stop()
+
+    await ws_manager.broadcast(status_payload)
 
     cfg = _get_config(request).get_all_cached()
     notifier = TelegramNotifier(
@@ -133,30 +181,44 @@ async def stop_trading(request: Request):
     )
     await notifier.notify_bot_stopped()
 
-    return {"status": "stopped"}
+    return {"status": "stopped", "mode": mode}
 
 
 @router.get("/trading/status", response_model=TradingStatus)
 async def get_trading_status(request: Request, db: Session = Depends(get_db)):
-    """Return bot running status and active symbol info."""
-    bot = _get_bot(request)
-    running = bot is not None and bot.running
+    """Return bot running status (paper & live) and active symbol info."""
+    bots = _get_bots(request)
+    paper_bot = bots.get("paper")
+    live_bot = bots.get("live")
+    paper_running = bool(paper_bot is not None and paper_bot.running)
+    live_running = bool(live_bot is not None and live_bot.running)
+    running = paper_running or live_running
 
     cfg_mgr = _get_config(request)
     cfg = cfg_mgr.get_all(db) if cfg_mgr else {}
-    mode = cfg.get("trading_mode", "paper")
+    if paper_running and live_running:
+        mode = "both"
+    elif live_running:
+        mode = "live"
+    elif paper_running:
+        mode = "paper"
+    else:
+        mode = cfg.get("trading_mode", "paper")
 
-    active_symbols = []
-    if bot is not None:
-        status_info = bot.get_status()
-        active_symbols = list(status_info.get("symbols", {}).keys())
+    active_symbols_set = set()
+    for bot in (paper_bot, live_bot):
+        if bot is not None and bot.running:
+            status_info = bot.get_status()
+            active_symbols_set.update(status_info.get("symbols", {}).keys())
 
     open_trades_count = db.query(Trade).filter(Trade.status == "open").count()
 
     return TradingStatus(
         running=running,
+        paper_running=paper_running,
+        live_running=live_running,
         mode=mode,
-        active_symbols=active_symbols,
+        active_symbols=sorted(active_symbols_set),
         open_trades=open_trades_count,
         daily_pnl=0.0,
     )
@@ -318,9 +380,10 @@ async def manual_close_trade(
     )
 
     # Sync in-memory bot positions so it doesn't keep monitoring or block new entries
-    bot = _get_bot(request)
-    if bot is not None and hasattr(bot, "positions"):
-        bot.positions.pop(trade.symbol, None)
+    bots = _get_bots(request)
+    target_bot = bots.get("paper" if trade.is_paper else "live")
+    if target_bot is not None and hasattr(target_bot, "positions"):
+        target_bot.positions.pop(trade.symbol, None)
 
     ws_manager = _get_ws_manager(request)
     await ws_manager.broadcast({"type": "trade_closed", "trade": TradeResponse.model_validate(trade).model_dump(mode="json")})
@@ -357,12 +420,13 @@ def delete_trade(trade_id: int, request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=404, detail="Trade not found")
 
     if trade.status == "open":
-        bot = _get_bot(request)
-        if bot is not None and hasattr(bot, "positions"):
-            pos = bot.positions.get(trade.symbol)
+        bots = _get_bots(request)
+        target_bot = bots.get("paper" if trade.is_paper else "live")
+        if target_bot is not None and hasattr(target_bot, "positions"):
+            pos = target_bot.positions.get(trade.symbol)
             pos_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
             if pos_id == trade_id:
-                bot.positions.pop(trade.symbol, None)
+                target_bot.positions.pop(trade.symbol, None)
 
     db.delete(trade)
     db.commit()

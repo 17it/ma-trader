@@ -17,14 +17,19 @@ class Executor:
     purely in the database.
     """
 
-    def __init__(self, exchange, config: dict):
+    def __init__(self, exchange, config: dict, is_paper: Optional[bool] = None):
         """
         Args:
             exchange: ccxt exchange instance (may be None for paper-only).
             config:   dict with keys like 'leverage', 'trading_mode', etc.
+            is_paper: Explicit mode override (True = paper, False = live).
         """
         self.exchange = exchange
         self.config = config
+        if is_paper is not None:
+            self.is_paper = bool(is_paper)
+        else:
+            self.is_paper = config.get("trading_mode", "paper") == "paper"
 
     def _ensure_markets(self) -> None:
         """Load exchange markets once so ccxt precision helpers work."""
@@ -302,7 +307,7 @@ class Executor:
     ) -> dict:
         """Unified open trade method called by TradingBot."""
         if is_paper is None:
-            is_paper = self.config.get("trading_mode", "paper") == "paper"
+            is_paper = self.is_paper
         if not is_paper and self.exchange is not None:
             self.set_leverage(symbol, leverage)
 

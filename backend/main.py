@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from database import create_tables, SessionLocal
 from config import ConfigManager
 from auth import validate_token, get_token_from_request
+from binance_ws import BinanceWSStreamer
 from routers import auth as auth_router
 from routers import settings as settings_router
 from routers import trading as trading_router
@@ -88,16 +89,25 @@ async def lifespan(app: FastAPI):
     # Store shared objects on app.state
     app.state.ws_manager = ws_manager
     app.state.config = ConfigManager()
-    app.state.bot = None  # TradingBot will be initialised lazily via /api/trading/start
+    shared_ws = BinanceWSStreamer()
+    shared_ws.register_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
+    app.state.ws_streamer = shared_ws
+    app.state.bots = {"paper": None, "live": None}
 
     logger.info("MA Trader ready.")
     yield
     # Shutdown
-    if app.state.bot is not None:
-        try:
-            await app.state.bot.stop()
-        except Exception as exc:
-            logger.warning(f"Error stopping bot on shutdown: {exc}")
+    bots = getattr(app.state, "bots", {}) or {}
+    for bot in bots.values():
+        if bot is not None and getattr(bot, "running", False):
+            try:
+                await bot.stop()
+            except Exception as exc:
+                logger.warning(f"Error stopping bot on shutdown: {exc}")
+    try:
+        await shared_ws.stop()
+    except Exception as exc:
+        logger.warning(f"Error stopping shared ws_streamer on shutdown: {exc}")
     logger.info("MA Trader shut down.")
 
 
@@ -184,11 +194,17 @@ async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
 
     # Send current bot status immediately upon connection
-    bot = websocket.app.state.bot
-    if bot is not None:
-        await ws_manager.send_personal(websocket, {"type": "bot_status", "running": bot.running})
-    else:
-        await ws_manager.send_personal(websocket, {"type": "bot_status", "running": False})
+    bots = getattr(websocket.app.state, "bots", {}) or {}
+    paper_bot = bots.get("paper")
+    live_bot = bots.get("live")
+    paper_running = bool(paper_bot is not None and paper_bot.running)
+    live_running = bool(live_bot is not None and live_bot.running)
+    await ws_manager.send_personal(websocket, {
+        "type": "bot_status",
+        "running": paper_running or live_running,
+        "paper_running": paper_running,
+        "live_running": live_running,
+    })
 
     try:
         while True:
