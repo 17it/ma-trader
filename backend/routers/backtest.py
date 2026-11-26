@@ -72,6 +72,8 @@ def _run_backtest_sync(run_id: int, params: dict, exchange):
             trailing_activate_r=params.get("trailing_activate_r", 0.88),
             breakeven_buffer=params.get("breakeven_buffer", 0.003),
             trailing_ma=params.get("trailing_ma", "ma25"),
+            strategy_mode=params.get("strategy_mode") or "balanced",
+            cooldown_bars=int(params.get("cooldown_bars") if params.get("cooldown_bars") is not None else 30),
             initial_capital=params.get("initial_capital", 10_000.0),
             risk_per_trade=params.get("risk_per_trade", 0.01),
             leverage=params.get("leverage", 5),
@@ -114,6 +116,16 @@ async def create_backtest(
         for k, v in params["params"].items():
             if k not in params or params[k] is None:
                 params[k] = v
+
+    cfg_mgr = getattr(request.app.state, "config", None)
+    cfg_dict = cfg_mgr.get_all_cached() if (cfg_mgr is not None and hasattr(cfg_mgr, "get_all_cached")) else {}
+    if not params.get("strategy_mode"):
+        params["strategy_mode"] = cfg_dict.get("strategy_mode") or "balanced"
+    if params.get("cooldown_bars") is None:
+        raw_cd = cfg_dict.get("cooldown_bars")
+        params["cooldown_bars"] = int(raw_cd) if (raw_cd is not None and str(raw_cd).strip() != "") else (
+            30 if params["strategy_mode"] != "classic" else 0
+        )
 
     run = BacktestRun(
         title=body.title.strip() if body.title and body.title.strip() else None,

@@ -188,6 +188,8 @@ class BacktestRunCreate(BaseModel):
     trailing_activate_r: float = Field(0.88, ge=0.1, le=10.0)
     breakeven_buffer: float = Field(0.003, ge=0.0, le=0.05)
     trailing_ma: Literal["ma25", "ma60"] = "ma25"
+    strategy_mode: Optional[Literal["balanced", "breakout", "classic"]] = None
+    cooldown_bars: Optional[int] = Field(None, ge=0, le=500)
     initial_capital: float = Field(10000.0, gt=0, le=1e9)
     risk_per_trade: float = Field(0.01, gt=0, le=0.2)
     leverage: int = Field(5, ge=1, le=20)

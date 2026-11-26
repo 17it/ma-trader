@@ -71,6 +71,7 @@ const BacktestManager = (() => {
   // ─── Run backtest ─────────────────────────────────────────────────────
   async function runBacktest() {
     const titleVal = document.getElementById('btTitle')?.value?.trim();
+    const btModeVal = document.getElementById('btStrategyMode')?.value || '';
     const payload = {
       title:         titleVal || null,
       symbol:        document.getElementById('btSymbol').value,
@@ -83,6 +84,7 @@ const BacktestManager = (() => {
       trailing_activate_r: parseFloat(document.getElementById('btTrailR')?.value || '0.88'),
       breakeven_buffer:    parseFloat(document.getElementById('btBeBuf')?.value || '0.3') / 100,
       trailing_ma:         document.getElementById('btTrailingMa')?.value || 'ma25',
+      strategy_mode:       btModeVal || null,
       initial_capital: parseFloat(document.getElementById('btCapital').value)
     };
 
@@ -459,6 +461,11 @@ const BacktestManager = (() => {
     if (trailMa) {
       const el = document.getElementById('btTrailingMa');
       if (el) el.value = String(trailMa).toLowerCase();
+    }
+    const stMode = params.strategy_mode;
+    const modeEl = document.getElementById('btStrategyMode');
+    if (modeEl && stMode) {
+      modeEl.value = String(stMode).toLowerCase();
     }
 
     // 初始资金

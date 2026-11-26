@@ -17,6 +17,20 @@ const SettingsManager = (() => {
       .replace(/'/g, '&#39;');
   }
 
+  const STRATEGY_MODE_DESCS = {
+    balanced: '严格大周期三线+斜率+MA200顺势 · 2.0×HTF_ATR波段止损 · 1.0R锁+0.35R后沿大周期均线追踪（1m/15m 建议确认K线=2）',
+    breakout: '大周期均线强发散+MA200顺势 · 小周期顺势突破MA25 · HTF_MA60结构止损 · 1.2R锁+0.35R后沿大周期均线追踪',
+    classic:  '经典三线排列+斜率确认 · 小周期MA60结构止损 · 按交易对触发R/保本%与小周期均线追踪（适合 1h/4h 大周期）'
+  };
+
+  function updateStrategyModeDesc() {
+    const sel = document.getElementById('strategyMode');
+    const desc = document.getElementById('strategyModeDesc');
+    if (sel && desc) {
+      desc.textContent = STRATEGY_MODE_DESCS[sel.value] || STRATEGY_MODE_DESCS.balanced;
+    }
+  }
+
   // ─── Init ────────────────────────────────────────────────────────────
   function init() {
     modalInstance = new bootstrap.Modal(document.getElementById('symbolModal'));
@@ -28,6 +42,10 @@ const SettingsManager = (() => {
 
     // global settings form
     document.getElementById('globalSettingsForm').addEventListener('submit', saveGlobalSettings);
+    const modeSel = document.getElementById('strategyMode');
+    if (modeSel) {
+      modeSel.addEventListener('change', updateStrategyModeDesc);
+    }
 
     // add symbol
     document.getElementById('btnAddSymbol').addEventListener('click', openAddModal);
@@ -94,6 +112,15 @@ const SettingsManager = (() => {
     document.getElementById('telegramToken').value    = data.telegram_token   || '';
     document.getElementById('telegramChatId').value   = data.telegram_chat_id || '';
     document.getElementById('maxDailyLoss').value     = data.max_daily_loss   || 5;
+    const modeEl = document.getElementById('strategyMode');
+    if (modeEl) {
+      modeEl.value = data.strategy_mode || 'balanced';
+      updateStrategyModeDesc();
+    }
+    const cdEl = document.getElementById('cooldownBars');
+    if (cdEl) {
+      cdEl.value = (data.cooldown_bars !== undefined && data.cooldown_bars !== '') ? data.cooldown_bars : '30';
+    }
   }
 
   // ─── Save global settings ────────────────────────────────────────────
@@ -112,7 +139,9 @@ const SettingsManager = (() => {
       http_proxy:       (document.getElementById('httpProxy')?.value || '').trim(),
       telegram_token:   document.getElementById('telegramToken').value.trim(),
       telegram_chat_id: document.getElementById('telegramChatId').value.trim(),
-      max_daily_loss:   document.getElementById('maxDailyLoss').value.trim() || '5'
+      max_daily_loss:   document.getElementById('maxDailyLoss').value.trim() || '5',
+      strategy_mode:    document.getElementById('strategyMode')?.value || 'balanced',
+      cooldown_bars:    (document.getElementById('cooldownBars')?.value ?? '30').toString().trim() || '30'
     };
 
     try {

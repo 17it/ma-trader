@@ -180,6 +180,31 @@ class TestSecurityAndAPI(unittest.TestCase):
         )
         self.assertEqual(r_bad_proxy.status_code, 400)
 
+        # Global strategy_mode (Plan A / Plan B / Classic) & cooldown_bars switching + validation
+        r_mode_b = self.client.post(
+            "/api/settings",
+            headers=self.auth_headers,
+            json={"strategy_mode": "breakout", "cooldown_bars": "45"},
+        )
+        self.assertEqual(r_mode_b.status_code, 200)
+        self.assertEqual(r_mode_b.json()["strategy_mode"], "breakout")
+        self.assertEqual(r_mode_b.json()["cooldown_bars"], "45")
+
+        r_mode_a = self.client.post(
+            "/api/settings",
+            headers=self.auth_headers,
+            json={"strategy_mode": "balanced", "cooldown_bars": "30"},
+        )
+        self.assertEqual(r_mode_a.status_code, 200)
+        self.assertEqual(r_mode_a.json()["strategy_mode"], "balanced")
+
+        r_bad_mode = self.client.post(
+            "/api/settings",
+            headers=self.auth_headers,
+            json={"strategy_mode": "yolo"},
+        )
+        self.assertEqual(r_bad_mode.status_code, 400)
+
     def test_04_symbol_validation(self):
         # Invalid symbol & excessive leverage/risk rejected
         r_bad = self.client.post(
@@ -624,13 +649,21 @@ class TestBacktesterParityAndCache(unittest.TestCase):
         self.assertEqual(s4["confirm"], 3)
         self.assertNotIn("pending", s4)
 
-        # 4. Exit logic: NO MA exit when not trailing; exits on configured MA25 or MA60 when trailing
+        # 4. Exit logic: NO MA exit when not trailing; exits on configured MA25 or MA60 (and HTF prefix) when trailing
         self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=95.0, ma_val=100.0, trailing_active=False))
         self.assertEqual(MAStrategy.evaluate_exit_bar("long", close=99.0, ma_val=100.0, trailing_active=True, trailing_ma="ma25"), "ma25_trailing")
         self.assertEqual(MAStrategy.evaluate_exit_bar("short", close=101.0, ma_val=100.0, trailing_active=True, trailing_ma="ma25"), "ma25_trailing")
         self.assertEqual(MAStrategy.evaluate_exit_bar("long", close=99.0, ma_val=100.0, trailing_active=True, trailing_ma="ma60"), "ma60_trailing")
-        self.assertEqual(MAStrategy.evaluate_exit_bar("short", close=101.0, ma_val=100.0, trailing_active=True, trailing_ma="ma60"), "ma60_trailing")
+        self.assertEqual(MAStrategy.evaluate_exit_bar("long", close=99.0, ma_val=100.0, trailing_active=True, trailing_ma="ma25", is_htf_rail=True), "htf_ma25_trailing")
         self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=101.0, ma_val=100.0, trailing_active=True, trailing_ma="ma60"))
+
+        # Plan A (balanced) & Plan B (breakout) strictly block htf_dir=None chop and size SL from HTF ATR
+        st_a = MAStrategy(strategy_mode="balanced")
+        self.assertIsNone(st_a.evaluate_bar(101.0, 102.2, 100.9, 102.0, ma7_seq, ma25_seq, 98.0, 1.5, None, confirm_candles=1))
+        sig_a = st_a.evaluate_bar(101.0, 102.2, 100.9, 102.0, ma7_seq, ma25_seq, 98.0, 1.5, "long", confirm_candles=1)
+        self.assertIsNotNone(sig_a)
+        sl_a, _tp_a, dist_a = MAStrategy.compute_mode_sl_tp("long", 60000.0, 59900.0, 59950.0, 60050.0, strategy_mode="balanced", htf_atr14=350.0)
+        self.assertAlmostEqual(dist_a, 700.0, places=4)  # 2.0 * 350 > 0.8% * 60000 (480)
 
         # 5. HTF trend stays 'long' on healthy pullback (close < ma7 while ma7 > ma25 > ma60)
         self.assertEqual(MAStrategy.check_htf_scalars(close=60093.2, ma7=60184.0, ma25=59657.0, ma60=59059.0), "long")

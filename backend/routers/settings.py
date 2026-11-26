@@ -39,6 +39,8 @@ ALLOWED_SETTING_KEYS = {
     "http_proxy",
     "trading_mode",
     "max_daily_loss",
+    "strategy_mode",
+    "cooldown_bars",
 }
 ALLOWED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
 _MASK_PREFIX = "****"
@@ -105,6 +107,24 @@ def _validate_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="trading_mode 仅支持 paper 或 live",
             )
+        if k == "strategy_mode" and val:
+            val = val.lower()
+            if val not in {"balanced", "breakout", "classic"}:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="strategy_mode 仅支持 balanced（方案A）、breakout（方案B）或 classic（经典）",
+                )
+        if k == "cooldown_bars" and val != "":
+            try:
+                cd_num = int(float(val))
+                if cd_num < 0 or cd_num > 500:
+                    raise ValueError()
+                val = str(cd_num)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="平仓冷却 K 线数必须在 0 到 500 之间",
+                )
         cleaned[k] = val
     return cleaned
 
@@ -125,6 +145,11 @@ def _hot_reload_bot_settings(request: Request, full_settings: Dict[str, str]) ->
     for mode_key, bot in bots.items():
         if bot is None:
             continue
+        if hasattr(bot, "update_strategy_settings"):
+            bot.update_strategy_settings(
+                full_settings.get("strategy_mode", "balanced"),
+                full_settings.get("cooldown_bars", "30"),
+            )
         notifier = getattr(bot, "notifier", None)
         if notifier is not None and hasattr(notifier, "update_config"):
             notifier.update_config(tg_token, tg_chat, proxy=proxy)

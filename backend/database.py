@@ -121,6 +121,7 @@ class Trade(Base):
     trailing_activate_r = Column(Float, nullable=True)         # 开仓时该交易对的追踪触发 R
     breakeven_buffer = Column(Float, nullable=True)            # 开仓时该交易对的保本缓冲比例
     trailing_ma = Column(String(10), nullable=True)            # 开仓时该交易对的追踪均线（"ma25" | "ma60"）
+    strategy_mode = Column(String(20), nullable=True)          # 开仓时策略模式（"balanced" | "breakout" | "classic"）
     fee = Column(Float, default=0.0)                           # 累计手续费（USDT）
 
 
@@ -289,6 +290,8 @@ DEFAULT_SETTINGS = {
     "http_proxy": "",
     "trading_mode": "paper",
     "max_daily_loss": "5",
+    "strategy_mode": "balanced",
+    "cooldown_bars": "30",
 }
 
 
@@ -391,6 +394,8 @@ def create_tables() -> None:
             conn.execute(text("ALTER TABLE trades ADD COLUMN breakeven_buffer FLOAT"))
         if "trailing_ma" not in cols:
             conn.execute(text("ALTER TABLE trades ADD COLUMN trailing_ma VARCHAR(10)"))
+        if "strategy_mode" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN strategy_mode VARCHAR(20)"))
         if "fee" not in cols:
             conn.execute(text("ALTER TABLE trades ADD COLUMN fee FLOAT DEFAULT 0"))
 

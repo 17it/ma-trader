@@ -299,9 +299,28 @@
                     <input type="text" class="form-control form-control-sm" id="telegramChatId" placeholder="纯数字 Chat ID (如留空或填写 Bot 名字，点击上方测试可自动识别)" />
                     <div class="form-text text-secondary" style="font-size:11px">在 Telegram 给机器人发消息后点击上方“测试”可自动获取并绑定数字 ID</div>
                   </div>
-                  <div class="mb-3">
-                    <label class="form-label small">每日最大亏损 (%)</label>
-                    <input type="number" class="form-control form-control-sm" id="maxDailyLoss" min="0.1" max="100" step="0.1" value="5" />
+                  <div class="mb-3 p-2 rounded border border-primary-subtle bg-body-tertiary">
+                    <label class="form-label small fw-semibold mb-1"><i class="fa-solid fa-wand-magic-sparkles me-1 text-primary"></i>交易策略方案</label>
+                    <select class="form-select form-select-sm" id="strategyMode">
+                      <option value="balanced">方案 A：高胜率均衡版（1m/15m 推荐）</option>
+                      <option value="breakout">方案 B：单边爆发版（强单边行情）</option>
+                      <option value="classic">经典多均线版（适合 1h/4h 大周期）</option>
+                    </select>
+                    <div class="form-text text-secondary mt-1" id="strategyModeDesc" style="font-size:11px;line-height:1.45">
+                      严格大周期三线+斜率+MA200顺势 · 2.0×HTF_ATR波段止损 · 1.0R锁+0.35R后沿大周期均线追踪（建议确认K线=2）
+                    </div>
+                  </div>
+                  <div class="row g-2 mb-3">
+                    <div class="col-6">
+                      <label class="form-label small">平仓冷却 (K线数)</label>
+                      <input type="number" class="form-control form-control-sm" id="cooldownBars" min="0" max="500" step="1" value="30" />
+                      <div class="form-text text-secondary" style="font-size:11px">1m下30=30分钟，0关闭</div>
+                    </div>
+                    <div class="col-6">
+                      <label class="form-label small">每日最大亏损 (%)</label>
+                      <input type="number" class="form-control form-control-sm" id="maxDailyLoss" min="0.1" max="100" step="0.1" value="5" />
+                      <div class="form-text text-secondary" style="font-size:11px">当日超限暂停开新单</div>
+                    </div>
                   </div>
                   <button type="submit" class="btn btn-primary btn-sm w-100">
                     <i class="fa-solid fa-floppy-disk me-1"></i>保存设置
@@ -392,37 +411,46 @@
               </div>
               <div class="row g-2 align-items-end mt-1">
                 <div class="col-md-2">
-                  <label class="form-label small">回测标题</label>
-                  <input type="text" class="form-control form-control-sm" id="btTitle" placeholder="可选，如: 1h/4h MA60" />
+                  <label class="form-label small">策略方案</label>
+                  <select class="form-select form-select-sm" id="btStrategyMode">
+                    <option value="">跟随全局设置</option>
+                    <option value="balanced">方案 A：高胜率均衡</option>
+                    <option value="breakout">方案 B：单边爆发</option>
+                    <option value="classic">经典多均线</option>
+                  </select>
                 </div>
-                <div class="col-6 col-md-2">
-                  <label class="form-label small">确认K线 <span id="btConfirmLabel">2</span></label>
+                <div class="col-md-2">
+                  <label class="form-label small">回测标题</label>
+                  <input type="text" class="form-control form-control-sm" id="btTitle" placeholder="可选，如: 1m/15m方案A" />
+                </div>
+                <div class="col-6 col-md-1">
+                  <label class="form-label small">确认K <span id="btConfirmLabel">2</span></label>
                   <input type="range" class="form-range" id="btConfirm" min="1" max="10" value="2" />
                 </div>
-                <div class="col-4 col-md-1">
-                  <label class="form-label small" title="参考盈亏比（实际平仓按触发R保本 + 追踪均线止盈，填 0 不显示参考目标）">参考R</label>
+                <div class="col-6 col-md-1">
+                  <label class="form-label small" title="经典模式参考盈亏比（填 0 不显示参考目标）">参考R</label>
                   <input type="number" class="form-control form-control-sm" id="btRR" min="0" max="20" step="0.1" value="1.5" />
                 </div>
                 <div class="col-4 col-md-1">
-                  <label class="form-label small" title="浮盈达多少 R 开启保本与均线追踪">触发R</label>
+                  <label class="form-label small" title="经典模式触发R（方案A固定1.0R，方案B固定1.2R）">触发R</label>
                   <input type="number" class="form-control form-control-sm" id="btTrailR" min="0.1" max="10" step="0.02" value="0.88" />
                 </div>
                 <div class="col-4 col-md-1">
-                  <label class="form-label small" title="触发追踪时锁定的保本微赚比例 (%)">保本%</label>
+                  <label class="form-label small" title="经典模式保本%（方案A/B自动锁+0.35R且保底0.2%）">保本%</label>
                   <input type="number" class="form-control form-control-sm" id="btBeBuf" min="0" max="5" step="0.05" value="0.3" />
                 </div>
-                <div class="col-6 col-md-1">
-                  <label class="form-label small" title="激活后沿哪条均线追踪止盈（1h/4h 推荐 MA60，短周期可用 MA25）">追踪线</label>
+                <div class="col-4 col-md-1">
+                  <label class="form-label small" title="激活后沿哪条均线追踪止盈（方案A/B沿大周期均线，经典模式沿小周期均线）">追踪线</label>
                   <select class="form-select form-select-sm" id="btTrailingMa">
                     <option value="ma25">MA25</option>
                     <option value="ma60">MA60</option>
                   </select>
                 </div>
-                <div class="col-6 col-md-2">
-                  <label class="form-label small">初始资金 (USDT)</label>
+                <div class="col-6 col-md-1">
+                  <label class="form-label small">初始资金</label>
                   <input type="number" class="form-control form-control-sm" id="btCapital" value="10000" />
                 </div>
-                <div class="col-12 col-md-2 d-flex align-items-end">
+                <div class="col-6 col-md-2 d-flex align-items-end">
                   <button class="btn btn-primary btn-sm w-100" id="btnRunBacktest">
                     <i class="fa-solid fa-play me-1"></i>开始回测
                   </button>
@@ -774,13 +802,13 @@
           <!-- Header summary card -->
           <div class="card card-dark mb-3">
             <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
-              <span><i class="fa-solid fa-book-open me-2"></i>MA7 / MA25 / MA60 双周期顺势量化策略</span>
-              <span class="badge bg-primary-subtle text-primary border border-primary-subtle">实盘 · 模拟 · 回测 三端逻辑对齐</span>
+              <span><i class="fa-solid fa-book-open me-2"></i>MA 多均线双周期顺势量化体系（支持三套策略热切换）</span>
+              <span class="badge bg-primary-subtle text-primary border border-primary-subtle">实盘 · 模拟 · 回测 三端逻辑 100% 对齐</span>
             </div>
             <div class="card-body">
               <p class="mb-0 text-secondary" style="line-height:1.7;">
-                核心思路：<strong class="text-body">「双周期均线共振 + ATR 自适应防追高 + 反向影线过滤 + 含费以损定仓 + MA25 趋势追踪」</strong>。
-                只在顺大势且均线刚起势时进场，过滤震荡与脉冲末端追单，单笔含手续费亏损严格受账户风险比例控制，盈利达设定阈值（默认 0.88R，按币种可配）后自动移至保本微赚位并开启 MA25 移动追踪让利润奔跑。
+                系统内置 <strong class="text-body">「方案 A：高胜率均衡版」</strong>、<strong class="text-body">「方案 B：单边爆发版」</strong> 与 <strong class="text-body">「经典多均线版」</strong> 三套策略内核，可在 <strong class="text-body">系统设置 → 全局设置</strong> 中随时一键热切换（保存即刻生效，无需重启服务）。
+                全系共用 <strong class="text-body">「严格零未来函数收盘确认 + ATR 自适应防追高 + 反向长影线过滤 + 含双边手续费以损定仓 + 锁利移动追踪」</strong> 风控底座。
               </p>
             </div>
           </div>
@@ -789,61 +817,181 @@
           <div class="row g-2 mb-3">
             <div class="col-6 col-lg-3">
               <div class="bt-metric-card h-100">
-                <div class="bt-metric-label">大周期趋势过滤</div>
-                <div class="bt-metric-value text-blue" style="font-size:16px;">HTF 同向排列</div>
-                <div class="small text-secondary mt-1">默认 15m，不逆大势开单</div>
+                <div class="bt-metric-label">大周期趋势门禁</div>
+                <div class="bt-metric-value text-blue" style="font-size:16px;">排列 + 斜率 + MA200</div>
+                <div class="small text-secondary mt-1">震荡纠缠期空仓，不逆大势接飞刀</div>
               </div>
             </div>
             <div class="col-6 col-lg-3">
               <div class="bt-metric-card h-100">
-                <div class="bt-metric-label">乖离率防追单</div>
-                <div class="bt-metric-value text-green" style="font-size:16px;">≤ 0.35% / 0.60%</div>
-                <div class="small text-secondary mt-1">ATR(14) 自适应：偏离 MA25 ≤ 2.5×ATR</div>
+                <div class="bt-metric-label">ATR 自适应防追单</div>
+                <div class="bt-metric-value text-green" style="font-size:16px;">|C - MA25| ≤ 2.5×ATR</div>
+                <div class="small text-secondary mt-1">随波动率自动伸缩，拒绝脉冲末端追高</div>
               </div>
             </div>
             <div class="col-6 col-lg-3">
               <div class="bt-metric-card h-100">
-                <div class="bt-metric-label">假突破过滤</div>
+                <div class="bt-metric-label">假突破影线过滤</div>
                 <div class="bt-metric-value text-blue" style="font-size:16px;">反向影线 ≤ 1.5× 实体</div>
-                <div class="small text-secondary mt-1">仅开仓当根校验，不清零确认计数</div>
+                <div class="small text-secondary mt-1">仅开仓当根校验，不中途清零确认计数</div>
               </div>
             </div>
             <div class="col-6 col-lg-3">
               <div class="bt-metric-card h-100">
-                <div class="bt-metric-label">移动止盈</div>
-                <div class="bt-metric-value text-green" style="font-size:16px;">0.88R 保本 · MA25 追踪</div>
-                <div class="small text-secondary mt-1">浮盈达 0.88R 移保本+0.3% 并沿 MA25 追踪</div>
+                <div class="bt-metric-label">跨周期锁利追踪</div>
+                <div class="bt-metric-value text-green" style="font-size:16px;">小周期切入 · 大周期持仓</div>
+                <div class="small text-secondary mt-1">达阈值先锁正收益，再沿均线吃满主浪</div>
               </div>
             </div>
           </div>
 
-          <!-- Detailed rules -->
+          <!-- Three Strategy Modes Comparison -->
+          <div class="card card-dark mb-3">
+            <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+              <span><i class="fa-solid fa-wand-magic-sparkles me-2 text-primary"></i>三大策略方案详解、适用场景与推荐配置</span>
+              <span class="small text-secondary">切换路径：系统设置 → 全局设置 → 交易策略方案</span>
+            </div>
+            <div class="card-body">
+              <div class="row g-3">
+                <!-- Plan A -->
+                <div class="col-lg-4">
+                  <div class="p-3 rounded border border-primary-subtle h-100 d-flex flex-column gap-2" style="background: rgba(56, 189, 248, 0.04);">
+                    <div class="d-flex align-items-center justify-content-between">
+                      <span class="fw-bold text-primary"><i class="fa-solid fa-scale-balanced me-1"></i>方案 A：高胜率均衡版</span>
+                      <span class="badge bg-primary text-white">默认推荐</span>
+                    </div>
+                    <div class="small text-secondary" style="line-height:1.65;">
+                      <div class="mb-2">
+                        <strong class="text-body">核心含义：</strong>「小周期精准进场 + 大周期定趋势与止损追踪」。强制要求高级框架 <code>MA7/25/60</code> 同向排列、<code>MA25/60</code> 斜率共振且位于大周期 <code>MA200</code>（15m 下即 50 小时主趋势线）顺势侧，<strong>大周期均线纠缠时严格空仓</strong>；小周期三线顺排确认后进场；以 <code>max(2.0 × HTF_ATR14, 0.8%)</code> 设波段止损（抗 1m 插针并压低手续费占比）；浮盈达 <strong>1.0R</strong> 自动锁利 <strong>+0.35R（保底 ±0.2%）</strong>，随后沿<strong>大周期均线（如 15m MA25）</strong>收线追踪出场。
+                      </div>
+                      <div class="mb-2">
+                        <strong class="text-body">适用场景：</strong><strong>全天候主力方案</strong>（兼顾震荡过渡期与趋势期），适合运行在短周期盯盘（<code>1m / 15m</code>）、追求 <strong>58%~65% 较高胜率</strong>与稳健净值曲线的日常交易。
+                      </div>
+                      <div class="pt-2 border-top border-secondary-subtle">
+                        <strong class="text-body">推荐配置：</strong><br/>
+                        • 周期组合：<code>1m</code>（基础）/ <code>15m</code>（高级）<br/>
+                        • 确认K线：<code>2</code> 根 ｜ 追踪均线：<code>MA25</code><br/>
+                        • 平仓冷却：<code>30</code> 根（30分钟）<br/>
+                        • 杠杆 / 风险：<code>5x ~ 8x</code> ｜ 单笔风险 <code>1.0% ~ 1.2%</code>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Plan B -->
+                <div class="col-lg-4">
+                  <div class="p-3 rounded border border-success-subtle h-100 d-flex flex-column gap-2" style="background: rgba(16, 185, 129, 0.04);">
+                    <div class="d-flex align-items-center justify-content-between">
+                      <span class="fw-bold text-success"><i class="fa-solid fa-bolt me-1"></i>方案 B：单边爆发版</span>
+                      <span class="badge bg-success-subtle text-success border border-success-subtle">强单边利器</span>
+                    </div>
+                    <div class="small text-secondary" style="line-height:1.65;">
+                      <div class="mb-2">
+                        <strong class="text-body">核心含义：</strong>「大周期强发散过滤 + 小周期顺势突破快进 + 结构宽止损博大浪」。在方案 A 大周期三线 + 斜率 + <code>MA200</code> 基础上，额外要求<strong>大周期均线显著发散</strong>（<code>|HTF_MA7 - HTF_MA60| &gt; 0.6 × HTF_ATR14</code>），彻底过滤窄幅盘整；小周期无需等三线完全发散，顺势站稳 <code>LTF_MA25</code>（<code>MA7 &gt; MA25</code> 且顺向实体 K 线）即提前上车；以大周期 <code>HTF_MA60</code> 结构位（结合 <code>1.8 × HTF_ATR14</code> 与 <code>0.8%</code> 保底）设止损，浮盈达 <strong>1.2R</strong> 锁利 <strong>+0.35R</strong> 后沿<strong>大周期均线</strong>跨周期追踪。
+                      </div>
+                      <div class="mb-2">
+                        <strong class="text-body">适用场景：</strong><strong>破位单边大行情 / 宏观驱动主升主跌浪</strong>。出手次数比方案 A 更少、更克制，在流畅单边趋势中收益爆发力与夏普比最高。
+                      </div>
+                      <div class="pt-2 border-top border-secondary-subtle">
+                        <strong class="text-body">推荐配置：</strong><br/>
+                        • 周期组合：<code>1m</code> / <code>15m</code>（或 <code>5m</code> / <code>1h</code>）<br/>
+                        • 确认K线：<code>2</code> 根 ｜ 追踪均线：<code>MA25</code><br/>
+                        • 平仓冷却：<code>30</code> 根<br/>
+                        • 杠杆 / 风险：<code>5x ~ 8x</code> ｜ 单笔风险 <code>1.0% ~ 1.2%</code>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Classic -->
+                <div class="col-lg-4">
+                  <div class="p-3 rounded border border-warning-subtle h-100 d-flex flex-column gap-2" style="background: rgba(245, 158, 11, 0.04);">
+                    <div class="d-flex align-items-center justify-content-between">
+                      <span class="fw-bold text-warning"><i class="fa-solid fa-layer-group me-1"></i>经典多均线版</span>
+                      <span class="badge bg-warning-subtle text-warning border border-warning-subtle">1h / 4h 长波段</span>
+                    </div>
+                    <div class="small text-secondary" style="line-height:1.65;">
+                      <div class="mb-2">
+                        <strong class="text-body">核心含义：</strong>「标准双周期三线共振 + 本周期结构止损 + 自定义触发R与均线追踪」。高级框架不出现反向排列即放行；小周期满足三线排列且最近 3 根 <code>MA7/MA25</code> 斜率持续发散；以小周期 <code>MA60</code>（或信号 K 线极值，保底 <code>0.3%</code>）定锚初始止损；浮盈达到交易对自定义的<strong>「追踪触发 R」</strong>后移至<strong>「入场价 ± 保本%」</strong>，并沿本周期 <strong><code>MA25</code> 或 <code>MA60</code></strong> 追踪止盈。
+                      </div>
+                      <div class="mb-2">
+                        <strong class="text-body">适用场景：</strong><strong>低频中长线波段交易</strong>（几天一单、极低手续费损耗、持仓吃日线级大趋势）。<em>注：不建议用于 <code>1m / 5m</code> 超短周期，短周期请使用方案 A 或方案 B。</em>
+                      </div>
+                      <div class="pt-2 border-top border-secondary-subtle">
+                        <strong class="text-body">推荐配置：</strong><br/>
+                        • 周期组合：<code>1h</code>（基础）/ <code>4h</code>（高级）<br/>
+                        • 确认K线：<code>3</code> 根（或 <code>2</code> 根）｜ 追踪均线：<code>MA60</code><br/>
+                        • 追踪触发 / 保本：<code>1.5R</code>（或 <code>0.88R</code>）/ <code>0.2%~0.3%</code><br/>
+                        • 平仓冷却：<code>0</code>（关闭）｜ 杠杆：<code>3x ~ 5x</code>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Quick Lookup Table: Timeframe -> Strategy -->
+              <div class="mt-3 pt-3 border-top border-secondary-subtle">
+                <div class="fw-semibold small mb-2">
+                  <i class="fa-solid fa-table-list me-1 text-info"></i>周期与策略速查表
+                  <span class="text-secondary fw-normal ms-1">（方案 A / B 不建议用于 4h 大周期，大周期请选经典版）</span>
+                </div>
+                <div class="table-responsive">
+                  <table class="table table-custom table-sm align-middle mb-0" style="font-size:12px;">
+                    <thead>
+                      <tr>
+                        <th style="width:34%;">运行周期</th>
+                        <th style="width:42%;">推荐策略方案</th>
+                        <th style="width:24%;">推荐平仓冷却 K 线</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><code>1m / 15m</code> <span class="text-secondary">（日内高频波段）</span></td>
+                        <td><strong class="text-primary">方案 A</strong>（日常均衡）/ <strong class="text-success">方案 B</strong>（强单边）</td>
+                        <td><code>30</code> <span class="text-secondary">（30分钟）</span></td>
+                      </tr>
+                      <tr>
+                        <td><code>5m / 1h</code> <span class="text-secondary">（日内中频波段，BTC/ETH 双优）</span></td>
+                        <td><strong class="text-primary">方案 A</strong> 或 <strong class="text-success">方案 B</strong></td>
+                        <td><code>12</code> <span class="text-secondary">（1小时）</span></td>
+                      </tr>
+                      <tr>
+                        <td><code>15m / 1h</code> <span class="text-secondary">（日内低频波段）</span></td>
+                        <td><strong class="text-success">方案 B</strong>（单边爆发版）</td>
+                        <td><code>4</code> <span class="text-secondary">（1小时）</span></td>
+                      </tr>
+                      <tr>
+                        <td><code>1h / 4h</code> <span class="text-secondary">（跨日大波段）</span></td>
+                        <td><strong class="text-warning">经典多均线版</strong>（<code>classic</code>）+ <code>MA60</code> 追踪</td>
+                        <td><code>0</code> <span class="text-secondary">（关闭）</span></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Detailed common mechanics -->
           <div class="row g-3">
-            <!-- Entry Rules -->
+            <!-- Entry & Cooldown -->
             <div class="col-lg-4">
               <div class="card card-dark h-100">
                 <div class="card-header">
-                  <i class="fa-solid fa-right-to-bracket me-2"></i>一、开仓条件（全部满足）
+                  <i class="fa-solid fa-filter me-2"></i>一、信号确认与防噪音机制
                 </div>
                 <div class="card-body d-flex flex-column gap-3" style="line-height:1.65;">
                   <div>
-                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">1</span>大周期定方向（HTF）</div>
-                    <div class="small text-secondary">以高级框架均线排列（<code>MA7 &gt; MA25 &gt; MA60</code> 为多头，<code>MA7 &lt; MA25 &lt; MA60</code> 为空头）定大势，大趋势回踩期间不会放行逆势单。</div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">1</span>严格已收盘计算（零未来函数）</div>
+                    <div class="small text-secondary">无论基础周期还是高级框架，一律只读取<strong>已完整收盘</strong>的 K 线计算均线与 ATR，杜绝盘中未走完 K 线闪烁假信号与回测未来函数。</div>
                   </div>
                   <div>
-                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">2</span>小周期排列 + 斜率共振</div>
-                    <div class="small text-secondary">基础周期（如 15m / 1h）满足三线多头/空头排列，且最近 <strong>3 根 K 线</strong> 的 MA7 与 MA25 斜率持续同向发散。</div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">2</span>反向长影线拦截（不清零计数）</div>
+                    <div class="small text-secondary">做多仅拦长上影线、做空仅拦长下影线（<code>反向影线 &gt; 1.5 × 实体</code>），顺势回踩下影线不误杀；且仅在达到确认数准备开仓当根检查，命中时暂缓 1 根而不清零确认进度。</div>
                   </div>
                   <div>
-                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">3</span>ATR 自适应乖离 &amp; 反向影线过滤</div>
-                    <div class="small text-secondary">
-                      • <strong>乖离率防追高</strong>：收盘价偏离 MA25 不超过 <strong>2.5 × ATR(14)</strong>，全周期自适应波动率；<br/>
-                      • <strong>假突破过滤</strong>：仅拦截<strong>反向长影线</strong>（做多拦长上影、做空拦长下影 &gt; 实体 1.5 倍），且<strong>只在开仓当根检查</strong>，不中途清零确认计数。
-                    </div>
-                  </div>
-                  <div>
-                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">4</span>收盘价连续确认（Bar Close）</div>
-                    <div class="small text-secondary">仅在 K 线正式收盘时刻计数，必须连续 <strong>N 根</strong>（如 2 或 3 根）完整收盘 K 线全部满足条件才开单；同币种同时只持 1 单。</div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">3</span>平仓冷却期（防末端二次追单）</div>
+                    <div class="small text-secondary">在方案 A / B 下，任意平仓（尤其保本止盈刚被扫出、大周期均线尚未死叉时）后默认冷却 <strong>30 根小周期 K 线</strong>（可在全局设置调整或填 <code>0</code> 关闭），防止行情尾声死猫跳反复追高挨刀。</div>
                   </div>
                 </div>
               </div>
@@ -853,55 +1001,59 @@
             <div class="col-lg-4">
               <div class="card card-dark h-100">
                 <div class="card-header">
-                  <i class="fa-solid fa-shield-halved me-2"></i>二、仓位与风控管理
+                  <i class="fa-solid fa-shield-halved me-2"></i>二、含费以损定仓与风控保护
                 </div>
                 <div class="card-body d-flex flex-column gap-3" style="line-height:1.65;">
                   <div>
-                    <div class="fw-semibold mb-1"><span class="badge bg-warning-subtle text-warning border border-warning-subtle me-1">1</span>初始止损定锚（1R）</div>
-                    <div class="small text-secondary">以信号 K 线的 <code>MA60</code>（或信号 K 线高低点）作为结构止损位，同时强制保留至少 <strong>0.3%</strong> 的最小保护距离，防止止损过窄被正常波动扫出。</div>
-                  </div>
-                  <div>
-                    <div class="fw-semibold mb-1"><span class="badge bg-warning-subtle text-warning border border-warning-subtle me-1">2</span>以损定仓公式</div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-warning-subtle text-warning border border-warning-subtle me-1">1</span>含摩擦以损定仓公式</div>
                     <div class="small text-secondary">
-                      <code>开仓数量 = (账户资金 × 风险比例) ÷ (止损距离 + 预估双边手续费与滑点)</code><br/>
-                      将双边手续费与滑点计入单位风险，哪怕止损较窄，触发初始止损时的真实净亏损也严格控制在设定比例（如 <strong>1.2%</strong>）以内，且总名义价值不超过 <code>可用保证金 × 杠杆 × 95%</code>。
+                      <code>数量 = (资金 × 风险比例) ÷ (止损距离 + 预估双边手续费与滑点)</code><br/>
+                      将双边手续费（<code>0.08%</code>）与滑点（<code>0.02%</code>）纳入单笔风险分母，触发止损时的真实净亏损严格不超过设定风险比例，且总名义仓位不超过 <code>保证金 × 杠杆 × 95%</code>。
                     </div>
                   </div>
                   <div>
-                    <div class="fw-semibold mb-1"><span class="badge bg-danger-subtle text-danger border border-danger-subtle me-1">3</span>每日最大亏损熔断</div>
-                    <div class="small text-secondary">按 UTC 自然日实时统计当日已平仓累计盈亏，一旦亏损达到全局设置的「每日最大亏损 %」（默认 <strong>5%</strong>），当天自动熔断暂停开新单。</div>
+                    <div class="fw-semibold mb-1"><span class="badge bg-danger-subtle text-danger border border-danger-subtle me-1">2</span>每日最大亏损自动熔断</div>
+                    <div class="small text-secondary">按 UTC 自然日实时累计当日已平仓净盈亏，一旦触及全局设置的「每日最大亏损 %」（默认 <strong>5%</strong>），当日自动熔断暂停新开仓。</div>
                   </div>
                   <div>
-                    <div class="fw-semibold mb-1"><span class="badge el-tag-paper me-1">4</span>实盘精度与安全保护</div>
-                    <div class="small text-secondary">实盘下单前自动按币安合约步长格式化数量与止损价，平仓市价单强制携带 <code>reduceOnly</code>，避免意外反手开仓。</div>
+                    <div class="fw-semibold mb-1"><span class="badge el-tag-paper me-1">3</span>实盘币安合约 Algo 安全护航</div>
+                    <div class="small text-secondary">开仓成交立即挂载交易所原生 <code>STOP_MARKET</code> 条件止损单（失败自动紧急市价平仓，绝不裸奔）；移动止损采用“先挂新单、再撤旧单”，平仓强制 <code>reduceOnly</code>。</div>
                   </div>
                 </div>
               </div>
             </div>
 
-            <!-- Exit & Tiered Profit Lock -->
+            <!-- Exit & Profit Lock -->
             <div class="col-lg-4">
               <div class="card card-dark h-100">
                 <div class="card-header">
-                  <i class="fa-solid fa-stairs me-2"></i>三、出场与三阶梯锁盈
+                  <i class="fa-solid fa-stairs me-2"></i>三、两阶段锁利与移动止盈
                 </div>
                 <div class="card-body p-0">
                   <div class="table-responsive">
                     <table class="table table-custom table-sm mb-0" style="font-size:12px;">
                       <thead>
                         <tr>
-                          <th>阶段 / 触发条件</th>
-                          <th>止损与平仓动作</th>
+                          <th style="width:112px;">阶段</th>
+                          <th>不同方案的止损与平仓动作</th>
                         </tr>
                       </thead>
                       <tbody>
                         <tr>
-                          <td><span class="badge bg-danger-subtle text-danger border border-danger-subtle">初始阶段</span><br/><span class="text-secondary small">浮盈 &lt; 0.88R</span></td>
-                          <td class="text-secondary">仅保留初始结构止损（触及记为 <code>初始止损</code>）；取消 0.7R 过早保本与 MA60 穿线提前洗盘离场。</td>
+                          <td><span class="badge bg-danger-subtle text-danger border border-danger-subtle">1. 初始保护</span><br/><span class="text-secondary small">未达触发阈值</span></td>
+                          <td class="text-secondary">
+                            • <strong>方案 A</strong>：守 <code>max(2.0×HTF_ATR, 0.8%)</code> 波段止损；<br/>
+                            • <strong>方案 B</strong>：守 <code>max(|入场-HTF_MA60|, 1.8×HTF_ATR, 0.8%)</code> 结构止损；<br/>
+                            • <strong>经典版</strong>：守小周期 <code>MA60</code> 结构止损（保底 <code>0.3%</code>）。<br/>
+                            期间不设固定止盈上限，也不提前洗盘平仓。
+                          </td>
                         </tr>
                         <tr>
-                          <td><span class="badge bg-success text-white">趋势追踪</span><br/><span class="text-secondary small">浮盈 ≥ 触发R</span></td>
-                          <td class="text-secondary">止损自动移至 <strong>入场价 ± 保本%</strong>（受触发价安全保护）并开启 <strong>MA25 / MA60 移动止盈</strong>（按交易对配置）：止损沿追踪均线单向推进，触及移动止损或收线破追踪均线才平仓。</td>
+                          <td><span class="badge bg-success text-white">2. 锁利追踪</span><br/><span class="text-secondary small">浮盈 ≥ 触发R</span></td>
+                          <td class="text-secondary">
+                            • <strong>方案 A（≥1.0R）/ 方案 B（≥1.2R）</strong>：止损立即推至 <strong>+0.35R（保底 ±0.2%）</strong> 锁定净利，随后沿<strong>高级框架均线</strong>（如 <code>15m MA25/MA60</code>）单向推进，收线破位才止盈；<br/>
+                            • <strong>经典版（≥触发R）</strong>：止损移至 <strong>入场价 ± 保本%</strong>，沿<strong>基础周期</strong> <code>MA25/MA60</code> 单向追踪止盈。
+                          </td>
                         </tr>
                       </tbody>
                     </table>
@@ -1065,10 +1217,10 @@
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/auth.js?v=20261126_1"></script>
-<script src="js/chart.js?v=20261126_1"></script>
-<script src="js/settings.js?v=20261126_2"></script>
-<script src="js/backtest.js?v=20261126_2"></script>
+<script src="js/auth.js?v=20261126_3"></script>
+<script src="js/chart.js?v=20261126_3"></script>
+<script src="js/settings.js?v=20261126_3"></script>
+<script src="js/backtest.js?v=20261126_3"></script>
 <script src="js/app.js?v=20261126_1"></script>
 </body>
 </html>

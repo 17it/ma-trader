@@ -9,6 +9,7 @@ notifications via *notifier*.
 
 import asyncio
 import logging
+import math
 import sys
 import time
 from datetime import datetime, timezone
@@ -17,7 +18,15 @@ from typing import Callable, Dict, List, Optional
 sys.modules.setdefault("trader", sys.modules[__name__])
 sys.modules.setdefault("backend.trader", sys.modules[__name__])
 
-from strategy import BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R, TRAILING_MA_DEFAULT, VALID_TRAILING_MAS
+from strategy import (
+    BREAKEVEN_BUFFER,
+    DEFAULT_COOLDOWN_BARS,
+    MAStrategy,
+    TRAILING_ACTIVATE_R,
+    TRAILING_MA_DEFAULT,
+    VALID_STRATEGY_MODES,
+    VALID_TRAILING_MAS,
+)
 from binance_ws import BinanceWSStreamer
 
 logger = logging.getLogger(__name__)
@@ -114,6 +123,9 @@ class TradingBot:
 
         self.running: bool = False
         self._started_at: Optional[float] = None
+        self.strategy_mode: str = "balanced"
+        self.cooldown_bars: int = DEFAULT_COOLDOWN_BARS
+        self.cooldown_until_ts: Dict[str, float] = {}
         self.strategies: Dict[str, MAStrategy] = {}
         self.positions: Dict[str, dict] = {}
         self.confirm_counts: Dict[str, int] = {}
@@ -145,11 +157,18 @@ class TradingBot:
 
         self.running = True
         self._started_at = time.time()
+        self._load_global_strategy_settings()
         status_key = "paper_running" if self.is_paper else "live_running"
         self.broadcast({"type": "bot_status", "running": True, status_key: True})
-        self.broadcast({"type": "log", "level": "info", "message": "Bot started"})
+        mode_names = {"balanced": "方案A(高胜率均衡)", "breakout": "方案B(单边爆发)", "classic": "经典多均线"}
+        self.broadcast({
+            "type": "log",
+            "level": "info",
+            "message": f"Bot started · 当前策略模式: {mode_names.get(self.strategy_mode, self.strategy_mode)} (冷却 {self.cooldown_bars} 根K线)",
+        })
 
         symbol_configs = self._load_symbol_configs()
+        htf_by_symbol = {c.symbol: getattr(c, "htf_timeframe", "15m") for c in symbol_configs}
         rr_by_symbol = {c.symbol: getattr(c, "rr_ratio", 1.5) for c in symbol_configs}
         trail_r_by_symbol = {
             c.symbol: float(getattr(c, "trailing_activate_r", None) or TRAILING_ACTIVATE_R)
@@ -221,6 +240,7 @@ class TradingBot:
                         "is_paper": ot.is_paper,
                         "open_time": ot.open_time,
                         "timeframe": ot.timeframe or "1m",
+                        "htf_timeframe": htf_by_symbol.get(ot.symbol, "15m"),
                         "exchange_order_id": getattr(ot, "exchange_order_id", None),
                         "sl_order_id": getattr(ot, "sl_order_id", None),
                         "trailing_active": bool(getattr(ot, "trailing_active", False)),
@@ -239,6 +259,11 @@ class TradingBot:
                             str(ot.trailing_ma).lower()
                             if getattr(ot, "trailing_ma", None)
                             else trail_ma_by_symbol.get(ot.symbol, TRAILING_MA_DEFAULT)
+                        ),
+                        "strategy_mode": (
+                            str(ot.strategy_mode).lower()
+                            if getattr(ot, "strategy_mode", None)
+                            else self.strategy_mode
                         ),
                         "entry_fee": float(getattr(ot, "fee", 0.0) or 0.0),
                     }
@@ -302,11 +327,57 @@ class TradingBot:
     # ------------------------------------------------------------------
     # Symbol management
     # ------------------------------------------------------------------
+    def _load_global_strategy_settings(self) -> None:
+        """Load strategy_mode and cooldown_bars from DB settings."""
+        try:
+            from database import SettingModel
+            session = self.db_session_factory()
+            try:
+                rows = session.query(SettingModel).filter(
+                    SettingModel.key.in_(["strategy_mode", "cooldown_bars"])
+                ).all()
+                kv = {r.key: (r.value or "").strip() for r in rows}
+                mode = kv.get("strategy_mode", "").lower()
+                if mode in VALID_STRATEGY_MODES:
+                    self.strategy_mode = mode
+                raw_cd = kv.get("cooldown_bars", "")
+                if raw_cd != "":
+                    self.cooldown_bars = max(0, min(500, int(float(raw_cd))))
+            finally:
+                session.close()
+        except Exception as exc:
+            logger.debug("Using default strategy settings: %s", exc)
+
+    def update_strategy_settings(self, strategy_mode: str, cooldown_bars) -> None:
+        """Hot-reload global strategy_mode and cooldown_bars without restarting the bot."""
+        norm_mode = str(strategy_mode or "").strip().lower()
+        mode_changed = False
+        if norm_mode in VALID_STRATEGY_MODES and norm_mode != self.strategy_mode:
+            self.strategy_mode = norm_mode
+            mode_changed = True
+            for sym, st in self.strategies.items():
+                st.set_strategy_mode(norm_mode)
+                self.confirm_counts[sym] = 0
+        try:
+            if cooldown_bars is not None and str(cooldown_bars).strip() != "":
+                self.cooldown_bars = max(0, min(500, int(float(cooldown_bars))))
+        except Exception:
+            pass
+        if mode_changed and self.running:
+            mode_names = {"balanced": "方案A(高胜率均衡)", "breakout": "方案B(单边爆发)", "classic": "经典多均线"}
+            self.broadcast({
+                "type": "log",
+                "level": "info",
+                "message": f"⚙️ 已热切换全局策略模式为: {mode_names.get(self.strategy_mode, self.strategy_mode)} (平仓冷却 {self.cooldown_bars} 根K线)",
+            })
+
     async def _start_symbol(self, config):
         symbol = config.symbol
         if symbol not in self.strategies:
-            self.strategies[symbol] = MAStrategy()
+            self.strategies[symbol] = MAStrategy(strategy_mode=self.strategy_mode)
             self.confirm_counts[symbol] = 0
+        else:
+            self.strategies[symbol].set_strategy_mode(self.strategy_mode)
         self._config_sigs[symbol] = _config_signature(config)
         task = asyncio.create_task(
             self._monitor_symbol(config), name=f"monitor-{symbol}"
@@ -390,7 +461,7 @@ class TradingBot:
         while self.running:
             try:
                 df_1m = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, timeframe, 200)
-                df_htf = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, htf_timeframe, 100)
+                df_htf = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, htf_timeframe, 250)
                 price = await asyncio.to_thread(self.data_feed.get_ticker, symbol)
 
                 if df_1m is None or df_1m.empty or len(df_1m) < 3:
@@ -434,7 +505,9 @@ class TradingBot:
                     first_cycle = False
                 elif last_closed_bar_ts != closed_candle_ts:
                     last_closed_bar_ts = closed_candle_ts
-                    signal = strategy.get_signal(closed_df, closed_htf, confirm_candles)
+                    signal = strategy.get_signal(
+                        closed_df, closed_htf, confirm_candles, strategy_mode=self.strategy_mode
+                    )
 
                     if signal is None:
                         if self.confirm_counts.get(symbol, 0) != 0:
@@ -477,7 +550,11 @@ class TradingBot:
                                 "blocked_by_wick": bool(signal.get("blocked_by_wick")),
                             })
                         if symbol not in self.positions:
-                            await self._handle_signal(symbol, signal, closed_df, symbol_config)
+                            if time.time() < self.cooldown_until_ts.get(symbol, 0.0):
+                                rem_min = max(1, int((self.cooldown_until_ts[symbol] - time.time()) / 60))
+                                logger.info("[%s] Signal skipped due to post-close cooldown (%dm left)", symbol, rem_min)
+                            else:
+                                await self._handle_signal(symbol, signal, closed_df, symbol_config, closed_htf=closed_htf)
                             if symbol in self.positions:
                                 strategy.reset()
                                 self.confirm_counts[symbol] = 0
@@ -534,7 +611,7 @@ class TradingBot:
     # ------------------------------------------------------------------
     # Signal handling → open trade
     # ------------------------------------------------------------------
-    async def _handle_signal(self, symbol: str, signal: dict, df, config):
+    async def _handle_signal(self, symbol: str, signal: dict, df, config, closed_htf=None):
         """Open a trade when a confirmed signal arrives."""
         direction = signal["direction"]
         last = df.iloc[-1]
@@ -561,13 +638,26 @@ class TradingBot:
         if trailing_ma not in VALID_TRAILING_MAS:
             trailing_ma = TRAILING_MA_DEFAULT
 
-        stop_loss, take_profit, sl_distance = MAStrategy.compute_sl_tp(
+        cur_mode = MAStrategy.normalize_mode(self.strategy_mode)
+        htf_atr14 = math.nan
+        htf_ma60 = math.nan
+        if closed_htf is not None and not closed_htf.empty:
+            st_ref = self.strategies.get(symbol) or MAStrategy(strategy_mode=cur_mode)
+            htf_calc = st_ref.calculate_ma(closed_htf)
+            htf_last = htf_calc.iloc[-1]
+            htf_atr14 = float(htf_last["atr14"])
+            htf_ma60 = float(htf_last["ma60"])
+
+        stop_loss, take_profit, sl_distance = MAStrategy.compute_mode_sl_tp(
             direction=direction,
             entry_price=entry_price,
             ma60=ma60,
             candle_low=float(last["low"]),
             candle_high=float(last["high"]),
             rr_ratio=rr,
+            strategy_mode=cur_mode,
+            htf_atr14=htf_atr14,
+            htf_ma60=htf_ma60,
         )
         if sl_distance <= 0:
             return
@@ -665,6 +755,7 @@ class TradingBot:
                     trailing_activate_r=trailing_activate_r,
                     breakeven_buffer=breakeven_buffer,
                     trailing_ma=trailing_ma,
+                    strategy_mode=cur_mode,
                     fee=round(entry_fee, 6),
                 )
                 session.add(trade)
@@ -683,6 +774,7 @@ class TradingBot:
                     "is_paper": trade.is_paper,
                     "open_time": trade.open_time,
                     "timeframe": getattr(config, "timeframe", "1m"),
+                    "htf_timeframe": getattr(config, "htf_timeframe", "15m"),
                     "exchange_order_id": exchange_order_id,
                     "sl_order_id": sl_order_id,
                     "trailing_active": False,
@@ -690,6 +782,7 @@ class TradingBot:
                     "trailing_activate_r": trailing_activate_r,
                     "breakeven_buffer": breakeven_buffer,
                     "trailing_ma": trailing_ma,
+                    "strategy_mode": cur_mode,
                     "entry_fee": entry_fee,
                 }
 
@@ -897,7 +990,10 @@ class TradingBot:
                 pos_trail_ma = str(pos.get("trailing_ma") or TRAILING_MA_DEFAULT).lower()
                 if pos_trail_ma not in VALID_TRAILING_MAS:
                     pos_trail_ma = TRAILING_MA_DEFAULT
-                trail_ma_label = pos_trail_ma.upper()
+                pos_mode = MAStrategy.normalize_mode(pos.get("strategy_mode") or self.strategy_mode)
+                htf_timeframe = pos.get("htf_timeframe", "15m")
+                use_htf_rail = pos_mode != "classic"
+                trail_ma_label = f"{htf_timeframe} {pos_trail_ma.upper()}" if use_htf_rail else pos_trail_ma.upper()
 
                 if price is not None and risk_r > 0:
                     pos_act_r = float(
@@ -905,6 +1001,7 @@ class TradingBot:
                         if pos.get("trailing_activate_r") is not None
                         else TRAILING_ACTIVATE_R
                     )
+                    eff_act_r = MAStrategy.effective_activate_r(pos_mode, pos_act_r)
                     pos_be_buf = float(
                         pos["breakeven_buffer"]
                         if pos.get("breakeven_buffer") is not None
@@ -913,57 +1010,60 @@ class TradingBot:
                     if direction == "long":
                         if price <= stop_loss:
                             close_reason = "trailing_stop" if trailing_active else "stop_loss"
-                        elif not trailing_active and price >= entry_price + pos_act_r * risk_r:
+                        elif not trailing_active and price >= entry_price + eff_act_r * risk_r:
                             trailing_active = True
-                            stop_loss = MAStrategy.compute_trailing_lock_sl(
+                            stop_loss = MAStrategy.compute_mode_trailing_lock_sl(
                                 "long", entry_price, risk_r, stop_loss,
-                                activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
+                                strategy_mode=pos_mode, activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
                             )
                             sl_updated = True
                             pos["trailing_active"] = True
                             self.broadcast({
                                 "type": "log",
                                 "level": "info",
-                                "message": f"🔒 [{symbol}] 浮盈达 {pos_act_r:.2f}R，止损移至保本+{pos_be_buf*100:.2f}% ({stop_loss:.4f}) 并开启 {trail_ma_label} 移动止盈",
+                                "message": f"🔒 [{symbol}] 浮盈达 {eff_act_r:.2f}R，已锁定利润止损 ({stop_loss:.4f}) 并开启 {trail_ma_label} 移动止盈",
                             })
                     else:  # short
                         if price >= stop_loss:
                             close_reason = "trailing_stop" if trailing_active else "stop_loss"
-                        elif not trailing_active and price <= entry_price - pos_act_r * risk_r:
+                        elif not trailing_active and price <= entry_price - eff_act_r * risk_r:
                             trailing_active = True
-                            stop_loss = MAStrategy.compute_trailing_lock_sl(
+                            stop_loss = MAStrategy.compute_mode_trailing_lock_sl(
                                 "short", entry_price, risk_r, stop_loss,
-                                activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
+                                strategy_mode=pos_mode, activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
                             )
                             sl_updated = True
                             pos["trailing_active"] = True
                             self.broadcast({
                                 "type": "log",
                                 "level": "info",
-                                "message": f"🔒 [{symbol}] 浮盈达 {pos_act_r:.2f}R，止损移至保本-{pos_be_buf*100:.2f}% ({stop_loss:.4f}) 并开启 {trail_ma_label} 移动止盈",
+                                "message": f"🔒 [{symbol}] 浮盈达 {eff_act_r:.2f}R，已锁定利润止损 ({stop_loss:.4f}) 并开启 {trail_ma_label} 移动止盈",
                             })
 
                 if close_reason:
                     await self._close_trade(symbol, pos, close_reason, price)
                     continue
 
-                # 2. Only once trailing is active: tighten SL along configured MA (MA25/MA60) & exit if bar closes beyond it
+                # 2. Once trailing is active: tighten SL along configured MA (HTF MA for Plan A/B, LTF MA for classic)
                 strategy = self.strategies.get(symbol)
                 if trailing_active and strategy is not None:
-                    df = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, timeframe, 100)
+                    rail_tf = htf_timeframe if use_htf_rail else timeframe
+                    df = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, rail_tf, 100)
                     if df is not None and not df.empty:
                         df = strategy.calculate_ma(df)
                         eval_df = df.iloc[:-1] if len(df) >= 2 else df
 
                         if len(eval_df) >= 1:
                             trail_ma_val = float(eval_df.iloc[-1][pos_trail_ma])
+                            pad_long = 0.999 if use_htf_rail else 0.9995
+                            pad_short = 1.001 if use_htf_rail else 1.0005
                             if direction == "long":
-                                new_sl = max(stop_loss, trail_ma_val * 0.9995)
+                                new_sl = max(stop_loss, trail_ma_val * pad_long)
                                 if new_sl > stop_loss:
                                     stop_loss = new_sl
                                     sl_updated = True
                             else:
-                                new_sl = min(stop_loss, trail_ma_val * 1.0005)
+                                new_sl = min(stop_loss, trail_ma_val * pad_short)
                                 if new_sl < stop_loss:
                                     stop_loss = new_sl
                                     sl_updated = True
@@ -974,7 +1074,7 @@ class TradingBot:
                             "trailing_active": True,
                             "trailing_ma": pos_trail_ma,
                         }
-                        exit_sig = strategy.check_exit(eval_df, position_dict)
+                        exit_sig = strategy.check_exit(eval_df, position_dict, is_htf_rail=use_htf_rail)
                         if exit_sig:
                             await self._close_trade(
                                 symbol, pos, exit_sig, price or float(df.iloc[-1]["close"])
@@ -1118,6 +1218,9 @@ class TradingBot:
                     session.close()
 
                 self.positions.pop(symbol, None)
+                if self.cooldown_bars > 0 and self.strategy_mode != "classic":
+                    pos_tf = (pos.get("timeframe") if isinstance(pos, dict) else getattr(pos, "timeframe", None)) or "1m"
+                    self.cooldown_until_ts[symbol] = time.time() + self.cooldown_bars * _TF_SECONDS.get(pos_tf, 60)
 
                 if trade_dict:
                     self.broadcast({"type": "trade_closed", "trade": trade_dict})
