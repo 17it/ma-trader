@@ -333,7 +333,7 @@
                         <th>杠杆</th>
                         <th>风险%</th>
                         <th>盈亏比</th>
-                        <th>追踪触发 / 保本</th>
+                        <th>追踪参数</th>
                         <th>状态</th>
                         <th>操作</th>
                       </tr>
@@ -391,31 +391,38 @@
                 </div>
               </div>
               <div class="row g-2 align-items-end mt-1">
-                <div class="col-md-3">
+                <div class="col-md-2">
                   <label class="form-label small">回测标题</label>
-                  <input type="text" class="form-control form-control-sm" id="btTitle" placeholder="可选，如: 1h/4h趋势追踪" />
+                  <input type="text" class="form-control form-control-sm" id="btTitle" placeholder="可选，如: 1h/4h MA60" />
                 </div>
                 <div class="col-6 col-md-2">
                   <label class="form-label small">确认K线 <span id="btConfirmLabel">2</span></label>
                   <input type="range" class="form-range" id="btConfirm" min="1" max="10" value="2" />
                 </div>
-                <div class="col-6 col-md-1">
-                  <label class="form-label small" title="参考盈亏比（实际平仓按触发R保本 + MA25无上限追踪止盈，填 0 不显示参考目标）">参考R</label>
+                <div class="col-4 col-md-1">
+                  <label class="form-label small" title="参考盈亏比（实际平仓按触发R保本 + 追踪均线止盈，填 0 不显示参考目标）">参考R</label>
                   <input type="number" class="form-control form-control-sm" id="btRR" min="0" max="20" step="0.1" value="1.5" />
                 </div>
-                <div class="col-6 col-md-1">
-                  <label class="form-label small" title="浮盈达多少 R 开启保本与 MA25 追踪">触发R</label>
+                <div class="col-4 col-md-1">
+                  <label class="form-label small" title="浮盈达多少 R 开启保本与均线追踪">触发R</label>
                   <input type="number" class="form-control form-control-sm" id="btTrailR" min="0.1" max="10" step="0.02" value="0.88" />
                 </div>
-                <div class="col-6 col-md-1">
+                <div class="col-4 col-md-1">
                   <label class="form-label small" title="触发追踪时锁定的保本微赚比例 (%)">保本%</label>
                   <input type="number" class="form-control form-control-sm" id="btBeBuf" min="0" max="5" step="0.05" value="0.3" />
+                </div>
+                <div class="col-6 col-md-1">
+                  <label class="form-label small" title="激活后沿哪条均线追踪止盈（1h/4h 推荐 MA60，短周期可用 MA25）">追踪线</label>
+                  <select class="form-select form-select-sm" id="btTrailingMa">
+                    <option value="ma25">MA25</option>
+                    <option value="ma60">MA60</option>
+                  </select>
                 </div>
                 <div class="col-6 col-md-2">
                   <label class="form-label small">初始资金 (USDT)</label>
                   <input type="number" class="form-control form-control-sm" id="btCapital" value="10000" />
                 </div>
-                <div class="col-6 col-md-2 d-flex align-items-end">
+                <div class="col-12 col-md-2 d-flex align-items-end">
                   <button class="btn btn-primary btn-sm w-100" id="btnRunBacktest">
                     <i class="fa-solid fa-play me-1"></i>开始回测
                   </button>
@@ -893,8 +900,8 @@
                           <td class="text-secondary">仅保留初始结构止损（触及记为 <code>初始止损</code>）；取消 0.7R 过早保本与 MA60 穿线提前洗盘离场。</td>
                         </tr>
                         <tr>
-                          <td><span class="badge bg-success text-white">趋势追踪</span><br/><span class="text-secondary small">浮盈 ≥ 0.88R</span></td>
-                          <td class="text-secondary">止损自动移至 <strong>入场价 ± 0.3%</strong>（受触发价安全保护）并开启 <strong>MA25 移动止盈</strong>：止损沿 <code>MA25 × 0.9995 / 1.0005</code> 单向推进，触及移动止损或收线破 MA25 才平仓。</td>
+                          <td><span class="badge bg-success text-white">趋势追踪</span><br/><span class="text-secondary small">浮盈 ≥ 触发R</span></td>
+                          <td class="text-secondary">止损自动移至 <strong>入场价 ± 保本%</strong>（受触发价安全保护）并开启 <strong>MA25 / MA60 移动止盈</strong>（按交易对配置）：止损沿追踪均线单向推进，触及移动止损或收线破追踪均线才平仓。</td>
                         </tr>
                       </tbody>
                     </table>
@@ -966,12 +973,20 @@
             <div class="col">
               <label class="form-label small">追踪触发 (R)</label>
               <input type="number" class="form-control form-control-sm" id="symTrailR" min="0.1" max="10" step="0.02" value="0.88" />
-              <div class="form-text text-secondary" style="font-size:11px">建议：1h 用 0.88R，15m 用 1.2R</div>
+              <div class="form-text text-secondary" style="font-size:11px">1h/4h 推荐 1.5R 或 0.88R</div>
             </div>
             <div class="col">
               <label class="form-label small">保本微赚 (%)</label>
               <input type="number" class="form-control form-control-sm" id="symBeBuf" min="0" max="5" step="0.05" value="0.3" />
-              <div class="form-text text-secondary" style="font-size:11px">建议：1h 用 0.3%，15m 用 0.1%</div>
+              <div class="form-text text-secondary" style="font-size:11px">常用 0.2% ~ 0.3%</div>
+            </div>
+            <div class="col">
+              <label class="form-label small">追踪均线</label>
+              <select class="form-select form-select-sm" id="symTrailingMa">
+                <option value="ma25">MA25</option>
+                <option value="ma60">MA60</option>
+              </select>
+              <div class="form-text text-secondary" style="font-size:11px">1h/4h 推荐 MA60</div>
             </div>
           </div>
           <div class="d-flex align-items-center justify-content-between pt-2 border-top">
@@ -1052,8 +1067,8 @@
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script src="js/auth.js?v=20261126_1"></script>
 <script src="js/chart.js?v=20261126_1"></script>
-<script src="js/settings.js?v=20261126_1"></script>
-<script src="js/backtest.js?v=20261126_1"></script>
+<script src="js/settings.js?v=20261126_2"></script>
+<script src="js/backtest.js?v=20261126_2"></script>
 <script src="js/app.js?v=20261126_1"></script>
 </body>
 </html>

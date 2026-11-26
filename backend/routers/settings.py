@@ -227,6 +227,7 @@ async def create_symbol(body: SymbolConfigCreate, request: Request, db: Session 
         rr_ratio=body.rr_ratio,
         trailing_activate_r=body.trailing_activate_r,
         breakeven_buffer=body.breakeven_buffer,
+        trailing_ma=body.trailing_ma,
         enabled=body.enabled,
     )
     db.add(obj)

@@ -82,6 +82,7 @@ const BacktestManager = (() => {
       rr_ratio:      parseFloat(document.getElementById('btRR').value),
       trailing_activate_r: parseFloat(document.getElementById('btTrailR')?.value || '0.88'),
       breakeven_buffer:    parseFloat(document.getElementById('btBeBuf')?.value || '0.3') / 100,
+      trailing_ma:         document.getElementById('btTrailingMa')?.value || 'ma25',
       initial_capital: parseFloat(document.getElementById('btCapital').value)
     };
 
@@ -453,6 +454,11 @@ const BacktestManager = (() => {
     if (beBuf != null) {
       const el = document.getElementById('btBeBuf');
       if (el) el.value = Number((beBuf * 100).toFixed(3));
+    }
+    const trailMa = params.trailing_ma;
+    if (trailMa) {
+      const el = document.getElementById('btTrailingMa');
+      if (el) el.value = String(trailMa).toLowerCase();
     }
 
     // 初始资金

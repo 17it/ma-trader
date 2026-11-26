@@ -71,6 +71,7 @@ def _run_backtest_sync(run_id: int, params: dict, exchange):
             rr_ratio=params.get("rr_ratio", 1.5),
             trailing_activate_r=params.get("trailing_activate_r", 0.88),
             breakeven_buffer=params.get("breakeven_buffer", 0.003),
+            trailing_ma=params.get("trailing_ma", "ma25"),
             initial_capital=params.get("initial_capital", 10_000.0),
             risk_per_trade=params.get("risk_per_trade", 0.01),
             leverage=params.get("leverage", 5),

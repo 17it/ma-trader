@@ -17,7 +17,7 @@ from typing import Callable, Dict, List, Optional
 sys.modules.setdefault("trader", sys.modules[__name__])
 sys.modules.setdefault("backend.trader", sys.modules[__name__])
 
-from strategy import BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
+from strategy import BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R, TRAILING_MA_DEFAULT, VALID_TRAILING_MAS
 from binance_ws import BinanceWSStreamer
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,7 @@ def _config_signature(cfg) -> tuple:
         getattr(cfg, "rr_ratio", 1.5),
         getattr(cfg, "trailing_activate_r", TRAILING_ACTIVATE_R),
         getattr(cfg, "breakeven_buffer", BREAKEVEN_BUFFER),
+        getattr(cfg, "trailing_ma", TRAILING_MA_DEFAULT),
     )
 
 
@@ -162,6 +163,10 @@ class TradingBot:
             )
             for c in symbol_configs
         }
+        trail_ma_by_symbol = {
+            c.symbol: str(getattr(c, "trailing_ma", None) or TRAILING_MA_DEFAULT).lower()
+            for c in symbol_configs
+        }
 
         active_symbols = [c.symbol for c in symbol_configs if getattr(c, "symbol", None)]
         if not getattr(self.ws_streamer, "_running", False):
@@ -229,6 +234,11 @@ class TradingBot:
                             float(ot.breakeven_buffer)
                             if getattr(ot, "breakeven_buffer", None) is not None
                             else be_buf_by_symbol.get(ot.symbol, BREAKEVEN_BUFFER)
+                        ),
+                        "trailing_ma": (
+                            str(ot.trailing_ma).lower()
+                            if getattr(ot, "trailing_ma", None)
+                            else trail_ma_by_symbol.get(ot.symbol, TRAILING_MA_DEFAULT)
                         ),
                         "entry_fee": float(getattr(ot, "fee", 0.0) or 0.0),
                     }
@@ -547,6 +557,9 @@ class TradingBot:
             if getattr(config, "breakeven_buffer", None) is not None
             else BREAKEVEN_BUFFER
         )
+        trailing_ma = str(getattr(config, "trailing_ma", None) or TRAILING_MA_DEFAULT).lower()
+        if trailing_ma not in VALID_TRAILING_MAS:
+            trailing_ma = TRAILING_MA_DEFAULT
 
         stop_loss, take_profit, sl_distance = MAStrategy.compute_sl_tp(
             direction=direction,
@@ -651,6 +664,7 @@ class TradingBot:
                     initial_risk=sl_distance,
                     trailing_activate_r=trailing_activate_r,
                     breakeven_buffer=breakeven_buffer,
+                    trailing_ma=trailing_ma,
                     fee=round(entry_fee, 6),
                 )
                 session.add(trade)
@@ -675,6 +689,7 @@ class TradingBot:
                     "risk_r": sl_distance,
                     "trailing_activate_r": trailing_activate_r,
                     "breakeven_buffer": breakeven_buffer,
+                    "trailing_ma": trailing_ma,
                     "entry_fee": entry_fee,
                 }
 
@@ -879,6 +894,11 @@ class TradingBot:
                 sl_updated = False
                 prev_sl = stop_loss
 
+                pos_trail_ma = str(pos.get("trailing_ma") or TRAILING_MA_DEFAULT).lower()
+                if pos_trail_ma not in VALID_TRAILING_MAS:
+                    pos_trail_ma = TRAILING_MA_DEFAULT
+                trail_ma_label = pos_trail_ma.upper()
+
                 if price is not None and risk_r > 0:
                     pos_act_r = float(
                         pos["trailing_activate_r"]
@@ -904,7 +924,7 @@ class TradingBot:
                             self.broadcast({
                                 "type": "log",
                                 "level": "info",
-                                "message": f"🔒 [{symbol}] 浮盈达 {pos_act_r:.2f}R，止损移至保本+{pos_be_buf*100:.2f}% ({stop_loss:.4f}) 并开启 MA25 移动止盈",
+                                "message": f"🔒 [{symbol}] 浮盈达 {pos_act_r:.2f}R，止损移至保本+{pos_be_buf*100:.2f}% ({stop_loss:.4f}) 并开启 {trail_ma_label} 移动止盈",
                             })
                     else:  # short
                         if price >= stop_loss:
@@ -920,14 +940,14 @@ class TradingBot:
                             self.broadcast({
                                 "type": "log",
                                 "level": "info",
-                                "message": f"🔒 [{symbol}] 浮盈达 {pos_act_r:.2f}R，止损移至保本-{pos_be_buf*100:.2f}% ({stop_loss:.4f}) 并开启 MA25 移动止盈",
+                                "message": f"🔒 [{symbol}] 浮盈达 {pos_act_r:.2f}R，止损移至保本-{pos_be_buf*100:.2f}% ({stop_loss:.4f}) 并开启 {trail_ma_label} 移动止盈",
                             })
 
                 if close_reason:
                     await self._close_trade(symbol, pos, close_reason, price)
                     continue
 
-                # 2. Only once MA25 trailing is active (>= 1.2R): tighten SL along MA25 & exit if bar closes beyond MA25
+                # 2. Only once trailing is active: tighten SL along configured MA (MA25/MA60) & exit if bar closes beyond it
                 strategy = self.strategies.get(symbol)
                 if trailing_active and strategy is not None:
                     df = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, timeframe, 100)
@@ -936,14 +956,14 @@ class TradingBot:
                         eval_df = df.iloc[:-1] if len(df) >= 2 else df
 
                         if len(eval_df) >= 1:
-                            ma25_val = float(eval_df.iloc[-1]["ma25"])
+                            trail_ma_val = float(eval_df.iloc[-1][pos_trail_ma])
                             if direction == "long":
-                                new_sl = max(stop_loss, ma25_val * 0.9995)
+                                new_sl = max(stop_loss, trail_ma_val * 0.9995)
                                 if new_sl > stop_loss:
                                     stop_loss = new_sl
                                     sl_updated = True
                             else:
-                                new_sl = min(stop_loss, ma25_val * 1.0005)
+                                new_sl = min(stop_loss, trail_ma_val * 1.0005)
                                 if new_sl < stop_loss:
                                     stop_loss = new_sl
                                     sl_updated = True
@@ -952,6 +972,7 @@ class TradingBot:
                             "direction": direction,
                             "open_time": open_time,
                             "trailing_active": True,
+                            "trailing_ma": pos_trail_ma,
                         }
                         exit_sig = strategy.check_exit(eval_df, position_dict)
                         if exit_sig:

@@ -83,6 +83,7 @@ class SymbolConfigCreate(BaseModel):
     rr_ratio: float = Field(1.5, ge=0.0, le=20.0)
     trailing_activate_r: float = Field(0.88, ge=0.1, le=10.0)
     breakeven_buffer: float = Field(0.003, ge=0.0, le=0.05)
+    trailing_ma: Literal["ma25", "ma60"] = "ma25"
     enabled: bool = True
 
     @field_validator("symbol")
@@ -105,6 +106,7 @@ class SymbolConfigUpdate(BaseModel):
     rr_ratio: Optional[float] = Field(None, ge=0.0, le=20.0)
     trailing_activate_r: Optional[float] = Field(None, ge=0.1, le=10.0)
     breakeven_buffer: Optional[float] = Field(None, ge=0.0, le=0.05)
+    trailing_ma: Optional[Literal["ma25", "ma60"]] = None
     enabled: Optional[bool] = None
 
 
@@ -119,6 +121,7 @@ class SymbolConfigResponse(BaseModel):
     rr_ratio: float
     trailing_activate_r: float = 0.88
     breakeven_buffer: float = 0.003
+    trailing_ma: str = "ma25"
     enabled: bool
 
     model_config = {"from_attributes": True}
@@ -184,6 +187,7 @@ class BacktestRunCreate(BaseModel):
     rr_ratio: float = Field(1.5, ge=0.0, le=20.0)
     trailing_activate_r: float = Field(0.88, ge=0.1, le=10.0)
     breakeven_buffer: float = Field(0.003, ge=0.0, le=0.05)
+    trailing_ma: Literal["ma25", "ma60"] = "ma25"
     initial_capital: float = Field(10000.0, gt=0, le=1e9)
     risk_per_trade: float = Field(0.01, gt=0, le=0.2)
     leverage: int = Field(5, ge=1, le=20)

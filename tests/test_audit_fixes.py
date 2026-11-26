@@ -215,21 +215,31 @@ class TestSecurityAndAPI(unittest.TestCase):
                 "risk_per_trade": 0.01,
                 "trailing_activate_r": 1.2,
                 "breakeven_buffer": 0.001,
+                "trailing_ma": "ma60",
             },
         )
         self.assertEqual(r_ok.status_code, 201)
         created = r_ok.json()
         self.assertAlmostEqual(created["trailing_activate_r"], 1.2)
         self.assertAlmostEqual(created["breakeven_buffer"], 0.001)
+        self.assertEqual(created["trailing_ma"], "ma60")
+
+        r_bad_ma = self.client.post(
+            f"/api/symbols/{created['id']}",
+            headers=self.auth_headers,
+            json={"trailing_ma": "ma99"},
+        )
+        self.assertEqual(r_bad_ma.status_code, 422)
 
         r_upd = self.client.post(
             f"/api/symbols/{created['id']}",
             headers=self.auth_headers,
-            json={"trailing_activate_r": 0.88, "breakeven_buffer": 0.003},
+            json={"trailing_activate_r": 0.88, "breakeven_buffer": 0.003, "trailing_ma": "ma25"},
         )
         self.assertEqual(r_upd.status_code, 200)
         self.assertAlmostEqual(r_upd.json()["trailing_activate_r"], 0.88)
         self.assertAlmostEqual(r_upd.json()["breakeven_buffer"], 0.003)
+        self.assertEqual(r_upd.json()["trailing_ma"], "ma25")
 
         self.assertEqual(self.client.delete(f"/api/symbols/{created['id']}", headers=self.auth_headers).status_code, 204)
 
@@ -614,11 +624,13 @@ class TestBacktesterParityAndCache(unittest.TestCase):
         self.assertEqual(s4["confirm"], 3)
         self.assertNotIn("pending", s4)
 
-        # 4. Exit logic: NO MA60 exit when not trailing; exits on MA25 when trailing
-        self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=95.0, ma25=100.0, trailing_active=False))
-        self.assertEqual(MAStrategy.evaluate_exit_bar("long", close=99.0, ma25=100.0, trailing_active=True), "ma25_trailing")
-        self.assertEqual(MAStrategy.evaluate_exit_bar("short", close=101.0, ma25=100.0, trailing_active=True), "ma25_trailing")
-        self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=101.0, ma25=100.0, trailing_active=True))
+        # 4. Exit logic: NO MA exit when not trailing; exits on configured MA25 or MA60 when trailing
+        self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=95.0, ma_val=100.0, trailing_active=False))
+        self.assertEqual(MAStrategy.evaluate_exit_bar("long", close=99.0, ma_val=100.0, trailing_active=True, trailing_ma="ma25"), "ma25_trailing")
+        self.assertEqual(MAStrategy.evaluate_exit_bar("short", close=101.0, ma_val=100.0, trailing_active=True, trailing_ma="ma25"), "ma25_trailing")
+        self.assertEqual(MAStrategy.evaluate_exit_bar("long", close=99.0, ma_val=100.0, trailing_active=True, trailing_ma="ma60"), "ma60_trailing")
+        self.assertEqual(MAStrategy.evaluate_exit_bar("short", close=101.0, ma_val=100.0, trailing_active=True, trailing_ma="ma60"), "ma60_trailing")
+        self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=101.0, ma_val=100.0, trailing_active=True, trailing_ma="ma60"))
 
         # 5. HTF trend stays 'long' on healthy pullback (close < ma7 while ma7 > ma25 > ma60)
         self.assertEqual(MAStrategy.check_htf_scalars(close=60093.2, ma7=60184.0, ma25=59657.0, ma60=59059.0), "long")

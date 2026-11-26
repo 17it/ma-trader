@@ -16,9 +16,9 @@ import numpy as np
 import pandas as pd
 
 try:
-    from backend.strategy import ATR_PERIOD, BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
+    from backend.strategy import ATR_PERIOD, BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R, TRAILING_MA_DEFAULT, VALID_TRAILING_MAS
 except ImportError:
-    from strategy import ATR_PERIOD, BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
+    from strategy import ATR_PERIOD, BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R, TRAILING_MA_DEFAULT, VALID_TRAILING_MAS
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,7 @@ class Backtester:
         rr_ratio: float = 1.5,
         trailing_activate_r: float = TRAILING_ACTIVATE_R,
         breakeven_buffer: float = BREAKEVEN_BUFFER,
+        trailing_ma: str = TRAILING_MA_DEFAULT,
         initial_capital: float = 10_000.0,
         risk_per_trade: float = 0.01,
         leverage: int = 5,
@@ -263,6 +264,10 @@ class Backtester:
         while sim_start_idx < len(ltf_ts) and int(ltf_ts[sim_start_idx]) < since_ms:
             sim_start_idx += 1
 
+        trailing_ma_key = str(trailing_ma or TRAILING_MA_DEFAULT).lower()
+        if trailing_ma_key not in VALID_TRAILING_MAS:
+            trailing_ma_key = TRAILING_MA_DEFAULT
+
         for i in range(sim_start_idx, len(ltf_ts)):
             ts = int(ltf_ts[i])
             o, h, l, c = ltf_open[i], ltf_high[i], ltf_low[i], ltf_close[i]
@@ -273,7 +278,9 @@ class Backtester:
                 equity_ts.append(ts)
                 continue
 
-            # ---- 1. Manage open trade (0.88R -> BE+0.3% + MA25 trailing, aligned with TradingBot) ----
+            trail_ma_val = ma60 if trailing_ma_key == "ma60" else ma25
+
+            # ---- 1. Manage open trade (0.88R -> BE+0.3% + MA25/MA60 trailing, aligned with TradingBot) ----
             if in_trade:
                 if trade_direction == "long":
                     if l <= trade_sl:
@@ -287,11 +294,11 @@ class Backtester:
                             )
                             trailing_active = True
                         if trailing_active:
-                            exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma25, True)
+                            exit_sig = MAStrategy.evaluate_exit_bar("long", c, trail_ma_val, True, trailing_ma=trailing_ma_key)
                             if exit_sig:
                                 record_close(c, ts, exit_sig)
                             else:
-                                trade_sl = max(trade_sl, ma25 * 0.9995)
+                                trade_sl = max(trade_sl, trail_ma_val * 0.9995)
                 else:  # short
                     if h >= trade_sl:
                         reason = "trailing_stop" if trailing_active else "stop_loss"
@@ -304,11 +311,11 @@ class Backtester:
                             )
                             trailing_active = True
                         if trailing_active:
-                            exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma25, True)
+                            exit_sig = MAStrategy.evaluate_exit_bar("short", c, trail_ma_val, True, trailing_ma=trailing_ma_key)
                             if exit_sig:
                                 record_close(c, ts, exit_sig)
                             else:
-                                trade_sl = min(trade_sl, ma25 * 1.0005)
+                                trade_sl = min(trade_sl, trail_ma_val * 1.0005)
 
             # ---- 2. Always feed MAStrategy bar-close signal state machine ----
             htf_dir = get_closed_htf_direction(ts)

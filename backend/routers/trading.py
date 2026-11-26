@@ -421,6 +421,11 @@ async def simulate_trade(
         if sym_cfg and getattr(sym_cfg, "breakeven_buffer", None) is not None
         else 0.003
     )
+    trailing_ma = (
+        str(sym_cfg.trailing_ma).lower()
+        if sym_cfg and getattr(sym_cfg, "trailing_ma", None)
+        else "ma25"
+    )
 
     sl_pct = 0.005
     if direction == "long":
@@ -458,6 +463,7 @@ async def simulate_trade(
         initial_risk=price_risk,
         trailing_activate_r=trailing_activate_r,
         breakeven_buffer=breakeven_buffer,
+        trailing_ma=trailing_ma,
         fee=0.0,
     )
     db.add(trade)
@@ -486,6 +492,7 @@ async def simulate_trade(
             "risk_r": price_risk,
             "trailing_activate_r": trailing_activate_r,
             "breakeven_buffer": breakeven_buffer,
+            "trailing_ma": trailing_ma,
         }
 
     dir_label = "做多" if direction == "long" else "做空"

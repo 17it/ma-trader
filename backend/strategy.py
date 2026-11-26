@@ -24,6 +24,8 @@ ATR_MA25_BIAS_MULT = 2.5
 WICK_BODY_MULT = 1.5
 TRAILING_ACTIVATE_R = 0.88
 BREAKEVEN_BUFFER = 0.003  # +0.3% / -0.3% profit-lock buffer
+TRAILING_MA_DEFAULT = "ma25"
+VALID_TRAILING_MAS = {"ma25", "ma60"}
 DEFAULT_FEE_RATE = 0.0004
 DEFAULT_SLIPPAGE_RATE = 0.0001
 
@@ -233,20 +235,23 @@ class MAStrategy:
     def evaluate_exit_bar(
         direction: str,
         close: float,
-        ma25: float,
+        ma_val: float,
         trailing_active: bool,
+        trailing_ma: str = TRAILING_MA_DEFAULT,
     ) -> Optional[str]:
         """
         Indicator-based bar-close exit rule shared by live and backtest:
-          - Before trailing activates (< 1.2R): NO premature MA60 exit.
-          - After trailing activates (>= 1.2R): exit when a candle closes beyond MA25.
+          - Before trailing activates (< trailing_activate_r): NO premature MA exit.
+          - After trailing activates: exit when a candle closes beyond the configured trailing MA (MA25 or MA60).
         """
-        if not trailing_active or math.isnan(close) or math.isnan(ma25):
+        if not trailing_active or math.isnan(close) or math.isnan(ma_val):
             return None
-        if direction == "long" and close < ma25:
-            return "ma25_trailing"
-        if direction == "short" and close > ma25:
-            return "ma25_trailing"
+        ma_key = str(trailing_ma or TRAILING_MA_DEFAULT).lower()
+        reason = "ma60_trailing" if ma_key == "ma60" else "ma25_trailing"
+        if direction == "long" and close < ma_val:
+            return reason
+        if direction == "short" and close > ma_val:
+            return reason
         return None
 
     def evaluate_bar(
@@ -385,12 +390,16 @@ class MAStrategy:
             return None
         if not bool(position.get("trailing_active", False)):
             return None
-        if "ma25" not in df.columns:
+        trailing_ma = str(position.get("trailing_ma") or TRAILING_MA_DEFAULT).lower()
+        if trailing_ma not in VALID_TRAILING_MAS:
+            trailing_ma = TRAILING_MA_DEFAULT
+        if trailing_ma not in df.columns:
             df = self.calculate_ma(df)
         last = df.iloc[-1]
         return self.evaluate_exit_bar(
             direction=str(position.get("direction") or ""),
             close=float(last["close"]),
-            ma25=float(last["ma25"]),
+            ma_val=float(last[trailing_ma]),
             trailing_active=True,
+            trailing_ma=trailing_ma,
         )
