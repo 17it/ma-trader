@@ -151,7 +151,7 @@ async def add_security_and_cache_headers(request, call_next):
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
         "font-src 'self' data: https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
         "img-src 'self' data: blob:; "
-        "connect-src 'self' ws: wss: https://*.binance.com https://*.binance.vision;",
+        "connect-src 'self' ws: wss: https://*.binance.com https://*.binance.vision https://cdn.jsdelivr.net;",
     )
     path = request.url.path
     if path == "/" or path.endswith((".html", ".js", ".css")) or "/js/" in path or "/css/" in path:

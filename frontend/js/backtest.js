@@ -259,6 +259,7 @@ const BacktestManager = (() => {
       const dirIcon  = tr.direction === 'long' ? '<span style="color:#3fb950">▲ 多</span>' : '<span style="color:#f85149">▼ 空</span>';
       const entryTimeStr = formatTradeTime(tr.entry_time || tr.open_time || tr.time);
       const exitTimeStr  = formatTradeTime(tr.exit_time || tr.close_time);
+      const feeStr       = tr.fee != null ? `$${Number(tr.fee).toFixed(2)}` : '—';
       const tr2 = document.createElement('tr');
       tr2.innerHTML = `
         <td>${dirIcon}</td>
@@ -267,6 +268,7 @@ const BacktestManager = (() => {
         <td class="text-secondary">${exitTimeStr}</td>
         <td>${tr.exit_price?.toFixed(4) ?? '—'}</td>
         <td style="color:${pnlColor};font-weight:600">${tr.pnl != null ? (tr.pnl >= 0 ? '+' : '') + tr.pnl.toFixed(2) : '—'}</td>
+        <td class="text-secondary">${feeStr}</td>
       `;
       tbody.appendChild(tr2);
     });
@@ -348,7 +350,7 @@ const BacktestManager = (() => {
     const tbody = document.getElementById('btHistoryBody');
     tbody.innerHTML = '';
     if (!runs || runs.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">暂无历史记录</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="12" class="text-center text-muted py-3">暂无历史记录</td></tr>';
       return;
     }
     runs.forEach(run => {
@@ -361,11 +363,17 @@ const BacktestManager = (() => {
         failed:  '<span class="badge-stopped">失败</span>'
       }[run.status] || escapeHtml(run.status);
 
+      const tradesCount = results?.total_trades ?? (Array.isArray(results?.trades) ? results.trades.length : null);
+      const tradesStr   = tradesCount != null ? tradesCount : '—';
       const pnl    = results?.total_pnl;
       const pnlStr = pnl != null ? `<span style="color:${pnl >= 0 ? '#3fb950' : '#f85149'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>` : '—';
       const wr     = results?.win_rate;
       const wrVal  = wr != null ? (wr > 1 ? wr : wr * 100).toFixed(1) : '—';
       const wrStr  = wrVal !== '—' ? `${wrVal}%` : '—';
+      const maxDd  = results?.max_drawdown;
+      const ddStr  = maxDd != null ? `<span style="color:#f85149">${Number(maxDd).toFixed(2)}%</span>` : '—';
+      const totalFees = results?.total_fees;
+      const feesStr   = totalFees != null ? `<span class="text-secondary">$${Number(totalFees).toFixed(2)}</span>` : '—';
 
       const titleStr = run.title ? `<span class="fw-semibold">${escapeHtml(run.title)}</span>` : '<span class="text-secondary">—</span>';
       const rangeStr = escapeHtml(`${_fmtHistoryDt(run.start_date)} ~ ${_fmtHistoryDt(run.end_date)}`);
@@ -380,8 +388,11 @@ const BacktestManager = (() => {
         <td>${escapeHtml(run.timeframe)}</td>
         <td class="small">${rangeStr}</td>
         <td>${statusBadge}</td>
+        <td>${tradesStr}</td>
         <td>${pnlStr}</td>
         <td>${wrStr}</td>
+        <td>${ddStr}</td>
+        <td>${feesStr}</td>
         <td class="text-end pe-3">
           <div class="d-inline-flex gap-1">
             <button class="btn btn-xs btn-outline-primary" onclick="BacktestManager.viewRun(${runIdNum})">查看</button>
