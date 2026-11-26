@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0B132B"/>
+      <stop offset="55%" stop-color="#132245"/>
+      <stop offset="100%" stop-color="#1B325F"/>
+    </linearGradient>
+    <radialGradient id="topGlow" cx="80%" cy="18%" r="60%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="borderGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#10B981" stop-opacity="0.35"/>
+    </linearGradient>
+    <linearGradient id="maSlow" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#D97706"/>
+      <stop offset="100%" stop-color="#FCD34D"/>
+    </linearGradient>
+    <linearGradient id="maFast" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="55%" stop-color="#2DD4BF"/>
+      <stop offset="100%" stop-color="#38BDF8"/>
+    </linearGradient>
+    <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#10B981" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded squircle container -->
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#bgGrad)"/>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#topGlow)"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="14.25" fill="none" stroke="url(#borderGrad)" stroke-width="1.5"/>
+
+  <!-- Subtle background candlesticks -->
+  <g opacity="0.24">
+    <line x1="16" y1="32" x2="16" y2="52" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="13.5" y="37" width="5" height="10" rx="1.5" fill="#94A3B8"/>
+
+    <line x1="30" y1="22" x2="30" y2="48" stroke="#34D399" stroke-width="2" stroke-linecap="round"/>
+    <rect x="27.5" y="27" width="5" height="14" rx="1.5" fill="#34D399"/>
+
+    <line x1="45" y1="14" x2="45" y2="42" stroke="#38BDF8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="42.5" y="19" width="5" height="15" rx="1.5" fill="#38BDF8"/>
+  </g>
+
+  <!-- Soft area glow under fast MA -->
+  <path d="M10 47 L22 33 L32 40 L51 17 L51 52 L10 52 Z" fill="url(#areaFill)"/>
+
+  <!-- Slow MA (MA25 golden curve) -->
+  <path d="M10 50 Q27 45 52 29" fill="none" stroke="url(#maSlow)" stroke-width="4.5" stroke-linecap="round"/>
+
+  <!-- Fast MA (MA7 emerald-cyan breakout M-wave) -->
+  <path d="M10 46 L22 31 L32 38 L50.5 17.5" fill="none" stroke="url(#maFast)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Luminous breakout node -->
+  <circle cx="51" cy="17" r="6.5" fill="#38BDF8" opacity="0.28"/>
+  <circle cx="51" cy="17" r="3.6" fill="#F0F9FF" stroke="#38BDF8" stroke-width="1.8"/>
+</svg>

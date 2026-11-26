@@ -29,7 +29,8 @@ import database as db_mod  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
-# Rebind database module to isolated temporary DB
+# Rebind database module to isolated temporary DB (and alias backend.database so no dual-import can touch data/trading.db)
+sys.modules["backend.database"] = db_mod
 db_mod.DB_PATH = _TMP_DB
 db_mod.DATABASE_URL = f"sqlite:///{_TMP_DB}"
 db_mod.INITIAL_PASSWORD_FILE = os.path.join(_TMP_DIR.name, "admin_initial_password.txt")
@@ -315,6 +316,60 @@ class TestSecurityAndAPI(unittest.TestCase):
         self.assertNotIn("user:pass", cleaned)
         self.assertIn("/bot<REDACTED>", cleaned)
         self.assertIn("://***@1.2.3.4:1080", cleaned)
+
+    def test_08_system_logs_pagination_and_keyword_filter(self):
+        # Verify TradingBot.broadcast automatically persists signal/log events
+        from trader import TradingBot
+        bot = TradingBot(
+            db_session_factory=db_mod.SessionLocal,
+            data_feed=MagicMock(),
+            executor=MagicMock(is_paper=True),
+            notifier=MagicMock(),
+            ws_streamer=MagicMock(),
+            is_paper=True,
+        )
+        bot.broadcast({
+            "type": "signal",
+            "symbol": "SOLUSDT",
+            "direction": "long",
+            "confirm": 3,
+            "max_confirm": 3,
+            "blocked_by_wick": True,
+        })
+
+        db_mod.record_system_log("[信号] BTCUSDT LONG 确认 1/3", level="info", symbol="BTCUSDT")
+        db_mod.record_system_log("[信号] ETHUSDT SHORT 确认 2/3", level="warning", symbol="ETHUSDT")
+        db_mod.record_system_log("止损触发 BTCUSDT", level="error", symbol="BTCUSDT")
+
+        # Broadcasted signal persisted & searchable by keyword
+        r_sol = self.client.get("/api/system-logs?keyword=反向长影线", headers=self.auth_headers)
+        self.assertEqual(r_sol.status_code, 200)
+        self.assertGreaterEqual(r_sol.json()["total"], 1)
+        self.assertEqual(r_sol.json()["items"][0]["symbol"], "SOLUSDT")
+
+        # Keyword filter (case-insensitive)
+        r_kw = self.client.get("/api/system-logs?keyword=btcusdt&page=1&page_size=20", headers=self.auth_headers)
+        self.assertEqual(r_kw.status_code, 200)
+        body = r_kw.json()
+        self.assertGreaterEqual(body["total"], 2)
+        self.assertTrue(all("BTCUSDT" in (it["message"] + (it["symbol"] or "")) for it in body["items"]))
+
+        # Level + keyword filter
+        r_lv = self.client.get("/api/system-logs?keyword=止损&level=error", headers=self.auth_headers)
+        self.assertEqual(r_lv.status_code, 200)
+        self.assertEqual(r_lv.json()["total"], 1)
+
+        # Pagination
+        r_pg = self.client.get("/api/system-logs?page=1&page_size=1", headers=self.auth_headers)
+        self.assertEqual(r_pg.status_code, 200)
+        self.assertEqual(len(r_pg.json()["items"]), 1)
+        self.assertGreaterEqual(r_pg.json()["total_pages"], 3)
+
+        # Clear
+        r_clr = self.client.post("/api/system-logs/clear", headers=self.auth_headers)
+        self.assertEqual(r_clr.status_code, 200)
+        r_empty = self.client.get("/api/system-logs", headers=self.auth_headers)
+        self.assertEqual(r_empty.json()["total"], 0)
 
 
 class TestLiveExecutionSafeguards(unittest.TestCase):

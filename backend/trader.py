@@ -427,6 +427,7 @@ class TradingBot:
                             "direction": signal["direction"],
                             "confirm": signal["confirm"],
                             "max_confirm": signal["max_confirm"],
+                            "blocked_by_wick": bool(signal.get("blocked_by_wick")),
                         })
                     else:
                         self.confirm_counts[symbol] = signal["confirm"]
@@ -436,6 +437,7 @@ class TradingBot:
                             "direction": signal["direction"],
                             "confirm": signal["confirm"],
                             "max_confirm": signal["max_confirm"],
+                            "blocked_by_wick": bool(signal.get("blocked_by_wick")),
                         })
                         if symbol not in self.positions:
                             await self._handle_signal(symbol, signal, closed_df, symbol_config)
@@ -1065,11 +1067,67 @@ class TradingBot:
             self.ws_callbacks.append(callback)
 
     def broadcast(self, message: dict):
+        self._persist_system_log_event(message)
         for cb in list(self.ws_callbacks):
             try:
                 cb(message)
             except Exception as exc:
                 logger.warning("ws_callback error: %s", exc)
+
+    def _persist_system_log_event(self, message: dict) -> None:
+        """Persist homepage-style system log events (signals, logs, trade notices) into SQLite."""
+        if not isinstance(message, dict):
+            return
+        mtype = message.get("type")
+        if mtype not in {"signal", "log", "trade_opened", "trade_closed"}:
+            return
+        try:
+            try:
+                from database import record_system_log
+            except ImportError:
+                from backend.database import record_system_log
+
+            log_msg = None
+            log_level = "info"
+            log_symbol = None
+
+            if mtype == "signal":
+                log_symbol = message.get("symbol")
+                direction = str(message.get("direction") or "").upper()
+                confirm = message.get("confirm", 0)
+                max_c = message.get("max_confirm", 2)
+                suffix = "（反向长影线拦截，暂缓开仓）" if message.get("blocked_by_wick") else ""
+                log_msg = f"[信号] {log_symbol} {direction} 确认 {confirm}/{max_c}{suffix}"
+                log_level = "info"
+            elif mtype == "log":
+                text_msg = str(message.get("message") or "").strip()
+                if text_msg:
+                    log_msg = text_msg
+                    log_level = str(message.get("level") or "info")
+                    log_symbol = message.get("symbol")
+            elif mtype == "trade_opened":
+                t = message.get("trade") or {}
+                log_symbol = t.get("symbol")
+                d = str(t.get("direction") or "").upper()
+                log_msg = f"[开仓通知] {d} {log_symbol} 价格:{t.get('entry_price')} 止损:{t.get('stop_loss')} 止盈:{t.get('take_profit')}"
+                log_level = "success"
+            elif mtype == "trade_closed":
+                t = message.get("trade") or {}
+                log_symbol = t.get("symbol")
+                pnl = t.get("pnl")
+                pnl_str = f"{'+' if pnl >= 0 else ''}${pnl:.2f}" if isinstance(pnl, (int, float)) else ""
+                log_level = "success" if (isinstance(pnl, (int, float)) and pnl >= 0) else "warning"
+                log_msg = f"[平仓通知] {log_symbol} ({t.get('close_reason') or '平仓'}) 盈亏:{pnl_str}"
+
+            if log_msg:
+                session = self.db_session_factory() if callable(self.db_session_factory) else None
+                try:
+                    record_system_log(log_msg, level=log_level, symbol=log_symbol, db=session)
+                finally:
+                    if session is not None:
+                        session.close()
+        except Exception as exc:
+            logger.debug("Failed to persist system log event: %s", exc)
 
     def get_status(self) -> dict:
         return {

@@ -29,7 +29,14 @@ const AppController = (() => {
     logsPage: 1,
     logsPageSize: 20,
     logsTotal: 0,
-    logsTotalPages: 1
+    logsTotalPages: 1,
+    sysLogs: [],
+    sysLogsLevelFilter: '',
+    sysLogsKeyword: '',
+    sysLogsPage: 1,
+    sysLogsPageSize: 20,
+    sysLogsTotal: 0,
+    sysLogsTotalPages: 1
   };
 
   // ─── Initialization ────────────────────────────────────────────────
@@ -75,6 +82,7 @@ const AppController = (() => {
     try { await checkBotStatus(); } catch (e) { console.warn(e); }
     try { await loadTrades(); } catch (e) { console.warn(e); }
     try { await loadStats(); } catch (e) { console.warn(e); }
+    try { await hydrateHomepageLogBox(); } catch (e) { console.warn(e); }
 
     // Ensure chart is loaded
     if (!state.klinesData || state.klinesData.length === 0) {
@@ -193,6 +201,68 @@ const AppController = (() => {
     if (btnRefreshLogs) btnRefreshLogs.addEventListener('click', loadOperationLogs);
     const btnClearLogs = document.getElementById('btnClearLogs');
     if (btnClearLogs) btnClearLogs.addEventListener('click', clearOperationLogs);
+
+    // System Logs tab & filters
+    const tabSysLogsLink = document.querySelector('a[href="#tabSystemLogs"]');
+    if (tabSysLogsLink) {
+      tabSysLogsLink.addEventListener('shown.bs.tab', loadSystemLogs);
+    }
+    const sysLevelWrap = document.getElementById('sysLogsLevelFilter');
+    if (sysLevelWrap) {
+      sysLevelWrap.querySelectorAll('button[data-sys-level]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.sysLogsLevelFilter = btn.getAttribute('data-sys-level') || '';
+          state.sysLogsPage = 1;
+          sysLevelWrap.querySelectorAll('button[data-sys-level]').forEach(b => {
+            b.className = (b === btn) ? 'btn btn-primary active' : 'btn btn-outline-secondary';
+          });
+          loadSystemLogs();
+        });
+      });
+    }
+    const sysKwInput = document.getElementById('sysLogKeyword');
+    let sysKwTimer = null;
+    if (sysKwInput) {
+      sysKwInput.addEventListener('input', () => {
+        clearTimeout(sysKwTimer);
+        sysKwTimer = setTimeout(() => {
+          state.sysLogsKeyword = sysKwInput.value.trim();
+          state.sysLogsPage = 1;
+          loadSystemLogs();
+        }, 300);
+      });
+      sysKwInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          clearTimeout(sysKwTimer);
+          state.sysLogsKeyword = sysKwInput.value.trim();
+          state.sysLogsPage = 1;
+          loadSystemLogs();
+        }
+      });
+    }
+    const btnSearchSysLogs = document.getElementById('btnSearchSysLogs');
+    if (btnSearchSysLogs) {
+      btnSearchSysLogs.addEventListener('click', () => {
+        state.sysLogsKeyword = (document.getElementById('sysLogKeyword')?.value || '').trim();
+        state.sysLogsPage = 1;
+        loadSystemLogs();
+      });
+    }
+    const btnResetSysLogKw = document.getElementById('btnResetSysLogKw');
+    if (btnResetSysLogKw) {
+      btnResetSysLogKw.addEventListener('click', () => {
+        const input = document.getElementById('sysLogKeyword');
+        if (input) input.value = '';
+        state.sysLogsKeyword = '';
+        state.sysLogsPage = 1;
+        loadSystemLogs();
+      });
+    }
+    const btnRefreshSysLogs = document.getElementById('btnRefreshSysLogs');
+    if (btnRefreshSysLogs) btnRefreshSysLogs.addEventListener('click', loadSystemLogs);
+    const btnClearSysLogs = document.getElementById('btnClearSysLogs');
+    if (btnClearSysLogs) btnClearSysLogs.addEventListener('click', clearSystemLogs);
 
     // Theme toggle (Day / Night mode)
     const btnThemeToggle = document.getElementById('btnThemeToggle');
@@ -1123,6 +1193,140 @@ const AppController = (() => {
     }
   }
 
+  // ─── System Logs (persistent homepage logs with pagination + keyword filter) ─
+  let _sysLogsRefreshTimer = null;
+  function _scheduleSystemLogsRefresh() {
+    const pane = document.getElementById('tabSystemLogs');
+    if (!pane || !pane.classList.contains('active')) return;
+    clearTimeout(_sysLogsRefreshTimer);
+    _sysLogsRefreshTimer = setTimeout(() => loadSystemLogs(), 250);
+  }
+
+  async function hydrateHomepageLogBox() {
+    const box = document.getElementById('logBox');
+    if (!box || box.children.length > 0) return;
+    try {
+      const res = await fetch('/api/system-logs?page=1&page_size=25');
+      if (!res.ok) return;
+      const data = await res.json();
+      const items = Array.isArray(data?.items) ? data.items.slice().reverse() : [];
+      items.forEach(item => {
+        const line = document.createElement('div');
+        const lvl = String(item.level || 'info').replace(/[^a-z0-9_-]/gi, '');
+        const timeText = _fmtLogTime(item.created_at).slice(6); // HH:MM:SS
+        line.className = 'log-line ' + lvl;
+        line.innerHTML = `<span class="text-secondary">[${_escapeHtml(timeText)}]</span> ${_escapeHtml(item.message)}`;
+        box.appendChild(line);
+      });
+      box.scrollTop = box.scrollHeight;
+    } catch (err) {
+      console.warn('[App] Hydrate homepage logBox error:', err);
+    }
+  }
+
+  async function loadSystemLogs() {
+    try {
+      let url = `/api/system-logs?page=${state.sysLogsPage}&page_size=${state.sysLogsPageSize}`;
+      if (state.sysLogsLevelFilter) {
+        url += `&level=${encodeURIComponent(state.sysLogsLevelFilter)}`;
+      }
+      if (state.sysLogsKeyword) {
+        url += `&keyword=${encodeURIComponent(state.sysLogsKeyword)}`;
+      }
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      const items = Array.isArray(data?.items) ? data.items : [];
+      state.sysLogs = items;
+      state.sysLogsTotal = data?.total ?? items.length;
+      state.sysLogsPage = data?.page ?? state.sysLogsPage;
+      state.sysLogsTotalPages = data?.total_pages ?? 1;
+      renderSystemLogs(state.sysLogs);
+      renderSystemLogsPagination();
+    } catch (err) {
+      console.warn('[App] Load system logs error:', err);
+    }
+  }
+
+  function goToSystemLogsPage(page) {
+    const target = Math.max(1, Math.min(page, state.sysLogsTotalPages || 1));
+    if (target === state.sysLogsPage) return;
+    state.sysLogsPage = target;
+    loadSystemLogs();
+  }
+
+  function renderSystemLogsPagination() {
+    if (typeof window.renderTablePagination === 'function') {
+      window.renderTablePagination({
+        infoEl: document.getElementById('sysLogsPageInfo'),
+        ulEl: document.getElementById('sysLogsPagination'),
+        page: state.sysLogsPage || 1,
+        totalPages: state.sysLogsTotalPages || 1,
+        pageSize: state.sysLogsPageSize,
+        total: state.sysLogsTotal ?? 0,
+        onPageChange: goToSystemLogsPage
+      });
+    }
+  }
+
+  function _highlightKeyword(text, kw) {
+    const escaped = _escapeHtml(text);
+    if (!kw) return escaped;
+    const escapedKw = _escapeHtml(kw).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return escaped.replace(new RegExp(`(${escapedKw})`, 'gi'), '<mark class="px-1 rounded">$1</mark>');
+  }
+
+  function renderSystemLogs(logs) {
+    const tbody = document.getElementById('sysLogsTableBody');
+    const countEl = document.getElementById('sysLogCount');
+    if (countEl) countEl.textContent = `共 ${state.sysLogsTotal ?? (logs || []).length} 条`;
+    if (!tbody) return;
+
+    if (!logs || logs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="text-center text-secondary py-4">暂无系统日志</td></tr>';
+      return;
+    }
+
+    const levelMeta = {
+      info:    { label: '信息', cls: 'bg-info-subtle text-info border border-info-subtle' },
+      success: { label: '成功', cls: 'bg-success-subtle text-success border border-success-subtle' },
+      warning: { label: '警告', cls: 'bg-warning-subtle text-warning border border-warning-subtle' },
+      error:   { label: '错误', cls: 'bg-danger-subtle text-danger border border-danger-subtle' }
+    };
+    const kw = state.sysLogsKeyword || '';
+
+    tbody.innerHTML = logs.map(log => {
+      const meta = levelMeta[log.level] || levelMeta.info;
+      const symHtml = log.symbol
+        ? `<span class="fw-semibold">${_highlightKeyword(log.symbol, kw)}</span>`
+        : '<span class="text-secondary">—</span>';
+      return `
+        <tr>
+          <td class="ps-3 py-3 text-secondary">#${Number(log.id) || 0}</td>
+          <td class="py-3 text-secondary font-monospace small">${_fmtLogTime(log.created_at)}</td>
+          <td class="py-3"><span class="badge ${meta.cls}">${meta.label}</span></td>
+          <td class="py-3">${symHtml}</td>
+          <td class="pe-3 py-3 font-monospace small">${_highlightKeyword(log.message, kw)}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  async function clearSystemLogs() {
+    if (!confirm('确定清空所有系统日志吗？此操作不可撤销。')) return;
+    try {
+      const res = await fetch('/api/system-logs/clear', { method: 'POST' });
+      if (res.ok) {
+        state.sysLogsPage = 1;
+        loadSystemLogs();
+        const box = document.getElementById('logBox');
+        if (box) box.innerHTML = '';
+      }
+    } catch (err) {
+      console.error('[App] Clear system logs error:', err);
+    }
+  }
+
   function _fmtTradeTime(isoStr) {
     if (!isoStr) return '—';
     const s = String(isoStr).trim();
@@ -1286,6 +1490,7 @@ const AppController = (() => {
       box.removeChild(box.firstChild);
     }
     box.scrollTop = box.scrollHeight;
+    _scheduleSystemLogsRefresh();
   }
 
   // ─── Binance Official Realtime Kline WebSocket ─────────────────────
@@ -1544,7 +1749,8 @@ const AppController = (() => {
             bar.className = 'progress-bar signal-progress-bar ' + (isLong ? 'bg-success' : 'bg-danger');
           }
         }
-        appendLog(`[信号] ${msg.symbol} ${msg.direction.toUpperCase()} 确认 ${msg.confirm}/${msg.max_confirm}`, 'info');
+        const wickNote = msg.blocked_by_wick ? '（反向长影线过滤，等待下一根确认）' : '';
+        appendLog(`[信号] ${msg.symbol} ${msg.direction.toUpperCase()} 确认 ${msg.confirm}/${msg.max_confirm}${wickNote}`, 'info');
         break;
       }
 

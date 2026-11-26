@@ -247,3 +247,25 @@ class OperationLogPageResponse(BaseModel):
     page: int = 1
     page_size: int = 20
     total_pages: int = 1
+
+
+# ---------------------------------------------------------------------------
+# System Logs
+# ---------------------------------------------------------------------------
+
+class SystemLogResponse(BaseModel):
+    id: int
+    level: str
+    symbol: Optional[str] = None
+    message: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class SystemLogPageResponse(BaseModel):
+    items: List[SystemLogResponse] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+    total_pages: int = 1

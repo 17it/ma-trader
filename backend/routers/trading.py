@@ -13,13 +13,23 @@ from typing import Optional
 import ccxt
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from database import get_db, Trade, SymbolConfig, OperationLog, record_operation_log
+from database import (
+    get_db,
+    Trade,
+    SymbolConfig,
+    OperationLog,
+    SystemLog,
+    record_operation_log,
+    record_system_log,
+)
 from models import (
     ManualCloseRequest,
     OperationLogPageResponse,
     SimulateTradeRequest,
+    SystemLogPageResponse,
     TradeResponse,
     TradingStatus,
     VALID_TIMEFRAMES,
@@ -482,6 +492,12 @@ async def simulate_trade(
         mode="paper",
         db=db,
     )
+    record_system_log(
+        f"[模拟开仓] {direction.upper()} {symbol} 价格:{entry_price} 止损:{sl:.4f} 止盈:{tp:.4f}",
+        level="success",
+        symbol=symbol,
+        db=db,
+    )
 
     ws_manager = _get_ws_manager(request)
     if ws_manager is not None:
@@ -588,6 +604,12 @@ async def manual_close_trade(
         level="success" if trade.pnl >= 0 else "warning",
         symbol=trade.symbol,
         mode="paper" if trade.is_paper else "live",
+        db=db,
+    )
+    record_system_log(
+        f"[手动平仓] {trade.symbol} #{trade.id} 出场:{exit_price} 盈亏:{pnl_sign}${trade.pnl:.2f} ({pnl_sign}{trade.pnl_pct:.2f}%)",
+        level="success" if trade.pnl >= 0 else "warning",
+        symbol=trade.symbol,
         db=db,
     )
 
@@ -821,5 +843,56 @@ def list_operation_logs(
 def clear_operation_logs(db: Session = Depends(get_db)):
     """Clear all operation logs."""
     deleted = db.query(OperationLog).delete()
+    db.commit()
+    return {"status": "cleared", "deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# System Logs (persistent homepage system/signal logs with keyword search)
+# ---------------------------------------------------------------------------
+
+@router.get("/system-logs", response_model=SystemLogPageResponse)
+def list_system_logs(
+    keyword: Optional[str] = Query(None, max_length=100, description="按关键字模糊筛选日志内容或交易对"),
+    level: Optional[str] = Query(None, description="按级别筛选: info, success, warning, error"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Return paginated persistent system logs ordered newest first, with keyword & level filters."""
+    q = db.query(SystemLog)
+    if level and level.strip():
+        q = q.filter(SystemLog.level == level.strip().lower())
+    if keyword and keyword.strip():
+        kw = f"%{keyword.strip()}%"
+        q = q.filter(
+            or_(
+                SystemLog.message.ilike(kw),
+                SystemLog.symbol.ilike(kw),
+            )
+        )
+    total = q.count()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current_page = min(page, total_pages)
+    items = (
+        q.order_by(SystemLog.id.desc())
+        .offset((current_page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return SystemLogPageResponse(
+        items=items,
+        total=total,
+        page=current_page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
+
+
+@router.delete("/system-logs")
+@router.post("/system-logs/clear")
+def clear_system_logs(db: Session = Depends(get_db)):
+    """Clear all persistent system logs."""
+    deleted = db.query(SystemLog).delete()
     db.commit()
     return {"status": "cleared", "deleted": deleted}

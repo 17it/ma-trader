@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MA Trader — 自动交易系统</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261126" />
+  <link rel="shortcut icon" href="/favicon.ico" />
+  <meta name="theme-color" content="#0B132B" />
   <script>
     // 立即应用保存的日间/夜间模式主题，避免闪屏（同时兼容 Bootstrap 与 Element Plus dark 模式）
     (function() {
@@ -66,8 +69,8 @@
   <button class="btn btn-sm" id="btnToggleSidebar" type="button" title="展开/收起左侧交易对栏">
     <i class="fa-solid fa-bars"></i>
   </button>
-  <span class="navbar-brand mb-0 fw-bold fs-5 me-2">
-    <i class="fa-solid fa-chart-line me-2 text-accent-blue"></i>MA Trader
+  <span class="navbar-brand mb-0 fw-bold fs-5 me-2 d-inline-flex align-items-center">
+    <img src="/static/favicon.svg?v=20261126" alt="MA Trader" width="24" height="24" class="me-2" style="border-radius: 6px;" />MA Trader
   </span>
 
   <div class="d-flex align-items-center gap-2 me-auto">
@@ -162,6 +165,11 @@
       <li class="nav-item">
         <a class="nav-link" data-bs-toggle="tab" href="#tabLogs">
           <i class="fa-solid fa-terminal me-1"></i>操作日志
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tabSystemLogs">
+          <i class="fa-solid fa-file-lines me-1"></i>系统日志
         </a>
       </li>
       <li class="nav-item">
@@ -692,7 +700,68 @@
         </div>
       </div>
 
-      <!-- ══════════ TAB 7: STRATEGY DOCS ══════════ -->
+      <!-- ══════════ TAB 7: SYSTEM LOGS ══════════ -->
+      <div class="tab-pane fade h-100 overflow-auto" id="tabSystemLogs">
+        <div class="p-3">
+          <div class="card card-dark">
+            <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+              <div class="d-flex flex-wrap align-items-center gap-2">
+                <span><i class="fa-solid fa-file-lines me-2"></i>系统日志</span>
+                <span class="text-secondary small" id="sysLogCount">共 0 条</span>
+                <div class="btn-group btn-group-sm ms-sm-2" role="group" id="sysLogsLevelFilter">
+                  <button type="button" class="btn btn-primary active" data-sys-level="">全部</button>
+                  <button type="button" class="btn btn-outline-secondary" data-sys-level="info">信息</button>
+                  <button type="button" class="btn btn-outline-secondary" data-sys-level="success">成功</button>
+                  <button type="button" class="btn btn-outline-secondary" data-sys-level="warning">警告</button>
+                  <button type="button" class="btn btn-outline-secondary" data-sys-level="error">错误</button>
+                </div>
+              </div>
+              <div class="d-flex flex-wrap align-items-center gap-2">
+                <div class="input-group input-group-sm" style="width: 260px;">
+                  <span class="input-group-text"><i class="fa-solid fa-magnifying-glass fa-xs"></i></span>
+                  <input type="text" class="form-control" id="sysLogKeyword" placeholder="关键字筛选（币种/信号/止损）" />
+                  <button class="btn btn-outline-secondary" type="button" id="btnResetSysLogKw" title="清除关键字">
+                    <i class="fa-solid fa-xmark"></i>
+                  </button>
+                </div>
+                <button class="btn btn-outline-primary btn-sm" id="btnSearchSysLogs" title="搜索系统日志">
+                  <i class="fa-solid fa-search me-1"></i>筛选
+                </button>
+                <button class="btn btn-outline-secondary btn-sm" id="btnRefreshSysLogs" title="刷新系统日志">
+                  <i class="fa-solid fa-rotate-right me-1"></i>刷新
+                </button>
+                <button class="btn btn-outline-danger btn-sm" id="btnClearSysLogs" title="清空所有系统日志">
+                  <i class="fa-solid fa-trash-can me-1"></i>清空日志
+                </button>
+              </div>
+            </div>
+            <div class="card-body p-0">
+              <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" id="sysLogsTable">
+                  <thead>
+                    <tr>
+                      <th class="ps-3" style="width:72px;">ID</th>
+                      <th style="width:155px;">时间</th>
+                      <th style="width:90px;">级别</th>
+                      <th style="width:110px;">交易对</th>
+                      <th class="pe-3">日志内容</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sysLogsTableBody"><!-- filled by app.js --></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="table-pagination-bar">
+              <span class="table-pagination-info" id="sysLogsPageInfo">第 1 / 1 页 · 共 0 条 · 每页 20 条</span>
+              <nav aria-label="系统日志分页">
+                <ul class="el-pagination" id="sysLogsPagination"></ul>
+              </nav>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════ TAB 8: STRATEGY DOCS ══════════ -->
       <div class="tab-pane fade h-100 overflow-auto" id="tabStrategy">
         <div class="p-3">
           <!-- Header summary card -->
@@ -703,8 +772,8 @@
             </div>
             <div class="card-body">
               <p class="mb-0 text-secondary" style="line-height:1.7;">
-                核心思路：<strong class="text-body">「双周期均线共振 + 多重过滤防追高 + 以损定仓 + 三阶梯保本移动止盈」</strong>。
-                只在顺大势且均线刚起势时进场，过滤震荡与脉冲末端追单，单笔亏损严格受账户风险比例控制，盈利后自动分阶段抬高止损并开启 MA7 移动追踪让利润奔跑。
+                核心思路：<strong class="text-body">「双周期均线共振 + ATR 自适应防追高 + 反向影线过滤 + 含费以损定仓 + MA25 趋势追踪」</strong>。
+                只在顺大势且均线刚起势时进场，过滤震荡与脉冲末端追单，单笔含手续费亏损严格受账户风险比例控制，盈利达设定阈值（默认 0.88R，按币种可配）后自动移至保本微赚位并开启 MA25 移动追踪让利润奔跑。
               </p>
             </div>
           </div>

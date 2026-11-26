@@ -174,6 +174,52 @@ def record_operation_log(
             session.close()
 
 
+class SystemLog(Base):
+    """Persistent system / signal / monitor logs (mirrors homepage logBox with full history)."""
+    __tablename__ = "system_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    level = Column(String(16), default="info", nullable=False, index=True)  # "info" | "success" | "warning" | "error"
+    symbol = Column(String(32), nullable=True, index=True)
+    message = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+
+def record_system_log(
+    message: str,
+    *,
+    level: str = "info",
+    symbol: str | None = None,
+    db=None,
+) -> None:
+    """Persist a SystemLog entry safely without disrupting trading execution."""
+    if not message:
+        return
+    norm_level = (level or "info").lower()
+    if norm_level == "danger":
+        norm_level = "error"
+    if norm_level not in {"info", "success", "warning", "error"}:
+        norm_level = "info"
+
+    own_session = db is None
+    session = SessionLocal() if own_session else db
+    try:
+        entry = SystemLog(
+            level=norm_level,
+            symbol=symbol.upper() if symbol else None,
+            message=str(message),
+            created_at=datetime.now(timezone.utc),
+        )
+        session.add(entry)
+        session.commit()
+    except Exception:
+        if own_session:
+            session.rollback()
+    finally:
+        if own_session:
+            session.close()
+
+
 class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 

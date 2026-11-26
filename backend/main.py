@@ -202,6 +202,15 @@ async def root():
     return {"status": "MA Trader API running. Frontend not found."}
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    icon = FRONTEND_DIR / "favicon.svg"
+    if icon.exists():
+        return FileResponse(str(icon), media_type="image/svg+xml")
+    return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
