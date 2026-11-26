@@ -8,18 +8,45 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 VALID_TIMEFRAMES = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
 TimeframeType = Literal["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
-_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}(/[A-Z0-9]{2,10})?$")
+TIMEFRAME_MS: Dict[str, int] = {
+    "1m": 60_000,
+    "3m": 180_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "2h": 7_200_000,
+    "4h": 14_400_000,
+    "6h": 21_600_000,
+    "12h": 43_200_000,
+    "1d": 86_400_000,
+}
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{4,20}$")
 
 
 def validate_symbol_str(v: str) -> str:
-    s = (v or "").strip().upper()
+    """
+    Normalize and validate symbol to canonical Binance Futures ID (e.g. 'BTCUSDT').
+    Strips '/' and ':USDT' so ccxt with defaultType='future' never resolves 'BTC/USDT' to Spot.
+    """
+    raw = (v or "").strip().upper()
+    if raw.endswith(":USDT"):
+        raw = raw[:-5]
+    s = raw.replace("/", "")
     if not _SYMBOL_RE.match(s):
-        raise ValueError("交易对格式无效，仅允许字母与数字（例如 BTCUSDT）")
+        raise ValueError("交易对格式无效，仅允许 4~20 位字母与数字（例如 BTCUSDT）")
     return s
+
+
+def validate_htf_gt_ltf(timeframe: str, htf_timeframe: str) -> None:
+    ltf_ms = TIMEFRAME_MS.get(timeframe, 0)
+    htf_ms = TIMEFRAME_MS.get(htf_timeframe, 0)
+    if ltf_ms <= 0 or htf_ms <= 0 or htf_ms <= ltf_ms:
+        raise ValueError(f"高级时间框架 ({htf_timeframe}) 必须大于主时间框架 ({timeframe})")
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +80,7 @@ class SymbolConfigCreate(BaseModel):
     confirm_candles: int = Field(2, ge=1, le=20)
     leverage: int = Field(5, ge=1, le=20)
     risk_per_trade: float = Field(0.01, gt=0, le=0.2)
-    rr_ratio: float = Field(1.5, ge=0.5, le=20.0)
+    rr_ratio: float = Field(1.5, ge=0.0, le=20.0)
     trailing_activate_r: float = Field(0.88, ge=0.1, le=10.0)
     breakeven_buffer: float = Field(0.003, ge=0.0, le=0.05)
     enabled: bool = True
@@ -63,6 +90,11 @@ class SymbolConfigCreate(BaseModel):
     def _check_symbol(cls, v: str) -> str:
         return validate_symbol_str(v)
 
+    @model_validator(mode="after")
+    def _check_timeframes(self) -> "SymbolConfigCreate":
+        validate_htf_gt_ltf(self.timeframe, self.htf_timeframe)
+        return self
+
 
 class SymbolConfigUpdate(BaseModel):
     timeframe: Optional[TimeframeType] = None
@@ -70,7 +102,7 @@ class SymbolConfigUpdate(BaseModel):
     confirm_candles: Optional[int] = Field(None, ge=1, le=20)
     leverage: Optional[int] = Field(None, ge=1, le=20)
     risk_per_trade: Optional[float] = Field(None, gt=0, le=0.2)
-    rr_ratio: Optional[float] = Field(None, ge=0.5, le=20.0)
+    rr_ratio: Optional[float] = Field(None, ge=0.0, le=20.0)
     trailing_activate_r: Optional[float] = Field(None, ge=0.1, le=10.0)
     breakeven_buffer: Optional[float] = Field(None, ge=0.0, le=0.05)
     enabled: Optional[bool] = None
@@ -109,6 +141,7 @@ class TradeResponse(BaseModel):
     close_reason: Optional[str] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
+    fee: Optional[float] = 0.0
     is_paper: bool
     open_time: datetime
     close_time: Optional[datetime] = None
@@ -148,7 +181,7 @@ class BacktestRunCreate(BaseModel):
     start_date: str = Field(..., example="2024-01-01")
     end_date: str = Field(..., example="2024-12-31")
     confirm_candles: int = Field(2, ge=1, le=20)
-    rr_ratio: float = Field(1.5, ge=0.5, le=20.0)
+    rr_ratio: float = Field(1.5, ge=0.0, le=20.0)
     trailing_activate_r: float = Field(0.88, ge=0.1, le=10.0)
     breakeven_buffer: float = Field(0.003, ge=0.0, le=0.05)
     initial_capital: float = Field(10000.0, gt=0, le=1e9)
@@ -169,6 +202,11 @@ class BacktestRunCreate(BaseModel):
     @classmethod
     def _check_symbol(cls, v: str) -> str:
         return validate_symbol_str(v)
+
+    @model_validator(mode="after")
+    def _check_timeframes(self) -> "BacktestRunCreate":
+        validate_htf_gt_ltf(self.timeframe, self.htf_timeframe)
+        return self
 
 
 class BacktestRunResponse(BaseModel):

@@ -273,42 +273,42 @@ class Backtester:
                 equity_ts.append(ts)
                 continue
 
-            # ---- 1. Manage open trade (no 0.7R BE / no MA60 exit; 0.88R -> BE+0.3% + MA25 trailing) ----
+            # ---- 1. Manage open trade (0.88R -> BE+0.3% + MA25 trailing, aligned with TradingBot) ----
             if in_trade:
                 if trade_direction == "long":
                     if l <= trade_sl:
                         reason = "trailing_stop" if trailing_active else "stop_loss"
                         record_close(trade_sl, ts, reason)
-                    elif not trailing_active:
-                        if trade_risk_r > 0 and h >= trade_entry + trailing_activate_r * trade_risk_r:
+                    else:
+                        if not trailing_active and trade_risk_r > 0 and h >= trade_entry + trailing_activate_r * trade_risk_r:
                             trade_sl = MAStrategy.compute_trailing_lock_sl(
                                 "long", trade_entry, trade_risk_r, trade_sl,
                                 activate_r=trailing_activate_r, breakeven_buffer=breakeven_buffer,
                             )
                             trailing_active = True
-                    else:
-                        exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma25, True)
-                        if exit_sig:
-                            record_close(c, ts, exit_sig)
-                        else:
-                            trade_sl = max(trade_sl, ma25 * 0.9995)
+                        if trailing_active:
+                            exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma25, True)
+                            if exit_sig:
+                                record_close(c, ts, exit_sig)
+                            else:
+                                trade_sl = max(trade_sl, ma25 * 0.9995)
                 else:  # short
                     if h >= trade_sl:
                         reason = "trailing_stop" if trailing_active else "stop_loss"
                         record_close(trade_sl, ts, reason)
-                    elif not trailing_active:
-                        if trade_risk_r > 0 and l <= trade_entry - trailing_activate_r * trade_risk_r:
+                    else:
+                        if not trailing_active and trade_risk_r > 0 and l <= trade_entry - trailing_activate_r * trade_risk_r:
                             trade_sl = MAStrategy.compute_trailing_lock_sl(
                                 "short", trade_entry, trade_risk_r, trade_sl,
                                 activate_r=trailing_activate_r, breakeven_buffer=breakeven_buffer,
                             )
                             trailing_active = True
-                    else:
-                        exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma25, True)
-                        if exit_sig:
-                            record_close(c, ts, exit_sig)
-                        else:
-                            trade_sl = min(trade_sl, ma25 * 1.0005)
+                        if trailing_active:
+                            exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma25, True)
+                            if exit_sig:
+                                record_close(c, ts, exit_sig)
+                            else:
+                                trade_sl = min(trade_sl, ma25 * 1.0005)
 
             # ---- 2. Always feed MAStrategy bar-close signal state machine ----
             htf_dir = get_closed_htf_direction(ts)
@@ -359,8 +359,23 @@ class Backtester:
                         trade_entry_fee = entry_fill * qty * fee_rate
                         strategy.reset()
 
-            equity_history.append(capital)
+            # Record mark-to-market equity so drawdown & daily Sharpe capture floating P&L
+            if in_trade:
+                unrealized = (
+                    (c - trade_entry) * trade_qty - trade_entry_fee
+                    if trade_direction == "long"
+                    else (trade_entry - c) * trade_qty - trade_entry_fee
+                )
+                equity_history.append(capital + unrealized)
+            else:
+                equity_history.append(capital)
             equity_ts.append(ts)
+
+        # Force-settle any still-open trade at the end of the backtest window so floating losses/fees aren't hidden
+        if in_trade and len(ltf_close) > 0:
+            record_close(float(ltf_close[-1]), int(ltf_ts[-1]), "end_of_backtest")
+            if equity_history:
+                equity_history[-1] = capital
 
         # ---- Compute statistics ----
         total = len(trades_result)

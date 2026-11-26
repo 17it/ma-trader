@@ -33,8 +33,24 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _client_ip(request: Request) -> str:
-    # Only trust direct peer IP by default (avoid X-Forwarded-For spoofing bypass)
-    return request.client.host if request.client else "unknown"
+    """
+    Resolve client IP safely:
+      - Direct connections use request.client.host (unspoofable).
+      - Loopback reverse proxies (127.0.0.1 / ::1, e.g. local Nginx per DEPLOY.md)
+        read X-Real-IP or the right-most X-Forwarded-For hop so one remote attacker
+        cannot lock out 127.0.0.1 for all users.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if peer in {"127.0.0.1", "::1"}:
+        real_ip = (request.headers.get("x-real-ip") or "").strip()
+        if real_ip:
+            return real_ip[:64]
+        xff = (request.headers.get("x-forwarded-for") or "").strip()
+        if xff:
+            parts = [p.strip() for p in xff.split(",") if p.strip()]
+            if parts:
+                return parts[-1][:64]
+    return peer
 
 
 class LoginRequest(BaseModel):

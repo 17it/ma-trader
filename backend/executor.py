@@ -155,15 +155,75 @@ class Executor:
             logger.warning("get_position(%s) failed: %s", symbol, exc)
             return None
 
-    def fetch_order_fill(self, symbol: str, order_id: Optional[str]) -> Optional[dict]:
-        """Fetch an order by exchange order_id to inspect fill status & average price."""
+    def fetch_order_fill(self, symbol: str, order_id: Optional[str], is_stop: bool = False) -> Optional[dict]:
+        """
+        Fetch an order by exchange order_id to inspect fill status & average price.
+        When *is_stop* is True, queries Binance Futures Algo Order API first ({"trigger": True}),
+        falling back to regular order query for backward compatibility.
+        """
         if self.exchange is None or not order_id:
             return None
+        if is_stop:
+            try:
+                return self.exchange.fetch_order(order_id, symbol, {"trigger": True})
+            except Exception as algo_exc:
+                logger.debug("fetch_order(trigger=True, %s, %s) failed: %s", symbol, order_id, algo_exc)
         try:
             return self.exchange.fetch_order(order_id, symbol)
         except Exception as exc:
             logger.debug("fetch_order(%s, %s) failed: %s", symbol, order_id, exc)
             return None
+
+    def _cancel_sl_order(self, symbol: str, sl_order_id: Optional[str]) -> bool:
+        """
+        Cancel a conditional STOP_MARKET order on Binance USD-M Futures.
+        ccxt >= 4.5 routes STOP_MARKET orders through fapiPrivatePostAlgoOrder (returning algoId),
+        so cancel_order MUST pass {"trigger": True} to hit fapiPrivateDeleteAlgoOrder.
+        Falls back to standard cancel_order if needed.
+        """
+        if self.exchange is None or not sl_order_id:
+            return False
+        try:
+            self.exchange.cancel_order(sl_order_id, symbol, {"trigger": True})
+            return True
+        except Exception as algo_exc:
+            err_msg = str(algo_exc).lower()
+            # If order was already filled/cancelled, treat as benign
+            if "unknown order" in err_msg or "-2011" in err_msg:
+                try:
+                    self.exchange.cancel_order(sl_order_id, symbol)
+                    return True
+                except Exception:
+                    pass
+            logger.debug("_cancel_sl_order(%s, %s) failed: %s", symbol, sl_order_id, algo_exc)
+            return False
+
+    def _resolve_order_fee(self, symbol: str, order: Optional[dict]) -> float:
+        """
+        Extract USDT fee from order response, or query fetch_my_trades when Binance Futures
+        RESULT response omits commission details.
+        """
+        direct_fee = _extract_usdt_fee(order)
+        if direct_fee > 0 or self.exchange is None or not isinstance(order, dict):
+            return direct_fee
+        order_id = order.get("id")
+        if not order_id or not hasattr(self.exchange, "fetch_my_trades"):
+            return 0.0
+        try:
+            trades = self.exchange.fetch_my_trades(symbol, limit=20, params={"orderId": order_id})
+            if not isinstance(trades, list):
+                return 0.0
+            total = 0.0
+            for t in trades:
+                if not isinstance(t, dict):
+                    continue
+                if str(t.get("order") or "") and str(t.get("order")) != str(order_id):
+                    continue
+                total += _extract_usdt_fee(t)
+            return max(0.0, total)
+        except Exception as exc:
+            logger.debug("fetch_my_trades fee lookup failed for %s (%s): %s", symbol, order_id, exc)
+            return 0.0
 
     def _reconcile_order_by_client_id(self, symbol: str, client_order_id: str) -> Optional[dict]:
         """Check whether a timed-out entry order actually reached & filled on Binance."""
@@ -240,11 +300,11 @@ class Executor:
             return {"updated": False, "sl_order_id": old_sl_order_id, "stop_loss": formatted_sl, "error": str(exc)}
 
         if old_sl_order_id and old_sl_order_id != new_id:
-            try:
-                self.exchange.cancel_order(old_sl_order_id, symbol)
-            except Exception as exc:
-                logger.warning("update_stop_loss: new SL %s placed, failed to cancel old SL %s: %s",
-                               new_id, old_sl_order_id, exc)
+            if not self._cancel_sl_order(symbol, old_sl_order_id):
+                logger.warning(
+                    "update_stop_loss: new SL %s placed, failed to cancel old SL %s",
+                    new_id, old_sl_order_id,
+                )
 
         logger.info("[LIVE] Updated SL for %s (%s) -> %s (order_id=%s)", symbol, direction, formatted_sl, new_id)
         return {"updated": True, "sl_order_id": new_id, "stop_loss": formatted_sl}
@@ -292,7 +352,7 @@ class Executor:
         if filled_qty <= 0:
             raise RuntimeError(f"Entry order for {symbol} returned filled=0")
         fill_price = float(order.get("average") or order.get("price") or entry)
-        entry_fee = _extract_usdt_fee(order)
+        entry_fee = self._resolve_order_fee(symbol, order)
 
         # Place protective SL order; if it fails, immediately close the position!
         try:
@@ -403,14 +463,16 @@ class Executor:
             if pos_info is not None and pos_info["size"] == 0.0:
                 already_closed_on_exchange = True
                 logger.info("[LIVE] Position %s already closed on exchange; syncing locally.", symbol)
-                sl_order = self.fetch_order_fill(symbol, sl_order_id)
+                sl_order = self.fetch_order_fill(symbol, sl_order_id, is_stop=True)
                 if isinstance(sl_order, dict):
                     avg = float(sl_order.get("average") or sl_order.get("price") or 0.0)
                     if avg > 0:
                         actual_exit_price = avg
-                    exit_fee = _extract_usdt_fee(sl_order)
+                    exit_fee = self._resolve_order_fee(symbol, sl_order)
             else:
-                close_qty = self._fmt_qty(symbol, pos_info["size"] if pos_info and pos_info["size"] > 0 else qty)
+                if pos_info and pos_info["size"] > 0:
+                    qty = float(pos_info["size"])
+                close_qty = self._fmt_qty(symbol, qty)
                 close_order = None
                 try:
                     # Submit reduceOnly market close while SL is still active (no unprotected gap)
@@ -426,10 +488,7 @@ class Executor:
                             "Direct reduceOnly close failed for %s (%s); cancelling SL %s and retrying...",
                             symbol, first_exc, sl_order_id,
                         )
-                        try:
-                            self.exchange.cancel_order(sl_order_id, symbol)
-                        except Exception:
-                            pass
+                        self._cancel_sl_order(symbol, sl_order_id)
                         try:
                             if direction == "long":
                                 close_order = self.exchange.create_market_sell_order(
@@ -440,11 +499,17 @@ class Executor:
                                     symbol, close_qty, {"reduceOnly": True}
                                 )
                         except Exception as second_exc:
-                            # Re-arm stop loss so the position is never left unprotected
+                            # Re-arm stop loss so the position is never left unprotected & propagate new sl_order_id
                             if trade.get("stop_loss"):
                                 try:
-                                    self._place_sl_order(symbol, direction, close_qty, float(trade["stop_loss"]))
-                                    logger.warning("Re-armed SL for %s after close failure", symbol)
+                                    rearmed = self._place_sl_order(
+                                        symbol, direction, close_qty, float(trade["stop_loss"])
+                                    )
+                                    rearmed_id = rearmed.get("id") if isinstance(rearmed, dict) else None
+                                    if rearmed_id:
+                                        trade["sl_order_id"] = rearmed_id
+                                        setattr(second_exc, "rearmed_sl_order_id", rearmed_id)
+                                    logger.warning("Re-armed SL (%s) for %s after close failure", rearmed_id, symbol)
                                 except Exception as rearm_exc:
                                     logger.critical("Failed to re-arm SL for %s: %s", symbol, rearm_exc)
                             raise second_exc
@@ -455,14 +520,11 @@ class Executor:
                     avg = float(close_order.get("average") or close_order.get("price") or 0.0)
                     if avg > 0:
                         actual_exit_price = avg
-                    exit_fee = _extract_usdt_fee(close_order)
+                    exit_fee = self._resolve_order_fee(symbol, close_order)
 
             # 2. Clean up any resting SL order after position is closed
             if sl_order_id:
-                try:
-                    self.exchange.cancel_order(sl_order_id, symbol)
-                except Exception:
-                    pass
+                self._cancel_sl_order(symbol, sl_order_id)
 
         if direction == "long":
             gross_pnl = (actual_exit_price - entry) * qty
@@ -546,6 +608,7 @@ class Executor:
                 "quantity": getattr(trade, "quantity", 0.0),
                 "is_paper": getattr(trade, "is_paper", True),
                 "sl_order_id": getattr(trade, "sl_order_id", None),
+                "entry_fee": float(getattr(trade, "fee", 0.0) or 0.0),
             }
         else:
             t_dict = dict(trade)

@@ -400,8 +400,8 @@
                   <input type="range" class="form-range" id="btConfirm" min="1" max="10" value="2" />
                 </div>
                 <div class="col-6 col-md-1">
-                  <label class="form-label small">盈亏比</label>
-                  <input type="number" class="form-control form-control-sm" id="btRR" min="0.5" max="10" step="0.1" value="1.5" />
+                  <label class="form-label small" title="参考盈亏比（实际平仓按触发R保本 + MA25无上限追踪止盈，填 0 不显示参考目标）">参考R</label>
+                  <input type="number" class="form-control form-control-sm" id="btRR" min="0" max="20" step="0.1" value="1.5" />
                 </div>
                 <div class="col-6 col-md-1">
                   <label class="form-label small" title="浮盈达多少 R 开启保本与 MA25 追踪">触发R</label>
@@ -623,7 +623,7 @@
                       <th>入场价</th>
                       <th>出场价</th>
                       <th>止损</th>
-                      <th>止盈</th>
+                      <th title="参考盈亏比目标（实际出场按触发R保本 + MA25追踪止盈）">参考目标</th>
                       <th>盈亏</th>
                       <th>状态</th>
                       <th>开仓时间</th>
@@ -958,8 +958,8 @@
               <input type="number" class="form-control form-control-sm" id="symRisk" min="0.1" max="20" step="0.1" value="1.2" />
             </div>
             <div class="col">
-              <label class="form-label small">盈亏比</label>
-              <input type="number" class="form-control form-control-sm" id="symRR" min="0.5" max="20" step="0.1" value="1.5" />
+              <label class="form-label small" title="参考盈亏比（实际按触发R保本 + MA25追踪止盈，填 0 不显示参考目标）">参考盈亏比</label>
+              <input type="number" class="form-control form-control-sm" id="symRR" min="0" max="20" step="0.1" value="1.5" />
             </div>
           </div>
           <div class="row g-2 mb-3">
@@ -1050,10 +1050,10 @@
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/auth.js?v=20261125_18"></script>
-<script src="js/chart.js?v=20261125_18"></script>
-<script src="js/settings.js?v=20261125_18"></script>
-<script src="js/backtest.js?v=20261125_18"></script>
-<script src="js/app.js?v=20261125_18"></script>
+<script src="js/auth.js?v=20261126_1"></script>
+<script src="js/chart.js?v=20261126_1"></script>
+<script src="js/settings.js?v=20261126_1"></script>
+<script src="js/backtest.js?v=20261126_1"></script>
+<script src="js/app.js?v=20261126_1"></script>
 </body>
 </html>

@@ -25,6 +25,7 @@ from models import (
     SymbolConfigCreate,
     SymbolConfigResponse,
     SymbolConfigUpdate,
+    validate_htf_gt_ltf,
 )
 
 router = APIRouter()
@@ -109,20 +110,40 @@ def _validate_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
 
 
 def _hot_reload_bot_settings(request: Request, full_settings: Dict[str, str]) -> None:
-    """Propagate updated notifier / proxy settings to any currently running bots."""
+    """Propagate updated notifier / proxy / API credentials to running bots & shared WS."""
     bots = getattr(request.app.state, "bots", {}) or {}
     tg_token = full_settings.get("telegram_token", "")
     tg_chat = full_settings.get("telegram_chat_id", "")
     proxy = full_settings.get("http_proxy", "")
-    for bot in bots.values():
+    binance_key = full_settings.get("binance_key", "")
+    binance_secret = full_settings.get("binance_secret", "")
+
+    shared_ws = getattr(request.app.state, "ws_streamer", None)
+    if shared_ws is not None and hasattr(shared_ws, "update_proxy"):
+        shared_ws.update_proxy(proxy)
+
+    for mode_key, bot in bots.items():
         if bot is None:
             continue
         notifier = getattr(bot, "notifier", None)
         if notifier is not None and hasattr(notifier, "update_config"):
             notifier.update_config(tg_token, tg_chat, proxy=proxy)
         data_feed = getattr(bot, "data_feed", None)
-        if data_feed is not None and hasattr(data_feed, "update_proxy"):
-            data_feed.update_proxy(proxy)
+        if data_feed is not None:
+            if hasattr(data_feed, "update_credentials") and mode_key == "live":
+                data_feed.update_credentials(binance_key, binance_secret, proxy=proxy)
+            elif hasattr(data_feed, "update_proxy"):
+                data_feed.update_proxy(proxy)
+        if mode_key == "live" and getattr(bot, "executor", None) is not None and binance_key and binance_secret:
+            try:
+                from routers.trading import _build_exchange
+                new_ex = _build_exchange(full_settings, require_auth=True)
+                if new_ex is not None:
+                    bot.executor.exchange = new_ex
+                    bot.executor.config = full_settings
+            except Exception:
+                pass
+
     # Invalidate cached public kline exchange so new proxy takes effect immediately
     try:
         from routers.trading import invalidate_public_exchange_cache
@@ -224,6 +245,13 @@ async def update_symbol(symbol_id: int, body: SymbolConfigUpdate, request: Reque
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol config not found.")
 
     update_data = body.model_dump(exclude_unset=True)
+    effective_tf = update_data.get("timeframe", obj.timeframe)
+    effective_htf = update_data.get("htf_timeframe", obj.htf_timeframe)
+    try:
+        validate_htf_gt_ltf(effective_tf, effective_htf)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
     for field, value in update_data.items():
         setattr(obj, field, value)
 

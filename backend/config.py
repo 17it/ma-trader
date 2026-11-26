@@ -4,10 +4,14 @@ Configuration management — read/write the 'settings' table.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from typing import Dict, Optional
 from sqlalchemy.orm import Session
+
+sys.modules.setdefault("config", sys.modules[__name__])
+sys.modules.setdefault("backend.config", sys.modules[__name__])
 
 from database import SettingModel, DEFAULT_SETTINGS, SessionLocal
 

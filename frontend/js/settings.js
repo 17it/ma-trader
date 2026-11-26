@@ -147,7 +147,7 @@ const SettingsManager = (() => {
       alert('✅ 全局设置已成功保存！\n刷新页面或重启服务均会持久生效。');
     } catch (err) {
       console.error('保存设置失败', err);
-      alert('❌ 保存设置失败:\n' + err.message + '\n\n提示：如果是在 Ubuntu 服务器上，请检查 ma-trader/data 目录的读写权限：\nsudo chown -R $USER:$USER data && chmod -R 775 data');
+      alert('❌ 保存设置失败:\n' + err.message + '\n\n提示：如果是在 Ubuntu 服务器上，请检查 ma-trader/data 目录的读写权限：\nsudo chown -R $USER:$USER data && chmod 700 data');
     } finally {
       if (btn) {
         btn.disabled = false;
@@ -324,6 +324,12 @@ const SettingsManager = (() => {
         renderSymbolTable();
         renderSidebarSymbols();
         modalInstance.hide();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        const detail = Array.isArray(err.detail)
+          ? err.detail.map(d => d.msg || JSON.stringify(d)).join('; ')
+          : (err.detail || `HTTP ${res.status}`);
+        alert('保存交易对失败: ' + detail);
       }
     } catch (err) {
       console.error('保存交易对失败', err);

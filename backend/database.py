@@ -4,6 +4,7 @@ Database: SQLite at data/trading.db
 """
 
 import os
+import sys
 import hashlib
 import hmac
 import secrets
@@ -13,6 +14,10 @@ from sqlalchemy import (
     create_engine, event
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
+
+# Prevent dual-module loading ("database" vs "backend.database") from creating two Engines / ORM Bases
+sys.modules.setdefault("database", sys.modules[__name__])
+sys.modules.setdefault("backend.database", sys.modules[__name__])
 
 # ---------------------------------------------------------------------------
 # Engine setup
@@ -114,6 +119,7 @@ class Trade(Base):
     initial_risk = Column(Float, nullable=True)                # 开仓时 1R 距离（|entry - 初始止损|），重启后用于分档止盈
     trailing_activate_r = Column(Float, nullable=True)         # 开仓时该交易对的追踪触发 R
     breakeven_buffer = Column(Float, nullable=True)            # 开仓时该交易对的保本缓冲比例
+    fee = Column(Float, default=0.0)                           # 累计手续费（USDT）
 
 
 class SessionTokenModel(Base):
@@ -166,6 +172,12 @@ def record_operation_log(
         )
         session.add(entry)
         session.commit()
+        if entry.id and entry.id % 200 == 0:
+            session.execute(
+                text("DELETE FROM operation_logs WHERE id <= :cutoff"),
+                {"cutoff": entry.id - 20_000},
+            )
+            session.commit()
     except Exception:
         if own_session:
             session.rollback()
@@ -212,6 +224,12 @@ def record_system_log(
         )
         session.add(entry)
         session.commit()
+        if entry.id and entry.id % 200 == 0:
+            session.execute(
+                text("DELETE FROM system_logs WHERE id <= :cutoff"),
+                {"cutoff": entry.id - 20_000},
+            )
+            session.commit()
     except Exception:
         if own_session:
             session.rollback()
@@ -369,6 +387,8 @@ def create_tables() -> None:
             conn.execute(text("ALTER TABLE trades ADD COLUMN trailing_activate_r FLOAT"))
         if "breakeven_buffer" not in cols:
             conn.execute(text("ALTER TABLE trades ADD COLUMN breakeven_buffer FLOAT"))
+        if "fee" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN fee FLOAT DEFAULT 0"))
 
         sym_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(symbol_configs)")).fetchall()}
         if "trailing_activate_r" not in sym_cols:

@@ -763,8 +763,13 @@ const AppController = (() => {
     try {
       const res = await fetch(`/api/trading/stop?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
         await checkBotStatus();
         appendLog(`${label}交易监控已停止`, 'warning');
+        if (data && data.warning) {
+          appendLog(`⚠️ ${data.warning}`, 'warning');
+          alert(`⚠️ ${data.warning}`);
+        }
       } else {
         const err = await res.json().catch(() => ({}));
         alert(`停止${label}失败: ` + (err.detail || '未知错误'));
@@ -819,15 +824,11 @@ const AppController = (() => {
       : `确定要平仓该笔交易 (ID: ${tradeId}) 吗？`;
     if (!confirm(modeTip)) return;
     try {
-      const payload = {};
-      if (trade) {
-        const curPrice = (state.prices && state.prices[trade.symbol]) || (trade.symbol === state.currentSymbol ? state.currentPrice : null);
-        if (curPrice && curPrice > 0) payload.exit_price = curPrice;
-      }
+      // Delegate price resolution to backend so live & paper always use authoritative Futures price
       const res = await fetch(`/api/trades/${tradeId}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({}),
       });
       if (res.ok) {
         appendLog(`[手动平仓] 订单 #${tradeId} 平仓成功`, 'info');
@@ -1159,7 +1160,7 @@ const AppController = (() => {
     };
 
     tbody.innerHTML = logs.map(log => {
-      const meta = typeMeta[log.log_type] || { label: log.log_type || '其他', cls: 'bg-secondary-subtle text-secondary' };
+      const meta = typeMeta[log.log_type] || { label: _escapeHtml(log.log_type || '其他'), cls: 'bg-secondary-subtle text-secondary' };
       const modeBadge = log.mode === 'live'
         ? '<span class="badge bg-danger-subtle text-danger">实盘</span>'
         : (log.mode === 'paper'
@@ -1443,7 +1444,7 @@ const AppController = (() => {
         <td>${t.entry_price?.toFixed(2) ?? '—'}</td>
         <td>${t.exit_price ? t.exit_price.toFixed(2) : '—'}</td>
         <td class="text-secondary small">${t.stop_loss?.toFixed(2) ?? '—'}</td>
-        <td class="text-secondary small">${t.take_profit?.toFixed(2) ?? '—'}</td>
+        <td class="text-secondary small">${(t.take_profit && Math.abs(t.take_profit - t.entry_price) > 1e-8) ? t.take_profit.toFixed(2) : 'MA25追踪'}</td>
         <td>${pnlText}</td>
         <td>${statusBadge}</td>
         <td class="small text-secondary">${openTimeStr}</td>
@@ -1497,6 +1498,7 @@ const AppController = (() => {
   let binanceWs = null;
   let currentBinanceStream = null;
   let binanceReconnectTimer = null;
+  let binanceWsUseSpotFallback = false;
 
   function connectBinanceStream(symbol, timeframe) {
     if (!symbol) return;
@@ -1518,15 +1520,21 @@ const AppController = (() => {
     clearTimeout(binanceReconnectTimer);
 
     currentBinanceStream = streamName;
-    console.log(`[Binance WS] Connecting real-time stream: ${streamName}`);
+    const wsUrl = binanceWsUseSpotFallback
+      ? `wss://stream.binance.com:9443/ws/${streamName}`
+      : `wss://fstream.binance.com/ws/${streamName}`;
+    console.log(`[Binance WS] Connecting real-time stream: ${wsUrl}`);
 
-    // Try standard stream or fallback fstream
-    const wsUrl = `wss://stream.binance.com:9443/ws/${streamName}`;
     try {
       binanceWs = new WebSocket(wsUrl);
 
       binanceWs.onopen = () => {
-        console.log(`[Binance WS] ✅ Connected to official live stream: ${streamName}`);
+        if (!binanceWsUseSpotFallback) {
+          console.log(`[Binance WS] ✅ Connected to official Futures live stream: ${streamName}`);
+        } else {
+          console.log(`[Binance WS] ⚠️ Connected to fallback stream: ${streamName}`);
+          binanceWsUseSpotFallback = false;
+        }
       };
 
       binanceWs.onmessage = (event) => {
@@ -1566,7 +1574,8 @@ const AppController = (() => {
       };
 
       binanceWs.onerror = (err) => {
-        console.warn(`[Binance WS] Stream error (${streamName}), trying fstream...`, err);
+        console.warn(`[Binance WS] Stream error (${streamName}), switching endpoint on retry...`, err);
+        binanceWsUseSpotFallback = !binanceWsUseSpotFallback;
         try {
           binanceWs.close();
         } catch (_) {}

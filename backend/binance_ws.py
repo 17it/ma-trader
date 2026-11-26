@@ -5,18 +5,37 @@ caches prices in memory along with source type (futures vs spot), and invokes ca
 """
 
 import asyncio
+import inspect
 import json
 import logging
+import os
+import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import websockets
+
+sys.modules.setdefault("binance_ws", sys.modules[__name__])
+sys.modules.setdefault("backend.binance_ws", sys.modules[__name__])
 
 logger = logging.getLogger(__name__)
 
 FUTURES_WS_URL = "wss://fstream.binance.com/stream"
 PRIMARY_SPOT_WS_URL = "wss://data-stream.binance.vision/stream"
 FALLBACK_SPOT_WS_URL = "wss://stream.binance.com:9443/stream"
+
+_WS_SUPPORTS_PROXY = "proxy" in inspect.signature(websockets.connect).parameters
+
+
+def _normalize_ws_proxy(proxy: Optional[str]) -> Optional[str]:
+    p = (proxy or "").strip()
+    if not p:
+        p = (os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or "").strip()
+    if not p:
+        return None
+    if p.startswith("socks5h://"):
+        return "socks5://" + p[len("socks5h://"):]
+    return p
 
 
 class BinanceWSStreamer:
@@ -26,9 +45,10 @@ class BinanceWSStreamer:
     Futures or Spot so live Futures bots never silently consume Spot ticks.
     """
 
-    def __init__(self, use_futures: bool = True):
+    def __init__(self, use_futures: bool = True, proxy: Optional[str] = None):
         self.symbols: Set[str] = set()
         self.use_futures = use_futures
+        self._proxy: Optional[str] = _normalize_ws_proxy(proxy)
         self.latest_prices: Dict[str, float] = {}
         self.latest_ts: Dict[str, float] = {}
         self.latest_is_futures: Dict[str, bool] = {}
@@ -36,6 +56,15 @@ class BinanceWSStreamer:
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
         self._active_is_futures: bool = use_futures
+
+    def update_proxy(self, proxy: Optional[str]) -> None:
+        """Hot-reload proxy setting and reconnect if changed while running."""
+        new_proxy = _normalize_ws_proxy(proxy)
+        if new_proxy != self._proxy:
+            self._proxy = new_proxy
+            if self._running and self._task and not self._task.done():
+                self._task.cancel()
+                self._task = asyncio.create_task(self._stream_loop(), name="binance-ws-streamer")
 
     def register_callback(self, cb: Callable[[dict], Any]):
         """Register a callback to be called on each ticker update."""
@@ -120,12 +149,15 @@ class BinanceWSStreamer:
                     "Connecting to Binance WebSocket: %s (futures=%s, %d streams)",
                     base_url, is_futures, len(stream_names),
                 )
-                async with websockets.connect(
-                    url,
-                    ping_interval=20,
-                    ping_timeout=15,
-                    close_timeout=5,
-                ) as ws:
+                connect_kwargs: Dict[str, Any] = {
+                    "ping_interval": 20,
+                    "ping_timeout": 15,
+                    "close_timeout": 5,
+                }
+                if _WS_SUPPORTS_PROXY and self._proxy:
+                    connect_kwargs["proxy"] = self._proxy
+
+                async with websockets.connect(url, **connect_kwargs) as ws:
                     self._active_is_futures = is_futures
                     logger.info("Connected to Binance WebSocket (futures=%s)", is_futures)
                     backoff = 1.0

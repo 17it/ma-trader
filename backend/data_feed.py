@@ -89,6 +89,21 @@ class DataFeed:
             self._geo_blocked = False
             self._exchange = self._create_exchange()
 
+    def update_credentials(self, api_key: Optional[str], secret: Optional[str], proxy: Optional[str] = None) -> None:
+        """Hot-reload Binance API credentials and proxy on a running live DataFeed."""
+        new_key = (api_key or "").strip()
+        new_secret = (secret or "").strip()
+        new_proxy = (
+            (proxy or "").strip() if proxy is not None else self._proxy
+        ) or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
+        if new_key != self._api_key or new_secret != self._secret or new_proxy != self._proxy:
+            self._api_key = new_key
+            self._secret = new_secret
+            self._authenticated = bool(new_key and new_secret)
+            self._proxy = new_proxy
+            self._geo_blocked = False
+            self._exchange = self._create_exchange()
+
     def set_ws_streamer(self, ws_streamer):
         """Attach or update the WebSocket real-time price streamer."""
         self._ws_streamer = ws_streamer

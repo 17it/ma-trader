@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
 
     app.state.ws_manager = ws_manager
     app.state.config = ConfigManager()
-    shared_ws = BinanceWSStreamer()
+    shared_ws = BinanceWSStreamer(proxy=app.state.config.get("http_proxy"))
     shared_ws.register_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
     app.state.ws_streamer = shared_ws
     app.state.bots = {"paper": None, "live": None}

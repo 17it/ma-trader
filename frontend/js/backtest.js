@@ -306,7 +306,7 @@ const BacktestManager = (() => {
         running: '<span class="badge-open">运行中</span>',
         pending: '<span style="color:#8b949e">等待</span>',
         failed:  '<span class="badge-stopped">失败</span>'
-      }[run.status] || run.status;
+      }[run.status] || escapeHtml(run.status);
 
       const pnl    = results?.total_pnl;
       const pnlStr = pnl != null ? `<span style="color:${pnl >= 0 ? '#3fb950' : '#f85149'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>` : '—';
@@ -315,23 +315,24 @@ const BacktestManager = (() => {
       const wrStr  = wrVal !== '—' ? `${wrVal}%` : '—';
 
       const titleStr = run.title ? `<span class="fw-semibold">${escapeHtml(run.title)}</span>` : '<span class="text-secondary">—</span>';
-      const rangeStr = `${_fmtHistoryDt(run.start_date)} ~ ${_fmtHistoryDt(run.end_date)}`;
+      const rangeStr = escapeHtml(`${_fmtHistoryDt(run.start_date)} ~ ${_fmtHistoryDt(run.end_date)}`);
+      const runIdNum = Number(run.id) || 0;
 
       const tr = document.createElement('tr');
       tr.style.cursor = 'pointer';
       tr.innerHTML = `
-        <td>#${run.id}</td>
+        <td>#${runIdNum}</td>
         <td>${titleStr}</td>
-        <td>${run.symbol}</td>
-        <td>${run.timeframe}</td>
+        <td>${escapeHtml(run.symbol)}</td>
+        <td>${escapeHtml(run.timeframe)}</td>
         <td class="small">${rangeStr}</td>
         <td>${statusBadge}</td>
         <td>${pnlStr}</td>
         <td>${wrStr}</td>
         <td class="text-end pe-3">
           <div class="d-inline-flex gap-1">
-            <button class="btn btn-xs btn-outline-primary" onclick="BacktestManager.viewRun(${run.id})">查看</button>
-            <button class="btn btn-xs btn-outline-danger" onclick="BacktestManager.deleteRun(event, ${run.id})" title="删除此记录">
+            <button class="btn btn-xs btn-outline-primary" onclick="BacktestManager.viewRun(${runIdNum})">查看</button>
+            <button class="btn btn-xs btn-outline-danger" onclick="BacktestManager.deleteRun(event, ${runIdNum})" title="删除此记录">
               <i class="fa-solid fa-trash-can"></i>
             </button>
           </div>

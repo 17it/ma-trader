@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -20,6 +21,9 @@ from typing import Deque, Dict, Optional, Tuple, Union
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
+
+sys.modules.setdefault("auth", sys.modules[__name__])
+sys.modules.setdefault("backend.auth", sys.modules[__name__])
 
 from database import SessionLocal, SessionTokenModel, UserModel, get_db
 
@@ -72,8 +76,9 @@ def validate_new_password(new_password: str, old_password: Optional[str] = None)
 # Login rate limiting (brute-force protection)
 # ---------------------------------------------------------------------------
 LOGIN_WINDOW_SECONDS = 15 * 60
-LOGIN_MAX_FAILS_PER_IP = 5
-LOGIN_MAX_FAILS_PER_USER = 10
+LOGIN_MAX_FAILS_PER_USER = 5
+LOGIN_MAX_FAILS_PER_IP = 20
+LOGIN_MAX_TRACKED_KEYS = 4096
 _login_fails: Dict[str, Deque[float]] = defaultdict(deque)
 _login_lock = threading.Lock()
 
@@ -84,15 +89,27 @@ def _prune(q: Deque[float], now: float) -> None:
 
 
 def login_retry_after(ip: str, username: str) -> int:
-    """Return seconds until another login attempt is allowed (0 = allowed)."""
+    """
+    Return seconds until another login attempt is allowed (0 = allowed).
+    Keys user lockouts by (ip, username) so an attacker from one IP cannot DoS-lock
+    the admin account for legitimate logins from another IP.
+    """
     now = time.time()
+    norm_user = (username or "").strip().lower()
     with _login_lock:
         waits = []
-        for key, limit in ((f"ip:{ip}", LOGIN_MAX_FAILS_PER_IP), (f"user:{username}", LOGIN_MAX_FAILS_PER_USER)):
+        checks = (
+            (f"ip:{ip}", LOGIN_MAX_FAILS_PER_IP),
+            (f"ip_user:{ip}:{norm_user}", LOGIN_MAX_FAILS_PER_USER),
+        )
+        for key, limit in checks:
             q = _login_fails.get(key)
             if not q:
                 continue
             _prune(q, now)
+            if not q:
+                _login_fails.pop(key, None)
+                continue
             if len(q) >= limit:
                 waits.append(int(LOGIN_WINDOW_SECONDS - (now - q[0])) + 1)
         return max(waits) if waits else 0
@@ -100,17 +117,25 @@ def login_retry_after(ip: str, username: str) -> int:
 
 def record_login_failure(ip: str, username: str) -> None:
     now = time.time()
+    norm_user = (username or "").strip().lower()
     with _login_lock:
-        for key in (f"ip:{ip}", f"user:{username}"):
+        if len(_login_fails) >= LOGIN_MAX_TRACKED_KEYS:
+            stale = [k for k, q in _login_fails.items() if not q or (now - q[-1]) > LOGIN_WINDOW_SECONDS]
+            for k in stale:
+                _login_fails.pop(k, None)
+            if len(_login_fails) >= LOGIN_MAX_TRACKED_KEYS:
+                _login_fails.pop(next(iter(_login_fails)), None)
+        for key in (f"ip:{ip}", f"ip_user:{ip}:{norm_user}"):
             q = _login_fails[key]
             _prune(q, now)
             q.append(now)
 
 
 def reset_login_failures(ip: str, username: str) -> None:
+    norm_user = (username or "").strip().lower()
     with _login_lock:
         _login_fails.pop(f"ip:{ip}", None)
-        _login_fails.pop(f"user:{username}", None)
+        _login_fails.pop(f"ip_user:{ip}:{norm_user}", None)
 
 
 @dataclass(frozen=True)

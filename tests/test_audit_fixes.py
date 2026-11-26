@@ -654,6 +654,172 @@ class TestBacktesterParityAndCache(unittest.TestCase):
         rows = get_cached_klines("TESTCACHE", "1m", closed_ts - 60_000, forming_ts + 60_000)
         self.assertEqual([r[0] for r in rows], [closed_ts])
 
+    def test_end_of_backtest_settles_open_trade_and_marks_to_market(self):
+        # N-B1: An open losing trade at end_date must be settled and reflected in total_pnl / max_drawdown
+        t0 = int(datetime(2025, 1, 2, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        ltf = self._build_uptrend_df(120, t0 - 70 * 60_000, 60_000, base=100.0, slope=0.015)
+        # Mild dip at the very end that stays ABOVE initial SL so trade remains open until end_date
+        for i in range(110, 120):
+            ltf.loc[i, "open"] = ltf.loc[i - 1, "close"]
+            ltf.loc[i, "close"] = ltf.loc[i - 1, "close"] - 0.01
+            ltf.loc[i, "high"] = ltf.loc[i, "open"] + 0.005
+            ltf.loc[i, "low"] = ltf.loc[i, "close"] - 0.005
+        htf = self._build_uptrend_df(90, t0 - 70 * 900_000, 900_000, base=90.0, slope=0.15)
+
+        bt = Backtester()
+        res = bt.run(
+            symbol="BTCUSDT",
+            timeframe="1m",
+            htf_timeframe="15m",
+            start_date="2025-01-02T00:00:00Z",
+            end_date="2025-01-02T00:50:00Z",
+            confirm_candles=2,
+            rr_ratio=0.0,
+            initial_capital=10_000.0,
+            risk_per_trade=0.01,
+            leverage=5,
+            fee_rate=0.0004,
+            slippage_rate=0.0001,
+            df_ltf_override=ltf,
+            df_htf_override=htf,
+        )
+        self.assertGreaterEqual(res["total_trades"], 1)
+        self.assertEqual(res["trades"][-1]["close_reason"], "end_of_backtest")
+        self.assertGreater(res["total_fees"], 0.0)
+
+
+class TestSecondAuditFixes(unittest.TestCase):
+    def _mock_exchange(self):
+        ex = MagicMock()
+        ex.markets = {"BTCUSDT": {}}
+        ex.amount_to_precision.side_effect = lambda sym, qty: f"{qty:.3f}"
+        ex.price_to_precision.side_effect = lambda sym, price: f"{price:.2f}"
+        ex.fetch_my_trades.return_value = []
+        return ex
+
+    def test_nt1_algo_sl_cancel_and_fetch_pass_trigger_true(self):
+        ex = self._mock_exchange()
+        ex.create_order.return_value = {"id": "algo_new"}
+
+        exec_ = Executor(exchange=ex, config={}, is_paper=False)
+        res = exec_.update_stop_loss("BTCUSDT", "long", 50100.0, 0.1, old_sl_order_id="algo_old")
+        self.assertTrue(res["updated"])
+        ex.cancel_order.assert_called_once_with("algo_old", "BTCUSDT", {"trigger": True})
+
+        # fetch_order_fill with is_stop=True must query Algo Order endpoint via {"trigger": True}
+        ex.fetch_order.return_value = {"id": "algo_old", "status": "closed", "average": 50080.0}
+        filled = exec_.fetch_order_fill("BTCUSDT", "algo_old", is_stop=True)
+        ex.fetch_order.assert_called_with("algo_old", "BTCUSDT", {"trigger": True})
+        self.assertEqual(filled["average"], 50080.0)
+
+    def test_nt3_symbol_slash_normalization_and_htf_gt_ltf(self):
+        from models import validate_symbol_str, SymbolConfigCreate
+        self.assertEqual(validate_symbol_str("btc/usdt"), "BTCUSDT")
+        self.assertEqual(validate_symbol_str("ETH/USDT:USDT"), "ETHUSDT")
+        with self.assertRaises(ValueError):
+            validate_symbol_str("BT")
+
+        # htf_timeframe <= timeframe must be rejected
+        with self.assertRaises(Exception):
+            SymbolConfigCreate(symbol="BTCUSDT", timeframe="1h", htf_timeframe="15m")
+        with self.assertRaises(Exception):
+            SymbolConfigCreate(symbol="BTCUSDT", timeframe="15m", htf_timeframe="15m")
+        cfg_ok = SymbolConfigCreate(symbol="btc/usdt", timeframe="15m", htf_timeframe="1h", rr_ratio=0.0)
+        self.assertEqual(cfg_ok.symbol, "BTCUSDT")
+        self.assertEqual(cfg_ok.rr_ratio, 0.0)
+
+    def test_nt4_rearmed_sl_id_propagated_and_partial_size_reconciled(self):
+        ex = self._mock_exchange()
+        ex.fetch_positions.return_value = [{"symbol": "BTCUSDT", "info": {"symbol": "BTCUSDT", "positionAmt": "0.1"}}]
+        ex.create_market_sell_order.side_effect = RuntimeError("exchange busy")
+        ex.create_order.return_value = {"id": "algo_rearmed_99"}
+
+        exec_ = Executor(exchange=ex, config={}, is_paper=False)
+        trade_dict = {
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "entry_price": 50000.0,
+            "stop_loss": 49500.0,
+            "quantity": 0.1,
+            "is_paper": False,
+            "sl_order_id": "algo_orig_1",
+        }
+        with self.assertRaises(RuntimeError) as ctx:
+            exec_.close_position(trade_dict, exit_price=50100.0, reason="manual")
+        self.assertEqual(getattr(ctx.exception, "rearmed_sl_order_id", None), "algo_rearmed_99")
+        self.assertEqual(trade_dict["sl_order_id"], "algo_rearmed_99")
+
+        # Partial position reduction reconciliation in TradingBot
+        db = db_mod.SessionLocal()
+        try:
+            tr = db_mod.Trade(
+                symbol="BTCUSDT", direction="long", entry_price=50000.0,
+                stop_loss=49500.0, take_profit=50750.0, quantity=0.2,
+                status="open", is_paper=False, open_time=datetime.now(timezone.utc),
+                timeframe="1m", confirm_count=2, initial_risk=500.0, sl_order_id="sl_old",
+            )
+            db.add(tr)
+            db.commit()
+            tid = tr.id
+        finally:
+            db.close()
+
+        ex_partial = self._mock_exchange()
+        ex_partial.fetch_positions.return_value = [{"symbol": "BTCUSDT", "info": {"symbol": "BTCUSDT", "positionAmt": "0.1"}}]
+        ex_partial.create_order.return_value = {"id": "sl_synced_qty"}
+        bot = TradingBot(
+            db_session_factory=db_mod.SessionLocal,
+            data_feed=MagicMock(),
+            executor=Executor(exchange=ex_partial, config={}, is_paper=False),
+            notifier=MagicMock(),
+            ws_streamer=MagicMock(),
+            is_paper=False,
+        )
+        pos = {
+            "id": tid, "symbol": "BTCUSDT", "direction": "long", "entry_price": 50000.0,
+            "stop_loss": 49500.0, "take_profit": 50750.0, "quantity": 0.2, "is_paper": False,
+            "sl_order_id": "sl_old", "trailing_active": False,
+        }
+        closed = asyncio.run(bot._reconcile_live_position("BTCUSDT", pos, 50000.0))
+        self.assertFalse(closed)
+        self.assertAlmostEqual(pos["quantity"], 0.1)
+        self.assertEqual(pos["sl_order_id"], "sl_synced_qty")
+
+        db = db_mod.SessionLocal()
+        try:
+            refreshed = db.query(db_mod.Trade).filter_by(id=tid).first()
+            self.assertAlmostEqual(refreshed.quantity, 0.1)
+            self.assertEqual(refreshed.sl_order_id, "sl_synced_qty")
+            db.delete(refreshed)
+            db.commit()
+        finally:
+            db.close()
+
+    def test_nt5_live_fee_from_my_trades_and_manual_close_deducts_fee(self):
+        ex = self._mock_exchange()
+        ex.create_market_buy_order.return_value = {"id": "entry_ord_1", "average": 50000.0, "filled": 0.1}
+        ex.create_order.return_value = {"id": "sl_ord_1"}
+        ex.fetch_my_trades.return_value = [
+            {"order": "entry_ord_1", "fee": {"cost": 2.0, "currency": "USDT"}}
+        ]
+        exec_ = Executor(exchange=ex, config={}, is_paper=False)
+        opened = exec_.open_long("BTCUSDT", 50000.0, 49500.0, 50750.0, 0.1, is_paper=False)
+        self.assertAlmostEqual(opened["entry_fee"], 2.0)
+
+    def test_na1_and_ns1_single_module_and_per_ip_rate_limit(self):
+        import importlib
+        d1 = importlib.import_module("database")
+        d2 = importlib.import_module("backend.database")
+        self.assertIs(d1, d2)
+        self.assertIs(d1.engine, d2.engine)
+
+        # Attacker failing 5 times from IP A must NOT lock out admin logging in from IP B
+        auth_mod._login_fails.clear()
+        for _ in range(5):
+            auth_mod.record_login_failure("203.0.113.9", "admin")
+        self.assertGreater(auth_mod.login_retry_after("203.0.113.9", "admin"), 0)
+        self.assertEqual(auth_mod.login_retry_after("198.51.100.2", "admin"), 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

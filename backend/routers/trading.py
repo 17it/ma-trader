@@ -37,6 +37,8 @@ from models import (
 )
 from executor import Executor
 from notifier import TelegramNotifier
+from strategy import MAStrategy
+from trader import get_trade_close_lock
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ router = APIRouter(tags=["trading"])
 # Cached public exchange singleton (avoids reloading markets on every /klines call)
 # ---------------------------------------------------------------------------
 _public_exchange_lock = threading.Lock()
+_public_exchange_call_lock = threading.Lock()
 _public_exchange_cache: dict = {"exchange": None, "proxy": None}
 
 
@@ -429,11 +432,13 @@ async def simulate_trade(
 
     price_risk = abs(entry_price - sl)
     balance = 10_000.0
-    raw_qty = balance * risk_pct / price_risk if price_risk > 0 else 0.0
-    max_notional = balance * leverage * 0.95
-    if raw_qty * entry_price > max_notional:
-        raw_qty = max_notional / entry_price
-    qty = round(raw_qty, 6)
+    qty = MAStrategy.calc_position_size(
+        capital=balance,
+        risk_pct=risk_pct,
+        entry_price=entry_price,
+        sl_distance=price_risk,
+        leverage=leverage,
+    )
     if qty <= 0:
         raise HTTPException(status_code=400, detail="计算得到的开仓数量无效")
 
@@ -453,6 +458,7 @@ async def simulate_trade(
         initial_risk=price_risk,
         trailing_activate_r=trailing_activate_r,
         breakeven_buffer=breakeven_buffer,
+        fee=0.0,
     )
     db.add(trade)
     db.commit()
@@ -547,54 +553,76 @@ async def manual_close_trade(
     requested_price = body.exit_price if body is not None else None
     exit_price: Optional[float] = requested_price
 
-    if not trade.is_paper:
-        # Live close: execute real reduceOnly market close on Binance Futures
-        executor = getattr(target_bot, "executor", None) if target_bot is not None else None
-        if executor is None or executor.exchange is None:
-            exchange = _build_exchange(cfg, require_auth=True)
-            if exchange is None:
-                raise HTTPException(status_code=400, detail="实盘平仓失败：未配置有效的 Binance API 凭证")
-            executor = Executor(exchange=exchange, config=cfg, is_paper=False)
+    close_lock = get_trade_close_lock(trade_id)
+    async with close_lock:
+        db.refresh(trade)
+        if trade.status != "open":
+            return TradeResponse.model_validate(trade)
 
-        if exit_price is None:
-            exit_price = await _resolve_live_price(request, trade.symbol, cfg, allow_spot=False) or trade.entry_price
+        close_fee = float(getattr(trade, "fee", 0.0) or 0.0)
+        final_reason = "manual"
 
-        try:
-            close_res = await asyncio.to_thread(executor.close_trade, trade, exit_price, "manual")
-            if isinstance(close_res, dict) and close_res.get("exit_price"):
-                exit_price = float(close_res["exit_price"])
-        except Exception as exc:
-            logger.error("Manual live close failed for trade #%s (%s): %s", trade_id, trade.symbol, exc)
-            raise HTTPException(status_code=502, detail=f"交易所平仓失败: {exc}")
-    else:
-        if exit_price is None:
-            exit_price = await _resolve_live_price(request, trade.symbol, cfg, allow_spot=True)
-            if not exit_price or exit_price <= 0:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"无法获取 {trade.symbol} 当前实时市价，请稍后重试或手动传入 exit_price",
-                )
+        if not trade.is_paper:
+            # Live close: execute real reduceOnly market close on Binance Futures
+            executor = getattr(target_bot, "executor", None) if target_bot is not None else None
+            if executor is None or executor.exchange is None:
+                exchange = _build_exchange(cfg, require_auth=True)
+                if exchange is None:
+                    raise HTTPException(status_code=400, detail="实盘平仓失败：未配置有效的 Binance API 凭证")
+                executor = Executor(exchange=exchange, config=cfg, is_paper=False)
 
-    # Atomic guard against concurrent close by _exit_monitor
-    db.refresh(trade)
-    if trade.status != "open":
-        return TradeResponse.model_validate(trade)
+            if exit_price is None:
+                exit_price = await _resolve_live_price(request, trade.symbol, cfg, allow_spot=False) or trade.entry_price
 
-    if trade.direction == "long":
-        pnl = (exit_price - trade.entry_price) * trade.quantity
-    else:
-        pnl = (trade.entry_price - exit_price) * trade.quantity
-    notional = trade.entry_price * trade.quantity
-    pnl_pct = (pnl / notional * 100.0) if notional > 0 else 0.0
+            try:
+                close_res = await asyncio.to_thread(executor.close_trade, trade, exit_price, "manual")
+                if isinstance(close_res, dict):
+                    if close_res.get("exit_price"):
+                        exit_price = float(close_res["exit_price"])
+                    if close_res.get("fee") is not None:
+                        close_fee = float(close_res["fee"])
+                    if close_res.get("already_closed_on_exchange") and close_res.get("close_reason"):
+                        final_reason = str(close_res["close_reason"])
+            except Exception as exc:
+                rearmed_id = getattr(exc, "rearmed_sl_order_id", None)
+                if rearmed_id:
+                    trade.sl_order_id = rearmed_id
+                    db.commit()
+                    if target_bot is not None and trade.symbol in getattr(target_bot, "positions", {}):
+                        target_bot.positions[trade.symbol]["sl_order_id"] = rearmed_id
+                logger.error("Manual live close failed for trade #%s (%s): %s", trade_id, trade.symbol, exc)
+                raise HTTPException(status_code=502, detail=f"交易所平仓失败: {exc}")
+        else:
+            if exit_price is None:
+                exit_price = await _resolve_live_price(request, trade.symbol, cfg, allow_spot=True)
+                if not exit_price or exit_price <= 0:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"无法获取 {trade.symbol} 当前实时市价，请稍后重试或手动传入 exit_price",
+                    )
 
-    trade.exit_price = exit_price
-    trade.pnl = round(pnl, 4)
-    trade.pnl_pct = round(pnl_pct, 4)
-    trade.close_time = datetime.now(timezone.utc)
-    trade.close_reason = "manual"
-    trade.status = "closed"
-    db.commit()
-    db.refresh(trade)
+        # Re-check open status inside lock before writing final P&L
+        db.refresh(trade)
+        if trade.status != "open":
+            return TradeResponse.model_validate(trade)
+
+        if trade.direction == "long":
+            gross_pnl = (exit_price - trade.entry_price) * trade.quantity
+        else:
+            gross_pnl = (trade.entry_price - exit_price) * trade.quantity
+        pnl = gross_pnl - close_fee
+        notional = trade.entry_price * trade.quantity
+        pnl_pct = (pnl / notional * 100.0) if notional > 0 else 0.0
+
+        trade.exit_price = exit_price
+        trade.pnl = round(pnl, 4)
+        trade.pnl_pct = round(pnl_pct, 4)
+        trade.fee = round(close_fee, 6)
+        trade.close_time = datetime.now(timezone.utc)
+        trade.close_reason = final_reason
+        trade.status = "closed"
+        db.commit()
+        db.refresh(trade)
 
     pnl_sign = "+" if trade.pnl >= 0 else ""
     record_operation_log(
@@ -725,8 +753,12 @@ async def get_klines(
 
     raw = []
     if exchange is not None and not endTime:
+        def _fetch_ccxt_locked():
+            with _public_exchange_call_lock:
+                return exchange.fetch_ohlcv(symbol, timeframe, limit=limit + 60)
+
         try:
-            raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, limit=limit + 60)
+            raw = await asyncio.to_thread(_fetch_ccxt_locked)
         except Exception as exc:
             logger.warning("fetch_ohlcv for %s failed: %s", symbol, exc)
 

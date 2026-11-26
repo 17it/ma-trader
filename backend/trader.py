@@ -9,18 +9,32 @@ notifications via *notifier*.
 
 import asyncio
 import logging
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
-try:
-    from backend.strategy import BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
-    from backend.binance_ws import BinanceWSStreamer
-except ImportError:
-    from strategy import BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
-    from binance_ws import BinanceWSStreamer
+sys.modules.setdefault("trader", sys.modules[__name__])
+sys.modules.setdefault("backend.trader", sys.modules[__name__])
+
+from strategy import BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
+from binance_ws import BinanceWSStreamer
 
 logger = logging.getLogger(__name__)
+
+# Shared cross-bot deduplication cache so dual Paper+Live bots don't emit duplicate signal logs per bar
+_RECENT_SIGNAL_EVENTS: Dict[str, tuple] = {}
+# Shared per-trade asyncio locks preventing concurrent auto-close and manual-close races
+_TRADE_CLOSE_LOCKS: Dict[int, asyncio.Lock] = {}
+
+
+def get_trade_close_lock(trade_id: Optional[int]) -> asyncio.Lock:
+    key = int(trade_id or 0)
+    lock = _TRADE_CLOSE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _TRADE_CLOSE_LOCKS[key] = lock
+    return lock
 
 # Maximum polling interval per timeframe (seconds); actual sleep also aligns to bar-close + 2s.
 _TF_SECONDS: Dict[str, int] = {
@@ -130,7 +144,8 @@ class TradingBot:
 
         self.running = True
         self._started_at = time.time()
-        self.broadcast({"type": "bot_status", "running": True})
+        status_key = "paper_running" if self.is_paper else "live_running"
+        self.broadcast({"type": "bot_status", "running": True, status_key: True})
         self.broadcast({"type": "log", "level": "info", "message": "Bot started"})
 
         symbol_configs = self._load_symbol_configs()
@@ -155,10 +170,7 @@ class TradingBot:
             self.ws_streamer.update_symbols(active_symbols)
 
         try:
-            try:
-                from backend.database import record_operation_log
-            except ImportError:
-                from database import record_operation_log
+            from database import record_operation_log
             mode_str = "paper" if self.is_paper else "live"
             mode_label = "模拟交易" if self.is_paper else "实盘交易"
             syms_label = ", ".join(active_symbols) if active_symbols else "无"
@@ -175,10 +187,7 @@ class TradingBot:
 
         # Restore open trades from DB into memory (strictly scoped by is_paper)
         try:
-            try:
-                from backend.database import Trade
-            except ImportError:
-                from database import Trade
+            from database import Trade
             session = self.db_session_factory()
             try:
                 open_trades = session.query(Trade).filter_by(status="open", is_paper=self.is_paper).all()
@@ -190,8 +199,11 @@ class TradingBot:
                         ):
                             saved_risk = abs(ot.entry_price - ot.stop_loss)
                         else:
-                            sym_rr = rr_by_symbol.get(ot.symbol, 1.5) or 1.5
-                            saved_risk = abs(ot.take_profit - ot.entry_price) / sym_rr
+                            sym_rr = rr_by_symbol.get(ot.symbol, 1.5)
+                            if sym_rr and sym_rr > 0 and ot.take_profit and abs(ot.take_profit - ot.entry_price) > 0:
+                                saved_risk = abs(ot.take_profit - ot.entry_price) / sym_rr
+                            else:
+                                saved_risk = ot.entry_price * 0.003
                     self.positions[ot.symbol] = {
                         "id": ot.id,
                         "symbol": ot.symbol,
@@ -218,6 +230,7 @@ class TradingBot:
                             if getattr(ot, "breakeven_buffer", None) is not None
                             else be_buf_by_symbol.get(ot.symbol, BREAKEVEN_BUFFER)
                         ),
+                        "entry_fee": float(getattr(ot, "fee", 0.0) or 0.0),
                     }
                 if open_trades:
                     logger.info("Restored %d open trades from database into memory", len(open_trades))
@@ -257,13 +270,11 @@ class TradingBot:
                 pass
             self._exit_task = None
 
-        self.broadcast({"type": "bot_status", "running": False})
+        status_key = "paper_running" if self.is_paper else "live_running"
+        self.broadcast({"type": "bot_status", status_key: False})
         self.broadcast({"type": "log", "level": "info", "message": "Bot stopped"})
         try:
-            try:
-                from backend.database import record_operation_log
-            except ImportError:
-                from database import record_operation_log
+            from database import record_operation_log
             mode_str = "paper" if self.is_paper else "live"
             mode_label = "模拟交易" if self.is_paper else "实盘交易"
             record_operation_log(
@@ -421,26 +432,45 @@ class TradingBot:
                             self.broadcast({"type": "signal_reset", "symbol": symbol})
                     elif signal.get("pending"):
                         self.confirm_counts[symbol] = signal["confirm"]
-                        self.broadcast({
-                            "type": "signal",
-                            "symbol": symbol,
-                            "direction": signal["direction"],
-                            "confirm": signal["confirm"],
-                            "max_confirm": signal["max_confirm"],
-                            "blocked_by_wick": bool(signal.get("blocked_by_wick")),
-                        })
+                        sig_fp = (
+                            str(closed_candle_ts),
+                            signal["direction"],
+                            signal["confirm"],
+                            bool(signal.get("blocked_by_wick")),
+                        )
+                        if _RECENT_SIGNAL_EVENTS.get(symbol) != sig_fp:
+                            _RECENT_SIGNAL_EVENTS[symbol] = sig_fp
+                            self.broadcast({
+                                "type": "signal",
+                                "symbol": symbol,
+                                "direction": signal["direction"],
+                                "confirm": signal["confirm"],
+                                "max_confirm": signal["max_confirm"],
+                                "blocked_by_wick": bool(signal.get("blocked_by_wick")),
+                            })
                     else:
                         self.confirm_counts[symbol] = signal["confirm"]
-                        self.broadcast({
-                            "type": "signal",
-                            "symbol": symbol,
-                            "direction": signal["direction"],
-                            "confirm": signal["confirm"],
-                            "max_confirm": signal["max_confirm"],
-                            "blocked_by_wick": bool(signal.get("blocked_by_wick")),
-                        })
+                        sig_fp = (
+                            str(closed_candle_ts),
+                            signal["direction"],
+                            signal["confirm"],
+                            bool(signal.get("blocked_by_wick")),
+                        )
+                        if _RECENT_SIGNAL_EVENTS.get(symbol) != sig_fp:
+                            _RECENT_SIGNAL_EVENTS[symbol] = sig_fp
+                            self.broadcast({
+                                "type": "signal",
+                                "symbol": symbol,
+                                "direction": signal["direction"],
+                                "confirm": signal["confirm"],
+                                "max_confirm": signal["max_confirm"],
+                                "blocked_by_wick": bool(signal.get("blocked_by_wick")),
+                            })
                         if symbol not in self.positions:
                             await self._handle_signal(symbol, signal, closed_df, symbol_config)
+                            if symbol in self.positions:
+                                strategy.reset()
+                                self.confirm_counts[symbol] = 0
 
             except asyncio.CancelledError:
                 raise
@@ -621,6 +651,7 @@ class TradingBot:
                     initial_risk=sl_distance,
                     trailing_activate_r=trailing_activate_r,
                     breakeven_buffer=breakeven_buffer,
+                    fee=round(entry_fee, 6),
                 )
                 session.add(trade)
                 session.commit()
@@ -746,27 +777,60 @@ class TradingBot:
     async def _reconcile_live_position(self, symbol: str, pos: dict, fallback_price: Optional[float]) -> bool:
         """
         Verify a live position still exists on the exchange.
-        If the exchange already closed it (e.g. SL filled), reconcile DB & memory
-        and return True so the caller skips further checks.
+        - If partially reduced externally, syncs pos['quantity'], DB quantity, and exchange SL qty.
+        - If already closed (size == 0, e.g. SL filled), reconciles DB & memory using Algo SL fill
+          and returns True so the caller skips further checks.
         """
         if pos.get("is_paper", True) or self.executor is None or not hasattr(self.executor, "get_position"):
             return False
         ex_pos = await asyncio.to_thread(self.executor.get_position, symbol)
-        if ex_pos is None or ex_pos["size"] > 0:
+        if ex_pos is None:
             return False
 
-        # Exchange reports 0 position — check if our SL order was filled to get exact fill price
+        if ex_pos["size"] > 0:
+            local_qty = float(pos.get("quantity") or 0.0)
+            if local_qty > 0 and abs(ex_pos["size"] - local_qty) / local_qty > 0.001:
+                new_qty = float(ex_pos["size"])
+                logger.info(
+                    "[LIVE] Reconciled partial size change for %s: %s -> %s",
+                    symbol, local_qty, new_qty,
+                )
+                pos["quantity"] = new_qty
+                try:
+                    from database import Trade
+                    session = self.db_session_factory()
+                    try:
+                        session.query(Trade).filter_by(id=pos["id"], status="open").update({"quantity": new_qty})
+                        session.commit()
+                    finally:
+                        session.close()
+                except Exception as exc:
+                    logger.warning("Failed to persist reconciled quantity for %s: %s", symbol, exc)
+                if pos.get("stop_loss"):
+                    await self._sync_exchange_sl(symbol, pos, float(pos["stop_loss"]))
+                    self._persist_trailing_update(
+                        pos["id"], float(pos["stop_loss"]), bool(pos.get("trailing_active", False)), pos.get("sl_order_id")
+                    )
+            return False
+
+        # Exchange reports 0 position — check if our Algo SL order was filled to get exact fill price & fee
         fill_price = fallback_price or pos["stop_loss"]
         close_reason = "exchange_closed"
+        exit_fee = 0.0
         sl_order_id = pos.get("sl_order_id")
         if sl_order_id and hasattr(self.executor, "fetch_order_fill"):
-            sl_order = await asyncio.to_thread(self.executor.fetch_order_fill, symbol, sl_order_id)
+            try:
+                sl_order = await asyncio.to_thread(self.executor.fetch_order_fill, symbol, sl_order_id, True)
+            except TypeError:
+                sl_order = await asyncio.to_thread(self.executor.fetch_order_fill, symbol, sl_order_id)
             if isinstance(sl_order, dict):
                 status_s = str(sl_order.get("status") or "").lower()
                 avg = float(sl_order.get("average") or sl_order.get("price") or 0.0)
                 if avg > 0:
                     fill_price = avg
-                if status_s == "closed":
+                if hasattr(self.executor, "_resolve_order_fee"):
+                    exit_fee = float(self.executor._resolve_order_fee(symbol, sl_order) or 0.0)
+                if status_s in {"closed", "filled", "triggered"}:
                     if pos.get("trailing_active"):
                         close_reason = "trailing_stop"
                     elif (pos["direction"] == "long" and pos["stop_loss"] > pos["entry_price"]) or (
@@ -780,7 +844,9 @@ class TradingBot:
             "[LIVE] Reconciled %s: exchange position is 0; marking trade #%s closed (%s @ %s)",
             symbol, pos.get("id"), close_reason, fill_price,
         )
-        await self._close_trade(symbol, pos, close_reason, float(fill_price), skip_exchange_order=True)
+        await self._close_trade(
+            symbol, pos, close_reason, float(fill_price), skip_exchange_order=True, extra_exit_fee=exit_fee
+        )
         return True
 
     async def _check_exits(self):
@@ -799,7 +865,7 @@ class TradingBot:
                     risk_r = abs(entry_price - stop_loss) if (
                         (direction == "long" and stop_loss < entry_price)
                         or (direction == "short" and stop_loss > entry_price)
-                    ) else abs(take_profit - entry_price) / 1.5
+                    ) else max(entry_price * 0.003, abs(take_profit - entry_price) / 1.5 if take_profit else 0.0)
                     pos["risk_r"] = risk_r
 
                 price = await asyncio.to_thread(self.data_feed.get_ticker, symbol)
@@ -942,122 +1008,140 @@ class TradingBot:
         reason: str,
         exit_price: float,
         skip_exchange_order: bool = False,
+        extra_exit_fee: float = 0.0,
     ):
-        """Execute live close if needed, atomically persist closure, and broadcast."""
+        """Execute live close if needed, atomically persist closure under per-trade lock, and broadcast."""
         trade_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
         is_paper = pos.get("is_paper", True) if isinstance(pos, dict) else getattr(pos, "is_paper", True)
-        total_fee = float(pos.get("entry_fee") or 0.0) if isinstance(pos, dict) else 0.0
+        total_fee = (
+            float(pos.get("entry_fee") or 0.0) + float(extra_exit_fee or 0.0)
+            if isinstance(pos, dict)
+            else float(extra_exit_fee or 0.0)
+        )
 
-        try:
-            if not is_paper and not skip_exchange_order and self.executor is not None:
-                close_res = await asyncio.to_thread(
-                    self.executor.close_trade, pos, exit_price, reason
-                )
-                if isinstance(close_res, dict):
-                    if close_res.get("exit_price"):
-                        exit_price = float(close_res["exit_price"])
-                    if close_res.get("close_reason"):
-                        reason = str(close_res["close_reason"])
-                    if close_res.get("fee") is not None:
-                        total_fee = float(close_res["fee"])
-
-            trade_dict = None
-            pnl = 0.0
-            pnl_pct = 0.0
-
-            session = self.db_session_factory()
+        close_lock = get_trade_close_lock(trade_id)
+        async with close_lock:
             try:
+                # Quick DB check before sending an exchange order if manual_close_trade already finished
+                from database import Trade, record_operation_log
+                pre_s = self.db_session_factory()
                 try:
-                    from backend.database import Trade
-                except ImportError:
-                    from database import Trade
-                db_trade = session.query(Trade).filter_by(id=trade_id).first()
-                if db_trade is None:
-                    logger.warning("Trade id=%s not found in DB when closing", trade_id)
-                    self.positions.pop(symbol, None)
-                    return
+                    pre_row = pre_s.query(Trade).filter_by(id=trade_id).first()
+                    if pre_row is None or pre_row.status != "open":
+                        self.positions.pop(symbol, None)
+                        return
+                finally:
+                    pre_s.close()
 
-                # Guard against double-close race with manual_close_trade (fixes T9)
-                if db_trade.status != "open":
-                    logger.info("Trade id=%s already closed (status=%s); skipping overwrite.", trade_id, db_trade.status)
-                    self.positions.pop(symbol, None)
-                    return
+                if not is_paper and not skip_exchange_order and self.executor is not None:
+                    close_res = await asyncio.to_thread(
+                        self.executor.close_trade, pos, exit_price, reason
+                    )
+                    if isinstance(close_res, dict):
+                        if close_res.get("exit_price"):
+                            exit_price = float(close_res["exit_price"])
+                        if close_res.get("close_reason"):
+                            reason = str(close_res["close_reason"])
+                        if close_res.get("fee") is not None:
+                            total_fee = float(close_res["fee"])
 
-                db_trade.exit_price = exit_price
-                db_trade.close_reason = reason
-                db_trade.close_time = datetime.now(timezone.utc)
-                db_trade.status = "closed"
+                trade_dict = None
+                pnl = 0.0
+                pnl_pct = 0.0
 
-                if db_trade.direction == "long":
-                    gross_pnl = (exit_price - db_trade.entry_price) * db_trade.quantity
-                else:
-                    gross_pnl = (db_trade.entry_price - exit_price) * db_trade.quantity
-
-                db_trade.pnl = round(gross_pnl - total_fee, 4)
-                notional = db_trade.entry_price * db_trade.quantity
-                db_trade.pnl_pct = round((db_trade.pnl / notional * 100.0) if notional > 0 else 0.0, 4)
-
-                pnl = db_trade.pnl
-                pnl_pct = db_trade.pnl_pct
-                trade_dict = {
-                    "id": db_trade.id,
-                    "symbol": db_trade.symbol,
-                    "direction": db_trade.direction,
-                    "entry_price": db_trade.entry_price,
-                    "exit_price": db_trade.exit_price,
-                    "pnl": db_trade.pnl,
-                    "pnl_pct": db_trade.pnl_pct,
-                    "close_reason": reason,
-                    "close_time": db_trade.close_time.isoformat() if db_trade.close_time else None,
-                }
-                session.commit()
-            finally:
-                session.close()
-
-            self.positions.pop(symbol, None)
-
-            if trade_dict:
-                self.broadcast({"type": "trade_closed", "trade": trade_dict})
-
-            emoji = "✅" if pnl >= 0 else "❌"
-            pnl_sign = "+" if pnl >= 0 else ""
-            mode_tag = "PAPER" if is_paper else "LIVE"
-            entry_p = trade_dict["entry_price"] if trade_dict else ""
-            msg = (
-                f"{emoji} {symbol} closed ({reason}) [{mode_tag}]\n"
-                f"Entry: {entry_p}  Exit: {exit_price}\n"
-                f"PnL: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)"
-            )
-            try:
+                session = self.db_session_factory()
                 try:
-                    from backend.database import record_operation_log
-                except ImportError:
-                    from database import record_operation_log
-                record_operation_log(
-                    log_type="close",
-                    title=f"{symbol} 平仓 ({reason})",
-                    message=f"入场: {entry_p} | 出场: {exit_price} | 盈亏: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)",
-                    level="success" if pnl >= 0 else "warning",
-                    symbol=symbol,
-                    mode="paper" if is_paper else "live",
+                    db_trade = session.query(Trade).filter_by(id=trade_id).first()
+                    if db_trade is None:
+                        logger.warning("Trade id=%s not found in DB when closing", trade_id)
+                        self.positions.pop(symbol, None)
+                        return
+
+                    # Guard against double-close race with manual_close_trade (fixes T9)
+                    if db_trade.status != "open":
+                        logger.info("Trade id=%s already closed (status=%s); skipping overwrite.", trade_id, db_trade.status)
+                        self.positions.pop(symbol, None)
+                        return
+
+                    db_trade.exit_price = exit_price
+                    db_trade.close_reason = reason
+                    db_trade.close_time = datetime.now(timezone.utc)
+                    db_trade.status = "closed"
+
+                    if db_trade.direction == "long":
+                        gross_pnl = (exit_price - db_trade.entry_price) * db_trade.quantity
+                    else:
+                        gross_pnl = (db_trade.entry_price - exit_price) * db_trade.quantity
+
+                    db_trade.fee = round(total_fee, 6)
+                    db_trade.pnl = round(gross_pnl - total_fee, 4)
+                    notional = db_trade.entry_price * db_trade.quantity
+                    db_trade.pnl_pct = round((db_trade.pnl / notional * 100.0) if notional > 0 else 0.0, 4)
+
+                    pnl = db_trade.pnl
+                    pnl_pct = db_trade.pnl_pct
+                    trade_dict = {
+                        "id": db_trade.id,
+                        "symbol": db_trade.symbol,
+                        "direction": db_trade.direction,
+                        "entry_price": db_trade.entry_price,
+                        "exit_price": db_trade.exit_price,
+                        "pnl": db_trade.pnl,
+                        "pnl_pct": db_trade.pnl_pct,
+                        "fee": db_trade.fee,
+                        "close_reason": reason,
+                        "close_time": db_trade.close_time.isoformat() if db_trade.close_time else None,
+                    }
+                    session.commit()
+                finally:
+                    session.close()
+
+                self.positions.pop(symbol, None)
+
+                if trade_dict:
+                    self.broadcast({"type": "trade_closed", "trade": trade_dict})
+
+                emoji = "✅" if pnl >= 0 else "❌"
+                pnl_sign = "+" if pnl >= 0 else ""
+                mode_tag = "PAPER" if is_paper else "LIVE"
+                entry_p = trade_dict["entry_price"] if trade_dict else ""
+                msg = (
+                    f"{emoji} {symbol} closed ({reason}) [{mode_tag}]\n"
+                    f"Entry: {entry_p}  Exit: {exit_price}\n"
+                    f"PnL: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)"
                 )
-                self.broadcast({"type": "operation_log"})
-            except Exception:
-                pass
-            self.broadcast({"type": "log", "level": "info", "message": msg})
-            if self.notifier:
                 try:
-                    await self.notifier.send(msg, parse_mode=None)
-                except Exception as exc:
-                    logger.warning("Telegram close notification failed: %s", exc)
-
-        except Exception as exc:
-            logger.error("_close_trade(%s) failed: %s", symbol, exc, exc_info=True)
-            if self.notifier and not is_paper:
-                try:
-                    await self.notifier.notify_error(f"[{symbol}] 实盘平仓失败 ({reason}): {exc}")
+                    record_operation_log(
+                        log_type="close",
+                        title=f"{symbol} 平仓 ({reason})",
+                        message=f"入场: {entry_p} | 出场: {exit_price} | 盈亏: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)",
+                        level="success" if pnl >= 0 else "warning",
+                        symbol=symbol,
+                        mode="paper" if is_paper else "live",
+                    )
+                    self.broadcast({"type": "operation_log"})
                 except Exception:
                     pass
+                self.broadcast({"type": "log", "level": "info", "message": msg})
+                if self.notifier:
+                    try:
+                        await self.notifier.send(msg, parse_mode=None)
+                    except Exception as exc:
+                        logger.warning("Telegram close notification failed: %s", exc)
+
+            except Exception as exc:
+                rearmed_id = getattr(exc, "rearmed_sl_order_id", None)
+                if rearmed_id and isinstance(pos, dict):
+                    pos["sl_order_id"] = rearmed_id
+                    self._persist_trailing_update(
+                        pos["id"], float(pos.get("stop_loss") or 0.0), bool(pos.get("trailing_active", False)), rearmed_id
+                    )
+                logger.error("_close_trade(%s) failed: %s", symbol, exc, exc_info=True)
+                if self.notifier and not is_paper:
+                    try:
+                        await self.notifier.notify_error(f"[{symbol}] 实盘平仓失败 ({reason}): {exc}")
+                    except Exception:
+                        pass
 
     # ------------------------------------------------------------------
     # WebSocket broadcasting & Status
@@ -1082,10 +1166,7 @@ class TradingBot:
         if mtype not in {"signal", "log", "trade_opened", "trade_closed"}:
             return
         try:
-            try:
-                from database import record_system_log
-            except ImportError:
-                from backend.database import record_system_log
+            from database import record_system_log
 
             log_msg = None
             log_level = "info"
@@ -1109,7 +1190,7 @@ class TradingBot:
                 t = message.get("trade") or {}
                 log_symbol = t.get("symbol")
                 d = str(t.get("direction") or "").upper()
-                log_msg = f"[开仓通知] {d} {log_symbol} 价格:{t.get('entry_price')} 止损:{t.get('stop_loss')} 止盈:{t.get('take_profit')}"
+                log_msg = f"[开仓通知] {d} {log_symbol} 价格:{t.get('entry_price')} 止损:{t.get('stop_loss')} 追踪目标:MA25"
                 log_level = "success"
             elif mtype == "trade_closed":
                 t = message.get("trade") or {}
@@ -1120,12 +1201,19 @@ class TradingBot:
                 log_msg = f"[平仓通知] {log_symbol} ({t.get('close_reason') or '平仓'}) 盈亏:{pnl_str}"
 
             if log_msg:
-                session = self.db_session_factory() if callable(self.db_session_factory) else None
+                def _write_log():
+                    session = self.db_session_factory() if callable(self.db_session_factory) else None
+                    try:
+                        record_system_log(log_msg, level=log_level, symbol=log_symbol, db=session)
+                    finally:
+                        if session is not None:
+                            session.close()
+
                 try:
-                    record_system_log(log_msg, level=log_level, symbol=log_symbol, db=session)
-                finally:
-                    if session is not None:
-                        session.close()
+                    loop = asyncio.get_running_loop()
+                    loop.run_in_executor(None, _write_log)
+                except RuntimeError:
+                    _write_log()
         except Exception as exc:
             logger.debug("Failed to persist system log event: %s", exc)
 

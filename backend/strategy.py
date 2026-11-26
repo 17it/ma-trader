@@ -8,10 +8,14 @@ Each symbol gets its own MAStrategy instance so confirm_count is never shared.
 
 import logging
 import math
+import sys
 from datetime import datetime
 from typing import Optional, Tuple
 
 import pandas as pd
+
+sys.modules.setdefault("strategy", sys.modules[__name__])
+sys.modules.setdefault("backend.strategy", sys.modules[__name__])
 
 logger = logging.getLogger(__name__)
 
