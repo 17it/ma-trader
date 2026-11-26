@@ -20,6 +20,8 @@ ATR_MA25_BIAS_MULT = 2.5
 WICK_BODY_MULT = 1.5
 TRAILING_ACTIVATE_R = 1.2
 BREAKEVEN_BUFFER = 0.001  # +0.1% / -0.1% fee buffer
+DEFAULT_FEE_RATE = 0.0004
+DEFAULT_SLIPPAGE_RATE = 0.0001
 
 
 class MAStrategy:
@@ -62,6 +64,32 @@ class MAStrategy:
             sl_distance = stop_loss - entry_price
             take_profit = entry_price - sl_distance * rr_ratio
         return stop_loss, take_profit, max(0.0, sl_distance)
+
+    @staticmethod
+    def calc_position_size(
+        capital: float,
+        risk_pct: float,
+        entry_price: float,
+        sl_distance: float,
+        leverage: int = 5,
+        fee_rate: float = DEFAULT_FEE_RATE,
+        slippage_rate: float = DEFAULT_SLIPPAGE_RATE,
+    ) -> float:
+        """
+        Fee- and slippage-aware risk-based position sizing (shared by live & backtest).
+        Includes estimated round-trip trading fees + slippage in per-unit risk so a
+        stop-loss hit never exceeds the configured *risk_pct* of account capital even
+        when the stop distance is tight.
+        """
+        if capital <= 0 or risk_pct <= 0 or entry_price <= 0 or sl_distance <= 0:
+            return 0.0
+        round_trip_friction = entry_price * (2.0 * max(0.0, fee_rate) + 2.0 * max(0.0, slippage_rate))
+        effective_risk_per_unit = sl_distance + round_trip_friction
+        raw_qty = (capital * risk_pct) / effective_risk_per_unit
+        max_notional = capital * leverage * 0.95
+        if raw_qty * entry_price > max_notional:
+            raw_qty = max_notional / entry_price
+        return round(raw_qty, 6)
 
     # ------------------------------------------------------------------
     # Indicator calculation (MA7 / MA25 / MA60 + ATR14)
@@ -117,11 +145,16 @@ class MAStrategy:
 
     @staticmethod
     def check_htf_scalars(close: float, ma7: float, ma25: float, ma60: float) -> Optional[str]:
-        if any(math.isnan(v) for v in (close, ma7, ma25, ma60)):
+        """
+        Determine higher-timeframe trend from MA alignment alone (MA7 > MA25 > MA60 or vice-versa).
+        Does NOT require close > ma7 so normal pullbacks inside an HTF uptrend never disable
+        the HTF filter and permit counter-trend LTF entries.
+        """
+        if any(math.isnan(v) for v in (ma7, ma25, ma60)):
             return None
-        if close > ma7 > ma25 > ma60:
+        if ma7 > ma25 > ma60:
             return "long"
-        if close < ma7 < ma25 < ma60:
+        if ma7 < ma25 < ma60:
             return "short"
         return None
 

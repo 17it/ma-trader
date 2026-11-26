@@ -535,6 +535,20 @@ class TestBacktesterParityAndCache(unittest.TestCase):
         self.assertEqual(MAStrategy.evaluate_exit_bar("short", close=101.0, ma25=100.0, trailing_active=True), "ma25_trailing")
         self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=101.0, ma25=100.0, trailing_active=True))
 
+        # 5. HTF trend stays 'long' on healthy pullback (close < ma7 while ma7 > ma25 > ma60)
+        self.assertEqual(MAStrategy.check_htf_scalars(close=60093.2, ma7=60184.0, ma25=59657.0, ma60=59059.0), "long")
+        self.assertEqual(MAStrategy.check_htf_scalars(close=60300.0, ma7=59000.0, ma25=59500.0, ma60=60000.0), "short")
+
+        # 6. Fee- and slippage-aware position sizing keeps total stop-loss + friction <= risk_pct
+        cap = 10_000.0
+        risk_pct = 0.012
+        entry = 60000.0
+        sl_dist = 200.0
+        qty = MAStrategy.calc_position_size(cap, risk_pct, entry, sl_dist, leverage=8, fee_rate=0.0004, slippage_rate=0.0001)
+        worst_loss = qty * (sl_dist + entry * (2 * 0.0004 + 2 * 0.0001))
+        self.assertLessEqual(worst_loss, cap * risk_pct + 0.05)
+        self.assertLess(qty, round((cap * risk_pct) / sl_dist, 6))
+
     def test_cache_rejects_unclosed_forming_candle(self):
         now_ms = int(time.time() * 1000)
         closed_ts = ((now_ms // 60_000) - 5) * 60_000

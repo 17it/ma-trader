@@ -505,12 +505,13 @@ class TradingBot:
                 self.broadcast({"type": "log", "level": "error", "message": msg})
                 return
 
-        risk_amount = balance * risk_pct
-        raw_qty = risk_amount / sl_distance
-        max_notional = balance * leverage * 0.95
-        if raw_qty * entry_price > max_notional:
-            raw_qty = max_notional / entry_price
-        quantity = round(raw_qty, 6)
+        quantity = MAStrategy.calc_position_size(
+            capital=balance,
+            risk_pct=risk_pct,
+            entry_price=entry_price,
+            sl_distance=sl_distance,
+            leverage=leverage,
+        )
         if quantity <= 0:
             return
 

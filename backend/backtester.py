@@ -329,13 +329,15 @@ class Backtester:
                     rr_ratio=rr_ratio,
                 )
                 if risk_r > 0:
-                    risk_amount = capital * risk_per_trade
-                    raw_qty = risk_amount / risk_r
-                    # Cap notional exposure within available margin * leverage (aligned with TradingBot)
-                    max_notional = capital * leverage * 0.95
-                    if raw_qty * entry_fill > max_notional:
-                        raw_qty = max_notional / entry_fill
-                    qty = round(raw_qty, 6)
+                    qty = MAStrategy.calc_position_size(
+                        capital=capital,
+                        risk_pct=risk_per_trade,
+                        entry_price=entry_fill,
+                        sl_distance=risk_r,
+                        leverage=leverage,
+                        fee_rate=fee_rate,
+                        slippage_rate=slippage_rate,
+                    )
                     if qty > 0:
                         in_trade = True
                         trailing_active = False
