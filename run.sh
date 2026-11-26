@@ -41,7 +41,7 @@ mkdir -p "$SCRIPT_DIR/data"
 chmod 700 "$SCRIPT_DIR/data"
 
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8080}"
+PORT="${PORT:-8888}"
 
 RELOAD_FLAG=""
 if [[ "${1:-}" == "--reload" ]]; then
