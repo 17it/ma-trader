@@ -202,6 +202,36 @@ class TestSecurityAndAPI(unittest.TestCase):
         )
         self.assertEqual(r_risk.status_code, 422)
 
+        # Valid per-symbol trailing_activate_r & breakeven_buffer CRUD
+        r_ok = self.client.post(
+            "/api/symbols",
+            headers=self.auth_headers,
+            json={
+                "symbol": "SOLUSDT",
+                "timeframe": "15m",
+                "htf_timeframe": "1h",
+                "leverage": 5,
+                "risk_per_trade": 0.01,
+                "trailing_activate_r": 1.2,
+                "breakeven_buffer": 0.001,
+            },
+        )
+        self.assertEqual(r_ok.status_code, 201)
+        created = r_ok.json()
+        self.assertAlmostEqual(created["trailing_activate_r"], 1.2)
+        self.assertAlmostEqual(created["breakeven_buffer"], 0.001)
+
+        r_upd = self.client.post(
+            f"/api/symbols/{created['id']}",
+            headers=self.auth_headers,
+            json={"trailing_activate_r": 0.88, "breakeven_buffer": 0.003},
+        )
+        self.assertEqual(r_upd.status_code, 200)
+        self.assertAlmostEqual(r_upd.json()["trailing_activate_r"], 0.88)
+        self.assertAlmostEqual(r_upd.json()["breakeven_buffer"], 0.003)
+
+        self.assertEqual(self.client.delete(f"/api/symbols/{created['id']}", headers=self.auth_headers).status_code, 204)
+
     def test_05_websocket_first_frame_auth(self):
         # Valid first-frame auth succeeds and receives bot_status
         with self.client.websocket_connect("/ws") as ws:
@@ -548,6 +578,14 @@ class TestBacktesterParityAndCache(unittest.TestCase):
         worst_loss = qty * (sl_dist + entry * (2 * 0.0004 + 2 * 0.0001))
         self.assertLessEqual(worst_loss, cap * risk_pct + 0.05)
         self.assertLess(qty, round((cap * risk_pct) / sl_dist, 6))
+
+        # 7. 0.88R -> +0.3% profit lock (and safe cap when initial stop is ultra-tight 0.30%)
+        wide_lock = MAStrategy.compute_trailing_lock_sl("long", 60000.0, 600.0, 59400.0)
+        self.assertAlmostEqual(wide_lock, 60000.0 * 1.003, places=4)
+        tight_lock = MAStrategy.compute_trailing_lock_sl("long", 60000.0, 180.0, 59820.0)
+        # 0.88 * 180 = 158.4 -> trigger 60158.4; lock MUST stay below trigger price!
+        self.assertLess(tight_lock, 60000.0 + 0.88 * 180.0)
+        self.assertGreater(tight_lock, 60000.0)
 
     def test_cache_rejects_unclosed_forming_candle(self):
         now_ms = int(time.time() * 1000)

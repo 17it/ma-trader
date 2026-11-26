@@ -398,6 +398,16 @@ async def simulate_trade(
     leverage = sym_cfg.leverage if sym_cfg else 5
     timeframe = sym_cfg.timeframe if sym_cfg else "1m"
     confirm_count = sym_cfg.confirm_candles if sym_cfg else 2
+    trailing_activate_r = (
+        float(sym_cfg.trailing_activate_r)
+        if sym_cfg and getattr(sym_cfg, "trailing_activate_r", None) is not None
+        else 0.88
+    )
+    breakeven_buffer = (
+        float(sym_cfg.breakeven_buffer)
+        if sym_cfg and getattr(sym_cfg, "breakeven_buffer", None) is not None
+        else 0.003
+    )
 
     sl_pct = 0.005
     if direction == "long":
@@ -431,6 +441,8 @@ async def simulate_trade(
         timeframe=timeframe,
         confirm_count=confirm_count,
         initial_risk=price_risk,
+        trailing_activate_r=trailing_activate_r,
+        breakeven_buffer=breakeven_buffer,
     )
     db.add(trade)
     db.commit()
@@ -456,6 +468,8 @@ async def simulate_trade(
             "sl_order_id": None,
             "trailing_active": False,
             "risk_r": price_risk,
+            "trailing_activate_r": trailing_activate_r,
+            "breakeven_buffer": breakeven_buffer,
         }
 
     dir_label = "做多" if direction == "long" else "做空"

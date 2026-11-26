@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 ATR_PERIOD = 14
 ATR_MA25_BIAS_MULT = 2.5
 WICK_BODY_MULT = 1.5
-TRAILING_ACTIVATE_R = 1.2
-BREAKEVEN_BUFFER = 0.001  # +0.1% / -0.1% fee buffer
+TRAILING_ACTIVATE_R = 0.88
+BREAKEVEN_BUFFER = 0.003  # +0.3% / -0.3% profit-lock buffer
 DEFAULT_FEE_RATE = 0.0004
 DEFAULT_SLIPPAGE_RATE = 0.0001
 
@@ -90,6 +90,29 @@ class MAStrategy:
         if raw_qty * entry_price > max_notional:
             raw_qty = max_notional / entry_price
         return round(raw_qty, 6)
+
+    @staticmethod
+    def compute_trailing_lock_sl(
+        direction: str,
+        entry_price: float,
+        risk_r: float,
+        current_stop_loss: float,
+        activate_r: float = TRAILING_ACTIVATE_R,
+        breakeven_buffer: float = BREAKEVEN_BUFFER,
+    ) -> float:
+        """
+        Compute the locked stop-loss when floating profit reaches *activate_r* (default 0.88R).
+        Targets entry ± *breakeven_buffer* (default ±0.3%), safely capped inside the trigger price
+        so ultra-tight 0.30% stops never produce an SL beyond the live price (which Binance
+        would reject as immediately triggering).
+        """
+        if direction == "long":
+            trigger_price = entry_price + activate_r * risk_r
+            target_lock = min(entry_price * (1.0 + breakeven_buffer), trigger_price * 0.9995)
+            return max(current_stop_loss, target_lock)
+        trigger_price = entry_price - activate_r * risk_r
+        target_lock = max(entry_price * (1.0 - breakeven_buffer), trigger_price * 1.0005)
+        return min(current_stop_loss, target_lock)
 
     # ------------------------------------------------------------------
     # Indicator calculation (MA7 / MA25 / MA60 + ATR14)

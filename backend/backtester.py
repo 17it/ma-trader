@@ -113,6 +113,8 @@ class Backtester:
         end_date: str,
         confirm_candles: int = 2,
         rr_ratio: float = 1.5,
+        trailing_activate_r: float = TRAILING_ACTIVATE_R,
+        breakeven_buffer: float = BREAKEVEN_BUFFER,
         initial_capital: float = 10_000.0,
         risk_per_trade: float = 0.01,
         leverage: int = 5,
@@ -271,15 +273,18 @@ class Backtester:
                 equity_ts.append(ts)
                 continue
 
-            # ---- 1. Manage open trade (no 0.7R BE / no MA60 exit; 1.2R -> BE+0.1% + MA25 trailing) ----
+            # ---- 1. Manage open trade (no 0.7R BE / no MA60 exit; 0.88R -> BE+0.3% + MA25 trailing) ----
             if in_trade:
                 if trade_direction == "long":
                     if l <= trade_sl:
                         reason = "trailing_stop" if trailing_active else "stop_loss"
                         record_close(trade_sl, ts, reason)
                     elif not trailing_active:
-                        if trade_risk_r > 0 and h >= trade_entry + TRAILING_ACTIVATE_R * trade_risk_r:
-                            trade_sl = max(trade_sl, trade_entry * (1.0 + BREAKEVEN_BUFFER))
+                        if trade_risk_r > 0 and h >= trade_entry + trailing_activate_r * trade_risk_r:
+                            trade_sl = MAStrategy.compute_trailing_lock_sl(
+                                "long", trade_entry, trade_risk_r, trade_sl,
+                                activate_r=trailing_activate_r, breakeven_buffer=breakeven_buffer,
+                            )
                             trailing_active = True
                     else:
                         exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma25, True)
@@ -292,8 +297,11 @@ class Backtester:
                         reason = "trailing_stop" if trailing_active else "stop_loss"
                         record_close(trade_sl, ts, reason)
                     elif not trailing_active:
-                        if trade_risk_r > 0 and l <= trade_entry - TRAILING_ACTIVATE_R * trade_risk_r:
-                            trade_sl = min(trade_sl, trade_entry * (1.0 - BREAKEVEN_BUFFER))
+                        if trade_risk_r > 0 and l <= trade_entry - trailing_activate_r * trade_risk_r:
+                            trade_sl = MAStrategy.compute_trailing_lock_sl(
+                                "short", trade_entry, trade_risk_r, trade_sl,
+                                activate_r=trailing_activate_r, breakeven_buffer=breakeven_buffer,
+                            )
                             trailing_active = True
                     else:
                         exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma25, True)

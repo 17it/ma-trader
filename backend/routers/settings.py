@@ -204,6 +204,8 @@ async def create_symbol(body: SymbolConfigCreate, request: Request, db: Session 
         leverage=body.leverage,
         risk_per_trade=body.risk_per_trade,
         rr_ratio=body.rr_ratio,
+        trailing_activate_r=body.trailing_activate_r,
+        breakeven_buffer=body.breakeven_buffer,
         enabled=body.enabled,
     )
     db.add(obj)

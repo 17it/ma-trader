@@ -172,6 +172,8 @@ const SettingsManager = (() => {
     symbols.forEach(sym => {
       const tr = document.createElement('tr');
       const idNum = Number(sym.id) || 0;
+      const trailR = sym.trailing_activate_r != null ? Number(sym.trailing_activate_r).toFixed(2) : '0.88';
+      const beBufPct = sym.breakeven_buffer != null ? (Number(sym.breakeven_buffer) * 100).toFixed(2).replace(/0$/, '') : '0.3';
       tr.innerHTML = `
         <td class="fw-bold">${_esc(sym.symbol)}</td>
         <td>${_esc(sym.timeframe)}</td>
@@ -180,6 +182,7 @@ const SettingsManager = (() => {
         <td>${_esc(sym.leverage)}x</td>
         <td>${(Number(sym.risk_per_trade) * 100).toFixed(1)}%</td>
         <td>${_esc(sym.rr_ratio)}</td>
+        <td class="small text-secondary">${trailR}R / +${beBufPct}%</td>
         <td>${sym.enabled ? '<span style="color:#3fb950">✅</span>' : '<span style="color:#f85149">❌</span>'}</td>
         <td>
           <button class="btn btn-xs btn-outline-secondary me-1" onclick="SettingsManager.editSymbol(${idNum})">编辑</button>
@@ -240,6 +243,8 @@ const SettingsManager = (() => {
     document.getElementById('symLeverage').value = 8;
     document.getElementById('symRisk').value     = 1.2;
     document.getElementById('symRR').value       = 1.5;
+    document.getElementById('symTrailR').value   = 0.88;
+    document.getElementById('symBeBuf').value    = 0.3;
     document.getElementById('symEnabled').checked = true;
     document.getElementById('symSymbol').disabled = false;
     modalInstance.show();
@@ -259,6 +264,8 @@ const SettingsManager = (() => {
     document.getElementById('symLeverage').value = sym.leverage;
     document.getElementById('symRisk').value     = (sym.risk_per_trade * 100).toFixed(1);
     document.getElementById('symRR').value       = sym.rr_ratio;
+    document.getElementById('symTrailR').value   = sym.trailing_activate_r != null ? sym.trailing_activate_r : 0.88;
+    document.getElementById('symBeBuf').value    = sym.breakeven_buffer != null ? Number((sym.breakeven_buffer * 100).toFixed(3)) : 0.3;
     document.getElementById('symEnabled').checked = Boolean(sym.enabled);
     document.getElementById('symSymbol').disabled = true;
     modalInstance.show();
@@ -287,6 +294,8 @@ const SettingsManager = (() => {
       leverage:        parseInt(document.getElementById('symLeverage').value),
       risk_per_trade:  parseFloat(document.getElementById('symRisk').value) / 100,
       rr_ratio:        parseFloat(document.getElementById('symRR').value),
+      trailing_activate_r: parseFloat(document.getElementById('symTrailR').value),
+      breakeven_buffer:    parseFloat(document.getElementById('symBeBuf').value) / 100,
       enabled:         Boolean(document.getElementById('symEnabled').checked)
     };
 

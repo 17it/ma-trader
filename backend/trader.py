@@ -69,6 +69,8 @@ def _config_signature(cfg) -> tuple:
         getattr(cfg, "leverage", 5),
         getattr(cfg, "risk_per_trade", 0.01),
         getattr(cfg, "rr_ratio", 1.5),
+        getattr(cfg, "trailing_activate_r", TRAILING_ACTIVATE_R),
+        getattr(cfg, "breakeven_buffer", BREAKEVEN_BUFFER),
     )
 
 
@@ -133,6 +135,18 @@ class TradingBot:
 
         symbol_configs = self._load_symbol_configs()
         rr_by_symbol = {c.symbol: getattr(c, "rr_ratio", 1.5) for c in symbol_configs}
+        trail_r_by_symbol = {
+            c.symbol: float(getattr(c, "trailing_activate_r", None) or TRAILING_ACTIVATE_R)
+            for c in symbol_configs
+        }
+        be_buf_by_symbol = {
+            c.symbol: float(
+                getattr(c, "breakeven_buffer")
+                if getattr(c, "breakeven_buffer", None) is not None
+                else BREAKEVEN_BUFFER
+            )
+            for c in symbol_configs
+        }
 
         active_symbols = [c.symbol for c in symbol_configs if getattr(c, "symbol", None)]
         if not getattr(self.ws_streamer, "_running", False):
@@ -194,6 +208,16 @@ class TradingBot:
                         "sl_order_id": getattr(ot, "sl_order_id", None),
                         "trailing_active": bool(getattr(ot, "trailing_active", False)),
                         "risk_r": saved_risk,
+                        "trailing_activate_r": (
+                            float(ot.trailing_activate_r)
+                            if getattr(ot, "trailing_activate_r", None) is not None
+                            else trail_r_by_symbol.get(ot.symbol, TRAILING_ACTIVATE_R)
+                        ),
+                        "breakeven_buffer": (
+                            float(ot.breakeven_buffer)
+                            if getattr(ot, "breakeven_buffer", None) is not None
+                            else be_buf_by_symbol.get(ot.symbol, BREAKEVEN_BUFFER)
+                        ),
                     }
                 if open_trades:
                     logger.info("Restored %d open trades from database into memory", len(open_trades))
@@ -481,6 +505,16 @@ class TradingBot:
         leverage = getattr(config, "leverage", 5)
         risk_pct = getattr(config, "risk_per_trade", 0.01)
         rr = getattr(config, "rr_ratio", 1.5)
+        trailing_activate_r = float(
+            getattr(config, "trailing_activate_r")
+            if getattr(config, "trailing_activate_r", None) is not None
+            else TRAILING_ACTIVATE_R
+        )
+        breakeven_buffer = float(
+            getattr(config, "breakeven_buffer")
+            if getattr(config, "breakeven_buffer", None) is not None
+            else BREAKEVEN_BUFFER
+        )
 
         stop_loss, take_profit, sl_distance = MAStrategy.compute_sl_tp(
             direction=direction,
@@ -583,6 +617,8 @@ class TradingBot:
                     sl_order_id=sl_order_id,
                     trailing_active=False,
                     initial_risk=sl_distance,
+                    trailing_activate_r=trailing_activate_r,
+                    breakeven_buffer=breakeven_buffer,
                 )
                 session.add(trade)
                 session.commit()
@@ -604,6 +640,8 @@ class TradingBot:
                     "sl_order_id": sl_order_id,
                     "trailing_active": False,
                     "risk_r": sl_distance,
+                    "trailing_activate_r": trailing_activate_r,
+                    "breakeven_buffer": breakeven_buffer,
                     "entry_fee": entry_fee,
                 }
 
@@ -774,33 +812,47 @@ class TradingBot:
                 prev_sl = stop_loss
 
                 if price is not None and risk_r > 0:
+                    pos_act_r = float(
+                        pos["trailing_activate_r"]
+                        if pos.get("trailing_activate_r") is not None
+                        else TRAILING_ACTIVATE_R
+                    )
+                    pos_be_buf = float(
+                        pos["breakeven_buffer"]
+                        if pos.get("breakeven_buffer") is not None
+                        else BREAKEVEN_BUFFER
+                    )
                     if direction == "long":
                         if price <= stop_loss:
                             close_reason = "trailing_stop" if trailing_active else "stop_loss"
-                        elif not trailing_active and price >= entry_price + TRAILING_ACTIVATE_R * risk_r:
-                            # Floating profit reached 1.2R -> move SL to break-even + 0.1% and activate MA25 trailing
+                        elif not trailing_active and price >= entry_price + pos_act_r * risk_r:
                             trailing_active = True
-                            stop_loss = max(stop_loss, entry_price * (1.0 + BREAKEVEN_BUFFER))
+                            stop_loss = MAStrategy.compute_trailing_lock_sl(
+                                "long", entry_price, risk_r, stop_loss,
+                                activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
+                            )
                             sl_updated = True
                             pos["trailing_active"] = True
                             self.broadcast({
                                 "type": "log",
                                 "level": "info",
-                                "message": f"🔒 [{symbol}] 浮盈达 {TRAILING_ACTIVATE_R:.1f}R，止损移至保本+0.1% ({stop_loss:.4f}) 并开启 MA25 移动止盈",
+                                "message": f"🔒 [{symbol}] 浮盈达 {pos_act_r:.2f}R，止损移至保本+{pos_be_buf*100:.2f}% ({stop_loss:.4f}) 并开启 MA25 移动止盈",
                             })
                     else:  # short
                         if price >= stop_loss:
                             close_reason = "trailing_stop" if trailing_active else "stop_loss"
-                        elif not trailing_active and price <= entry_price - TRAILING_ACTIVATE_R * risk_r:
-                            # Floating profit reached 1.2R -> move SL to break-even - 0.1% and activate MA25 trailing
+                        elif not trailing_active and price <= entry_price - pos_act_r * risk_r:
                             trailing_active = True
-                            stop_loss = min(stop_loss, entry_price * (1.0 - BREAKEVEN_BUFFER))
+                            stop_loss = MAStrategy.compute_trailing_lock_sl(
+                                "short", entry_price, risk_r, stop_loss,
+                                activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
+                            )
                             sl_updated = True
                             pos["trailing_active"] = True
                             self.broadcast({
                                 "type": "log",
                                 "level": "info",
-                                "message": f"🔒 [{symbol}] 浮盈达 {TRAILING_ACTIVATE_R:.1f}R，止损移至保本-0.1% ({stop_loss:.4f}) 并开启 MA25 移动止盈",
+                                "message": f"🔒 [{symbol}] 浮盈达 {pos_act_r:.2f}R，止损移至保本-{pos_be_buf*100:.2f}% ({stop_loss:.4f}) 并开启 MA25 移动止盈",
                             })
 
                 if close_reason:

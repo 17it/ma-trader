@@ -80,6 +80,8 @@ class SymbolConfig(Base):
     leverage = Column(Integer, default=5)
     risk_per_trade = Column(Float, default=0.01)               # 1% 账户风险
     rr_ratio = Column(Float, default=1.5)                      # 盈亏比
+    trailing_activate_r = Column(Float, default=0.88)          # 浮盈达多少 R 开启保本与 MA25 追踪
+    breakeven_buffer = Column(Float, default=0.003)            # 保本缓冲比例（0.003 = 0.3%）
     enabled = Column(Boolean, default=True)
 
 
@@ -110,6 +112,8 @@ class Trade(Base):
     sl_order_id = Column(String, nullable=True)
     trailing_active = Column(Boolean, default=False)
     initial_risk = Column(Float, nullable=True)                # 开仓时 1R 距离（|entry - 初始止损|），重启后用于分档止盈
+    trailing_activate_r = Column(Float, nullable=True)         # 开仓时该交易对的追踪触发 R
+    breakeven_buffer = Column(Float, nullable=True)            # 开仓时该交易对的保本缓冲比例
 
 
 class SessionTokenModel(Base):
@@ -315,6 +319,16 @@ def create_tables() -> None:
             conn.execute(text("ALTER TABLE trades ADD COLUMN trailing_active BOOLEAN DEFAULT 0"))
         if "initial_risk" not in cols:
             conn.execute(text("ALTER TABLE trades ADD COLUMN initial_risk FLOAT"))
+        if "trailing_activate_r" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN trailing_activate_r FLOAT"))
+        if "breakeven_buffer" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN breakeven_buffer FLOAT"))
+
+        sym_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(symbol_configs)")).fetchall()}
+        if "trailing_activate_r" not in sym_cols:
+            conn.execute(text("ALTER TABLE symbol_configs ADD COLUMN trailing_activate_r FLOAT DEFAULT 0.88"))
+        if "breakeven_buffer" not in sym_cols:
+            conn.execute(text("ALTER TABLE symbol_configs ADD COLUMN breakeven_buffer FLOAT DEFAULT 0.003"))
 
         user_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(users)")).fetchall()}
         if "must_change_password" not in user_cols:

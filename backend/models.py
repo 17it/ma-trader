@@ -54,6 +54,8 @@ class SymbolConfigCreate(BaseModel):
     leverage: int = Field(5, ge=1, le=20)
     risk_per_trade: float = Field(0.01, gt=0, le=0.2)
     rr_ratio: float = Field(1.5, ge=0.5, le=20.0)
+    trailing_activate_r: float = Field(0.88, ge=0.1, le=10.0)
+    breakeven_buffer: float = Field(0.003, ge=0.0, le=0.05)
     enabled: bool = True
 
     @field_validator("symbol")
@@ -69,6 +71,8 @@ class SymbolConfigUpdate(BaseModel):
     leverage: Optional[int] = Field(None, ge=1, le=20)
     risk_per_trade: Optional[float] = Field(None, gt=0, le=0.2)
     rr_ratio: Optional[float] = Field(None, ge=0.5, le=20.0)
+    trailing_activate_r: Optional[float] = Field(None, ge=0.1, le=10.0)
+    breakeven_buffer: Optional[float] = Field(None, ge=0.0, le=0.05)
     enabled: Optional[bool] = None
 
 
@@ -81,6 +85,8 @@ class SymbolConfigResponse(BaseModel):
     leverage: int
     risk_per_trade: float
     rr_ratio: float
+    trailing_activate_r: float = 0.88
+    breakeven_buffer: float = 0.003
     enabled: bool
 
     model_config = {"from_attributes": True}
@@ -143,6 +149,8 @@ class BacktestRunCreate(BaseModel):
     end_date: str = Field(..., example="2024-12-31")
     confirm_candles: int = Field(2, ge=1, le=20)
     rr_ratio: float = Field(1.5, ge=0.5, le=20.0)
+    trailing_activate_r: float = Field(0.88, ge=0.1, le=10.0)
+    breakeven_buffer: float = Field(0.003, ge=0.0, le=0.05)
     initial_capital: float = Field(10000.0, gt=0, le=1e9)
     risk_per_trade: float = Field(0.01, gt=0, le=0.2)
     leverage: int = Field(5, ge=1, le=20)

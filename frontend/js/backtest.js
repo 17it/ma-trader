@@ -80,6 +80,8 @@ const BacktestManager = (() => {
       end_date:      _toIsoWithOffset(document.getElementById('btEndDate').value),
       confirm_candles: parseInt(document.getElementById('btConfirm').value),
       rr_ratio:      parseFloat(document.getElementById('btRR').value),
+      trailing_activate_r: parseFloat(document.getElementById('btTrailR')?.value || '0.88'),
+      breakeven_buffer:    parseFloat(document.getElementById('btBeBuf')?.value || '0.3') / 100,
       initial_capital: parseFloat(document.getElementById('btCapital').value)
     };
 
@@ -438,6 +440,18 @@ const BacktestManager = (() => {
     if (rr != null) {
       const el = document.getElementById('btRR');
       if (el) el.value = rr;
+    }
+
+    // 追踪触发 R & 保本缓冲 %
+    const trailR = params.trailing_activate_r;
+    if (trailR != null) {
+      const el = document.getElementById('btTrailR');
+      if (el) el.value = trailR;
+    }
+    const beBuf = params.breakeven_buffer;
+    if (beBuf != null) {
+      const el = document.getElementById('btBeBuf');
+      if (el) el.value = Number((beBuf * 100).toFixed(3));
     }
 
     // 初始资金

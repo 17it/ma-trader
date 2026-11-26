@@ -325,6 +325,7 @@
                         <th>杠杆</th>
                         <th>风险%</th>
                         <th>盈亏比</th>
+                        <th>追踪触发 / 保本</th>
                         <th>状态</th>
                         <th>操作</th>
                       </tr>
@@ -361,6 +362,7 @@
                     <option value="1m">1m</option>
                     <option value="5m">5m</option>
                     <option value="15m">15m</option>
+                    <option value="1h">1h</option>
                   </select>
                 </div>
                 <div class="col-md-2">
@@ -381,23 +383,31 @@
                 </div>
               </div>
               <div class="row g-2 align-items-end mt-1">
-                <div class="col-md-4">
+                <div class="col-md-3">
                   <label class="form-label small">回测标题</label>
-                  <input type="text" class="form-control form-control-sm" id="btTitle" placeholder="可选，如: 5m/15m趋势追踪" />
+                  <input type="text" class="form-control form-control-sm" id="btTitle" placeholder="可选，如: 1h/4h趋势追踪" />
                 </div>
-                <div class="col-md-2">
+                <div class="col-6 col-md-2">
                   <label class="form-label small">确认K线 <span id="btConfirmLabel">2</span></label>
                   <input type="range" class="form-range" id="btConfirm" min="1" max="10" value="2" />
                 </div>
-                <div class="col-md-2">
+                <div class="col-6 col-md-1">
                   <label class="form-label small">盈亏比</label>
                   <input type="number" class="form-control form-control-sm" id="btRR" min="0.5" max="10" step="0.1" value="1.5" />
                 </div>
-                <div class="col-md-2">
+                <div class="col-6 col-md-1">
+                  <label class="form-label small" title="浮盈达多少 R 开启保本与 MA25 追踪">触发R</label>
+                  <input type="number" class="form-control form-control-sm" id="btTrailR" min="0.1" max="10" step="0.02" value="0.88" />
+                </div>
+                <div class="col-6 col-md-1">
+                  <label class="form-label small" title="触发追踪时锁定的保本微赚比例 (%)">保本%</label>
+                  <input type="number" class="form-control form-control-sm" id="btBeBuf" min="0" max="5" step="0.05" value="0.3" />
+                </div>
+                <div class="col-6 col-md-2">
                   <label class="form-label small">初始资金 (USDT)</label>
                   <input type="number" class="form-control form-control-sm" id="btCapital" value="10000" />
                 </div>
-                <div class="col-md-2 d-flex align-items-end">
+                <div class="col-6 col-md-2 d-flex align-items-end">
                   <button class="btn btn-primary btn-sm w-100" id="btnRunBacktest">
                     <i class="fa-solid fa-play me-1"></i>开始回测
                   </button>
@@ -725,8 +735,8 @@
             <div class="col-6 col-lg-3">
               <div class="bt-metric-card h-100">
                 <div class="bt-metric-label">移动止盈</div>
-                <div class="bt-metric-value text-green" style="font-size:16px;">1.2R 保本 · MA25 追踪</div>
-                <div class="small text-secondary mt-1">浮盈达 1.2R 移保本+0.1% 并沿 MA25 追踪</div>
+                <div class="bt-metric-value text-green" style="font-size:16px;">0.88R 保本 · MA25 追踪</div>
+                <div class="small text-secondary mt-1">浮盈达 0.88R 移保本+0.3% 并沿 MA25 追踪</div>
               </div>
             </div>
           </div>
@@ -810,12 +820,12 @@
                       </thead>
                       <tbody>
                         <tr>
-                          <td><span class="badge bg-danger-subtle text-danger border border-danger-subtle">初始阶段</span><br/><span class="text-secondary small">浮盈 &lt; 1.2R</span></td>
+                          <td><span class="badge bg-danger-subtle text-danger border border-danger-subtle">初始阶段</span><br/><span class="text-secondary small">浮盈 &lt; 0.88R</span></td>
                           <td class="text-secondary">仅保留初始结构止损（触及记为 <code>初始止损</code>）；取消 0.7R 过早保本与 MA60 穿线提前洗盘离场。</td>
                         </tr>
                         <tr>
-                          <td><span class="badge bg-success text-white">趋势追踪</span><br/><span class="text-secondary small">浮盈 ≥ 1.2R</span></td>
-                          <td class="text-secondary">止损自动移至 <strong>入场价 ± 0.1%</strong>（覆盖手续费）并开启 <strong>MA25 移动止盈</strong>：止损沿 <code>MA25 × 0.9995 / 1.0005</code> 单向推进，触及移动止损或收线破 MA25 才平仓。</td>
+                          <td><span class="badge bg-success text-white">趋势追踪</span><br/><span class="text-secondary small">浮盈 ≥ 0.88R</span></td>
+                          <td class="text-secondary">止损自动移至 <strong>入场价 ± 0.3%</strong>（受触发价安全保护）并开启 <strong>MA25 移动止盈</strong>：止损沿 <code>MA25 × 0.9995 / 1.0005</code> 单向推进，触及移动止损或收线破 MA25 才平仓。</td>
                         </tr>
                       </tbody>
                     </table>
@@ -881,6 +891,18 @@
             <div class="col">
               <label class="form-label small">盈亏比</label>
               <input type="number" class="form-control form-control-sm" id="symRR" min="0.5" max="20" step="0.1" value="1.5" />
+            </div>
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label small">追踪触发 (R)</label>
+              <input type="number" class="form-control form-control-sm" id="symTrailR" min="0.1" max="10" step="0.02" value="0.88" />
+              <div class="form-text text-secondary" style="font-size:11px">建议：1h 用 0.88R，15m 用 1.2R</div>
+            </div>
+            <div class="col">
+              <label class="form-label small">保本微赚 (%)</label>
+              <input type="number" class="form-control form-control-sm" id="symBeBuf" min="0" max="5" step="0.05" value="0.3" />
+              <div class="form-text text-secondary" style="font-size:11px">建议：1h 用 0.3%，15m 用 0.1%</div>
             </div>
           </div>
           <div class="d-flex align-items-center justify-content-between pt-2 border-top">
