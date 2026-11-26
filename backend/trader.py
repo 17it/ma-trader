@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 try:
-    from backend.strategy import MAStrategy
+    from backend.strategy import BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
     from backend.binance_ws import BinanceWSStreamer
 except ImportError:
-    from strategy import MAStrategy
+    from strategy import BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
     from binance_ws import BinanceWSStreamer
 
 logger = logging.getLogger(__name__)
@@ -775,114 +775,54 @@ class TradingBot:
                 if price is not None and risk_r > 0:
                     if direction == "long":
                         if price <= stop_loss:
-                            if trailing_active:
-                                close_reason = "trailing_stop"
-                            elif stop_loss > entry_price:
-                                close_reason = "profit_lock_stop"
-                            else:
-                                close_reason = "stop_loss"
-                        elif not trailing_active:
-                            if price >= take_profit:
-                                trailing_active = True
-                                lock_sl = (
-                                    max(entry_price * 1.001, entry_price + 0.5 * risk_r)
-                                    if (take_profit - entry_price) > 1.2 * risk_r
-                                    else entry_price * 1.001
-                                )
-                                stop_loss = max(stop_loss, lock_sl)
-                                sl_updated = True
-                                pos["trailing_active"] = True
-                                self.broadcast({
-                                    "type": "log",
-                                    "level": "info",
-                                    "message": f"🔒 [{symbol}] 达到盈亏比目标，止损上移至 {stop_loss:.4f} 并开启 MA7 移动止盈",
-                                })
-                            elif (take_profit - entry_price) > 1.2 * risk_r and price >= entry_price + 1.2 * risk_r:
-                                new_sl = entry_price + 0.5 * risk_r
-                                if new_sl > stop_loss:
-                                    stop_loss = new_sl
-                                    sl_updated = True
-                                    self.broadcast({
-                                        "type": "log",
-                                        "level": "info",
-                                        "message": f"💰 [{symbol}] 浮盈达 1.2R，止损已锁定 +0.5R 利润 ({stop_loss:.4f})",
-                                    })
-                            elif (take_profit - entry_price) > 0.7 * risk_r and price >= entry_price + 0.7 * risk_r:
-                                new_sl = entry_price * 1.001
-                                if new_sl > stop_loss:
-                                    stop_loss = new_sl
-                                    sl_updated = True
-                                    self.broadcast({
-                                        "type": "log",
-                                        "level": "info",
-                                        "message": f"🛡️ [{symbol}] 浮盈达 0.7R，止损已上移至保本微赚位 ({stop_loss:.4f})",
-                                    })
+                            close_reason = "trailing_stop" if trailing_active else "stop_loss"
+                        elif not trailing_active and price >= entry_price + TRAILING_ACTIVATE_R * risk_r:
+                            # Floating profit reached 1.2R -> move SL to break-even + 0.1% and activate MA25 trailing
+                            trailing_active = True
+                            stop_loss = max(stop_loss, entry_price * (1.0 + BREAKEVEN_BUFFER))
+                            sl_updated = True
+                            pos["trailing_active"] = True
+                            self.broadcast({
+                                "type": "log",
+                                "level": "info",
+                                "message": f"🔒 [{symbol}] 浮盈达 {TRAILING_ACTIVATE_R:.1f}R，止损移至保本+0.1% ({stop_loss:.4f}) 并开启 MA25 移动止盈",
+                            })
                     else:  # short
                         if price >= stop_loss:
-                            if trailing_active:
-                                close_reason = "trailing_stop"
-                            elif stop_loss < entry_price:
-                                close_reason = "profit_lock_stop"
-                            else:
-                                close_reason = "stop_loss"
-                        elif not trailing_active:
-                            if price <= take_profit:
-                                trailing_active = True
-                                lock_sl = (
-                                    min(entry_price * 0.999, entry_price - 0.5 * risk_r)
-                                    if (entry_price - take_profit) > 1.2 * risk_r
-                                    else entry_price * 0.999
-                                )
-                                stop_loss = min(stop_loss, lock_sl)
-                                sl_updated = True
-                                pos["trailing_active"] = True
-                                self.broadcast({
-                                    "type": "log",
-                                    "level": "info",
-                                    "message": f"🔒 [{symbol}] 达到盈亏比目标，止损下移至 {stop_loss:.4f} 并开启 MA7 移动止盈",
-                                })
-                            elif (entry_price - take_profit) > 1.2 * risk_r and price <= entry_price - 1.2 * risk_r:
-                                new_sl = entry_price - 0.5 * risk_r
-                                if new_sl < stop_loss:
-                                    stop_loss = new_sl
-                                    sl_updated = True
-                                    self.broadcast({
-                                        "type": "log",
-                                        "level": "info",
-                                        "message": f"💰 [{symbol}] 浮盈达 1.2R，止损已锁定 +0.5R 利润 ({stop_loss:.4f})",
-                                    })
-                            elif (entry_price - take_profit) > 0.7 * risk_r and price <= entry_price - 0.7 * risk_r:
-                                new_sl = entry_price * 0.999
-                                if new_sl < stop_loss:
-                                    stop_loss = new_sl
-                                    sl_updated = True
-                                    self.broadcast({
-                                        "type": "log",
-                                        "level": "info",
-                                        "message": f"🛡️ [{symbol}] 浮盈达 0.7R，止损已下移至保本微赚位 ({stop_loss:.4f})",
-                                    })
+                            close_reason = "trailing_stop" if trailing_active else "stop_loss"
+                        elif not trailing_active and price <= entry_price - TRAILING_ACTIVATE_R * risk_r:
+                            # Floating profit reached 1.2R -> move SL to break-even - 0.1% and activate MA25 trailing
+                            trailing_active = True
+                            stop_loss = min(stop_loss, entry_price * (1.0 - BREAKEVEN_BUFFER))
+                            sl_updated = True
+                            pos["trailing_active"] = True
+                            self.broadcast({
+                                "type": "log",
+                                "level": "info",
+                                "message": f"🔒 [{symbol}] 浮盈达 {TRAILING_ACTIVATE_R:.1f}R，止损移至保本-0.1% ({stop_loss:.4f}) 并开启 MA25 移动止盈",
+                            })
 
                 if close_reason:
                     await self._close_trade(symbol, pos, close_reason, price)
                     continue
 
-                # 2. Check MA indicator exit / update MA7 trailing stop
+                # 2. Only once MA25 trailing is active (>= 1.2R): tighten SL along MA25 & exit if bar closes beyond MA25
                 strategy = self.strategies.get(symbol)
-                if strategy is not None:
+                if trailing_active and strategy is not None:
                     df = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, timeframe, 100)
                     if df is not None and not df.empty:
                         df = strategy.calculate_ma(df)
                         eval_df = df.iloc[:-1] if len(df) >= 2 else df
 
-                        if trailing_active and len(eval_df) >= 1:
-                            ma7_val = float(eval_df.iloc[-1]["ma7"])
+                        if len(eval_df) >= 1:
+                            ma25_val = float(eval_df.iloc[-1]["ma25"])
                             if direction == "long":
-                                new_sl = max(stop_loss, ma7_val * 0.9995)
+                                new_sl = max(stop_loss, ma25_val * 0.9995)
                                 if new_sl > stop_loss:
                                     stop_loss = new_sl
                                     sl_updated = True
                             else:
-                                new_sl = min(stop_loss, ma7_val * 1.0005)
+                                new_sl = min(stop_loss, ma25_val * 1.0005)
                                 if new_sl < stop_loss:
                                     stop_loss = new_sl
                                     sl_updated = True
@@ -890,7 +830,7 @@ class TradingBot:
                         position_dict = {
                             "direction": direction,
                             "open_time": open_time,
-                            "trailing_active": trailing_active,
+                            "trailing_active": True,
                         }
                         exit_sig = strategy.check_exit(eval_df, position_dict)
                         if exit_sig:

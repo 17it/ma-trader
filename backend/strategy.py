@@ -1,5 +1,7 @@
 """
-MA Strategy Module — MA7/MA25/MA60 trading logic.
+MA Strategy Module — MA7/MA25/MA60 trend alignment + ATR(14) adaptive bias +
+adverse-wick entry filter + 1.2R break-even & MA25 trailing exit.
+
 Single source of truth shared by both live/paper TradingBot and Backtester.
 Each symbol gets its own MAStrategy instance so confirm_count is never shared.
 """
@@ -12,6 +14,12 @@ from typing import Optional, Tuple
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+ATR_PERIOD = 14
+ATR_MA25_BIAS_MULT = 2.5
+WICK_BODY_MULT = 1.5
+TRAILING_ACTIVATE_R = 1.2
+BREAKEVEN_BUFFER = 0.001  # +0.1% / -0.1% fee buffer
 
 
 class MAStrategy:
@@ -56,14 +64,25 @@ class MAStrategy:
         return stop_loss, take_profit, max(0.0, sl_distance)
 
     # ------------------------------------------------------------------
-    # MA calculation
+    # Indicator calculation (MA7 / MA25 / MA60 + ATR14)
     # ------------------------------------------------------------------
     def calculate_ma(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add ma7, ma25, ma60 columns to a copy of *df* and return it."""
+        """Add ma7, ma25, ma60, and atr14 columns to a copy of *df* and return it."""
         df = df.copy()
         df["ma7"] = df["close"].rolling(window=7, min_periods=1).mean()
         df["ma25"] = df["close"].rolling(window=25, min_periods=1).mean()
         df["ma60"] = df["close"].rolling(window=60, min_periods=1).mean()
+
+        prev_close = df["close"].shift(1)
+        tr = pd.concat(
+            [
+                df["high"] - df["low"],
+                (df["high"] - prev_close).abs(),
+                (df["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        df["atr14"] = tr.rolling(window=ATR_PERIOD, min_periods=1).mean()
         return df
 
     # ------------------------------------------------------------------
@@ -107,49 +126,67 @@ class MAStrategy:
         return None
 
     @staticmethod
-    def check_false_breakout_scalars(o: float, h: float, l: float, c: float) -> bool:
+    def check_false_breakout_scalars(
+        o: float,
+        h: float,
+        l: float,
+        c: float,
+        direction: Optional[str] = None,
+        wick_mult: float = WICK_BODY_MULT,
+    ) -> bool:
+        """
+        Adverse-wick-only false-breakout guard:
+          - Long  : rejects long UPPER wick (h - max(o, c) > body * 1.5)
+          - Short : rejects long LOWER wick (min(o, c) - l > body * 1.5)
+          - Doji (body == 0 with non-zero range): rejected on entry bar
+        Healthy pullback wicks in the trend direction (e.g. lower wick on a long)
+        are NOT penalized.
+        """
         body = abs(c - o)
         total_range = h - l
         if body == 0:
-            return True  # doji
-        wick = total_range - body
-        return wick > body * 1.5
+            return total_range > 0
+        if direction == "long":
+            adverse_wick = h - max(o, c)
+        elif direction == "short":
+            adverse_wick = min(o, c) - l
+        else:
+            adverse_wick = total_range - body
+        return adverse_wick > body * wick_mult
 
     @staticmethod
     def check_overextended_scalars(
         close: float,
         ma25: float,
-        ma60: float,
-        max_ma25_bias: float = 0.0035,
-        max_ma60_bias: float = 0.0060,
+        atr14: float,
+        atr_mult: float = ATR_MA25_BIAS_MULT,
     ) -> bool:
-        if ma25 > 0 and abs(close - ma25) / ma25 > max_ma25_bias:
-            return True
-        if ma60 > 0 and abs(close - ma60) / ma60 > max_ma60_bias:
-            return True
-        return False
+        """
+        ATR(14)-adaptive anti-chasing guard (works across all timeframes):
+        Return True when |close - ma25| > atr_mult * atr14 (default 2.5 * ATR14).
+        """
+        if math.isnan(close) or math.isnan(ma25) or math.isnan(atr14) or atr14 <= 0:
+            return False
+        return abs(close - ma25) > atr_mult * atr14
 
     @staticmethod
     def evaluate_exit_bar(
         direction: str,
         close: float,
-        ma7: float,
-        ma60: float,
+        ma25: float,
         trailing_active: bool,
     ) -> Optional[str]:
-        """Indicator-based bar-close exit rule shared by live and backtest."""
-        if math.isnan(close) or math.isnan(ma7) or math.isnan(ma60):
+        """
+        Indicator-based bar-close exit rule shared by live and backtest:
+          - Before trailing activates (< 1.2R): NO premature MA60 exit.
+          - After trailing activates (>= 1.2R): exit when a candle closes beyond MA25.
+        """
+        if not trailing_active or math.isnan(close) or math.isnan(ma25):
             return None
-        if trailing_active:
-            if direction == "long" and close < ma7:
-                return "ma7_trailing"
-            if direction == "short" and close > ma7:
-                return "ma7_trailing"
-        else:
-            if direction == "long" and close < ma60:
-                return "ma60_cross"
-            if direction == "short" and close > ma60:
-                return "ma60_cross"
+        if direction == "long" and close < ma25:
+            return "ma25_trailing"
+        if direction == "short" and close > ma25:
+            return "ma25_trailing"
         return None
 
     def evaluate_bar(
@@ -161,15 +198,17 @@ class MAStrategy:
         ma7_seq: Tuple[float, float, float],
         ma25_seq: Tuple[float, float, float],
         ma60: float,
+        atr14: float,
         htf_dir: Optional[str],
         confirm_candles: int = 2,
     ) -> Optional[dict]:
         """
-        Single-bar entry signal state machine (identical for live and backtest).
-        Returns:
-            - None if conditions are not met (counter reset)
-            - {'direction', 'confirm', 'max_confirm', 'pending': True} while confirming
-            - {'direction', 'confirm', 'max_confirm'} once confirm_count >= confirm_candles
+        Single-bar entry signal state machine (identical for live and backtest):
+          1. Three-line alignment + 3-bar MA7/MA25 slope
+          2. HTF non-opposing direction filter
+          3. ATR(14) adaptive bias guard: |close - MA25| <= 2.5 * ATR(14)
+          4. Consecutive confirmation counter (NOT reset by adverse wicks)
+          5. Entry-bar-only adverse-wick check once confirm_count >= confirm_candles
         """
         direction = self.check_alignment_scalars(c, ma7_seq, ma25_seq, ma60)
         if direction is None:
@@ -181,13 +220,8 @@ class MAStrategy:
             self.reset()
             return None
 
-        # False breakout guard
-        if self.check_false_breakout_scalars(o, h, l, c):
-            self.reset()
-            return None
-
-        # Overextension / anti-chasing guard
-        if self.check_overextended_scalars(c, ma25_seq[2], ma60):
+        # ATR(14) adaptive overextension / anti-chasing guard
+        if self.check_overextended_scalars(c, ma25_seq[2], atr14):
             self.reset()
             return None
 
@@ -195,16 +229,21 @@ class MAStrategy:
             self.confirm_count = 0
             self._last_direction = direction
 
-        self.confirm_count += 1
+        self.confirm_count = min(self.confirm_count + 1, confirm_candles)
 
         signal_info = {
             "direction": direction,
             "confirm": self.confirm_count,
             "max_confirm": confirm_candles,
         }
-        if self.confirm_count >= confirm_candles:
-            return signal_info
-        return {**signal_info, "pending": True}
+        if self.confirm_count < confirm_candles:
+            return {**signal_info, "pending": True}
+
+        # Entry-bar-only adverse-wick check: blocks entry on THIS bar without resetting confirm_count
+        if self.check_false_breakout_scalars(o, h, l, c, direction=direction):
+            return {**signal_info, "pending": True, "blocked_by_wick": True}
+
+        return signal_info
 
     # ------------------------------------------------------------------
     # DataFrame wrappers (used by TradingBot)
@@ -222,25 +261,27 @@ class MAStrategy:
             float(last["ma60"]),
         )
 
-    def check_false_breakout(self, df: pd.DataFrame) -> bool:
+    def check_false_breakout(self, df: pd.DataFrame, direction: Optional[str] = None) -> bool:
         if df.empty:
             return False
         last = df.iloc[-1]
         return self.check_false_breakout_scalars(
-            float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])
+            float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"]),
+            direction=direction,
         )
 
     def check_overextended(
         self,
         df: pd.DataFrame,
-        max_ma25_bias: float = 0.0035,
-        max_ma60_bias: float = 0.0060,
+        atr_mult: float = ATR_MA25_BIAS_MULT,
     ) -> bool:
         if df.empty:
             return False
+        if "atr14" not in df.columns or "ma25" not in df.columns:
+            df = self.calculate_ma(df)
         last = df.iloc[-1]
         return self.check_overextended_scalars(
-            float(last["close"]), float(last["ma25"]), float(last["ma60"]), max_ma25_bias, max_ma60_bias
+            float(last["close"]), float(last["ma25"]), float(last["atr14"]), atr_mult=atr_mult
         )
 
     def check_htf_direction(self, df_htf: pd.DataFrame) -> Optional[str]:
@@ -274,6 +315,7 @@ class MAStrategy:
             ma7_seq=(float(ma7_s.iloc[0]), float(ma7_s.iloc[1]), float(ma7_s.iloc[2])),
             ma25_seq=(float(ma25_s.iloc[0]), float(ma25_s.iloc[1]), float(ma25_s.iloc[2])),
             ma60=float(last["ma60"]),
+            atr14=float(last["atr14"]),
             htf_dir=htf_dir,
             confirm_candles=confirm_candles,
         )
@@ -281,12 +323,14 @@ class MAStrategy:
     def check_exit(self, df: pd.DataFrame, position: dict) -> Optional[str]:
         if df is None or df.empty:
             return None
-        df = self.calculate_ma(df)
+        if not bool(position.get("trailing_active", False)):
+            return None
+        if "ma25" not in df.columns:
+            df = self.calculate_ma(df)
         last = df.iloc[-1]
         return self.evaluate_exit_bar(
             direction=str(position.get("direction") or ""),
             close=float(last["close"]),
-            ma7=float(last["ma7"]),
-            ma60=float(last["ma60"]),
-            trailing_active=bool(position.get("trailing_active", False)),
+            ma25=float(last["ma25"]),
+            trailing_active=True,
         )

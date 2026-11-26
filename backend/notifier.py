@@ -194,6 +194,7 @@ class TelegramNotifier:
             "profit_lock_stop": "阶梯锁盈",
             "trailing_stop": "移动止损",
             "ma7_trailing": "MA7 止盈",
+            "ma25_trailing": "MA25 止盈",
             "ma60_cross": "MA60 穿线",
             "exchange_closed": "交易所已平仓",
             "manual": "手动平仓",

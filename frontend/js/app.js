@@ -1197,6 +1197,7 @@ const AppController = (() => {
         profit_lock_stop: '<span class="badge bg-success-subtle text-success border border-success-subtle">阶梯锁盈</span>',
         trailing_stop:    '<span class="badge bg-success-subtle text-success border border-success-subtle">移动止损</span>',
         ma7_trailing:     '<span class="badge bg-success-subtle text-success border border-success-subtle">MA7 止盈</span>',
+        ma25_trailing:    '<span class="badge bg-success-subtle text-success border border-success-subtle">MA25 止盈</span>',
         ma60_cross:       '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">MA60 穿线</span>',
         take_profit:      '<span class="badge bg-success-subtle text-success border border-success-subtle">目标止盈</span>',
         exchange_closed:  '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">交易所平仓</span>',

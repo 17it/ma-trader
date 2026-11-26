@@ -16,9 +16,9 @@ import numpy as np
 import pandas as pd
 
 try:
-    from backend.strategy import MAStrategy
+    from backend.strategy import ATR_PERIOD, BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
 except ImportError:
-    from strategy import MAStrategy
+    from strategy import ATR_PERIOD, BREAKEVEN_BUFFER, MAStrategy, TRAILING_ACTIVATE_R
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +157,18 @@ class Backtester:
                 "ts": "first", "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
             }).dropna().reset_index(drop=True)
 
-        # Compute MAs
+        # Compute MAs & ATR(14)
         df_ltf["ma7"], df_ltf["ma25"], df_ltf["ma60"] = _compute_mas(df_ltf["close"])
+        prev_close = df_ltf["close"].shift(1)
+        tr = pd.concat(
+            [
+                df_ltf["high"] - df_ltf["low"],
+                (df_ltf["high"] - prev_close).abs(),
+                (df_ltf["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        df_ltf["atr14"] = tr.rolling(ATR_PERIOD).mean()
         df_htf["ma7"], df_htf["ma25"], df_htf["ma60"] = _compute_mas(df_htf["close"])
 
         # HTF array: [open_ts, close, ma7, ma25, ma60]
@@ -193,6 +203,7 @@ class Backtester:
         ltf_ma7 = df_ltf["ma7"].to_numpy(dtype=float)
         ltf_ma25 = df_ltf["ma25"].to_numpy(dtype=float)
         ltf_ma60 = df_ltf["ma60"].to_numpy(dtype=float)
+        ltf_atr14 = df_ltf["atr14"].to_numpy(dtype=float)
 
         strategy = MAStrategy()
 
@@ -260,69 +271,36 @@ class Backtester:
                 equity_ts.append(ts)
                 continue
 
-            # ---- 1. Manage open trade (identical tiers + MA60/MA7 exits to TradingBot) ----
+            # ---- 1. Manage open trade (no 0.7R BE / no MA60 exit; 1.2R -> BE+0.1% + MA25 trailing) ----
             if in_trade:
                 if trade_direction == "long":
                     if l <= trade_sl:
-                        reason = (
-                            "trailing_stop" if trailing_active
-                            else ("profit_lock_stop" if trade_sl > trade_entry else "stop_loss")
-                        )
+                        reason = "trailing_stop" if trailing_active else "stop_loss"
                         record_close(trade_sl, ts, reason)
                     elif not trailing_active:
-                        if h >= trade_tp:
-                            lock_sl = (
-                                max(trade_entry * 1.001, trade_entry + 0.5 * trade_risk_r)
-                                if rr_ratio > 1.2
-                                else trade_entry * 1.001
-                            )
-                            trade_sl = max(trade_sl, lock_sl)
+                        if trade_risk_r > 0 and h >= trade_entry + TRAILING_ACTIVATE_R * trade_risk_r:
+                            trade_sl = max(trade_sl, trade_entry * (1.0 + BREAKEVEN_BUFFER))
                             trailing_active = True
-                        elif rr_ratio > 1.2 and trade_risk_r > 0 and h >= trade_entry + 1.2 * trade_risk_r:
-                            trade_sl = max(trade_sl, trade_entry + 0.5 * trade_risk_r)
-                        elif rr_ratio > 0.7 and trade_risk_r > 0 and h >= trade_entry + 0.7 * trade_risk_r:
-                            trade_sl = max(trade_sl, trade_entry * 1.001)
-                        # Bar-close MA60 cross check (matches live strategy.check_exit)
-                        if not trailing_active:
-                            exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma7, ma60, False)
-                            if exit_sig:
-                                record_close(c, ts, exit_sig)
                     else:
-                        exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma7, ma60, True)
+                        exit_sig = MAStrategy.evaluate_exit_bar("long", c, ma25, True)
                         if exit_sig:
                             record_close(c, ts, exit_sig)
                         else:
-                            trade_sl = max(trade_sl, ma7 * 0.9995)
+                            trade_sl = max(trade_sl, ma25 * 0.9995)
                 else:  # short
                     if h >= trade_sl:
-                        reason = (
-                            "trailing_stop" if trailing_active
-                            else ("profit_lock_stop" if trade_sl < trade_entry else "stop_loss")
-                        )
+                        reason = "trailing_stop" if trailing_active else "stop_loss"
                         record_close(trade_sl, ts, reason)
                     elif not trailing_active:
-                        if l <= trade_tp:
-                            lock_sl = (
-                                min(trade_entry * 0.999, trade_entry - 0.5 * trade_risk_r)
-                                if rr_ratio > 1.2
-                                else trade_entry * 0.999
-                            )
-                            trade_sl = min(trade_sl, lock_sl)
+                        if trade_risk_r > 0 and l <= trade_entry - TRAILING_ACTIVATE_R * trade_risk_r:
+                            trade_sl = min(trade_sl, trade_entry * (1.0 - BREAKEVEN_BUFFER))
                             trailing_active = True
-                        elif rr_ratio > 1.2 and trade_risk_r > 0 and l <= trade_entry - 1.2 * trade_risk_r:
-                            trade_sl = min(trade_sl, trade_entry - 0.5 * trade_risk_r)
-                        elif rr_ratio > 0.7 and trade_risk_r > 0 and l <= trade_entry - 0.7 * trade_risk_r:
-                            trade_sl = min(trade_sl, trade_entry * 0.999)
-                        if not trailing_active:
-                            exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma7, ma60, False)
-                            if exit_sig:
-                                record_close(c, ts, exit_sig)
                     else:
-                        exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma7, ma60, True)
+                        exit_sig = MAStrategy.evaluate_exit_bar("short", c, ma25, True)
                         if exit_sig:
                             record_close(c, ts, exit_sig)
                         else:
-                            trade_sl = min(trade_sl, ma7 * 1.0005)
+                            trade_sl = min(trade_sl, ma25 * 1.0005)
 
             # ---- 2. Always feed MAStrategy bar-close signal state machine ----
             htf_dir = get_closed_htf_direction(ts)
@@ -334,6 +312,7 @@ class Backtester:
                 ma7_seq=(ltf_ma7[i - 2], ltf_ma7[i - 1], ma7),
                 ma25_seq=(ltf_ma25[i - 2], ltf_ma25[i - 1], ma25),
                 ma60=ma60,
+                atr14=ltf_atr14[i],
                 htf_dir=htf_dir,
                 confirm_candles=confirm_candles,
             )

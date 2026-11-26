@@ -382,9 +382,9 @@ class TestBacktesterParityAndCache(unittest.TestCase):
         for i in range(n_bars):
             ts = start_ms + i * step_ms
             c = base + i * slope
-            o = c - slope * 0.6
-            h = c + slope * 0.1
-            l = o - slope * 0.1
+            o = c - max(slope * 0.6, 0.12)
+            h = c + 0.04
+            l = o - 0.04
             rows.append([ts, o, h, l, c, 100.0])
         return pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
 
@@ -491,9 +491,49 @@ class TestBacktesterParityAndCache(unittest.TestCase):
             float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"]),
             (float(df_ma.iloc[-3]["ma7"]), float(df_ma.iloc[-2]["ma7"]), float(last["ma7"])),
             (float(df_ma.iloc[-3]["ma25"]), float(df_ma.iloc[-2]["ma25"]), float(last["ma25"])),
-            float(last["ma60"]), htf_dir, confirm_candles=2,
+            float(last["ma60"]), float(last["atr14"]), htf_dir, confirm_candles=2,
         )
         self.assertEqual(sig_live, sig_bt)
+
+    def test_upgraded_strategy_atr_adverse_wick_and_ma25_exit(self):
+        # 1. ATR(14) adaptive bias: |close - ma25| <= 2.5 * atr14 passes; > 2.5 * atr14 blocks
+        self.assertFalse(MAStrategy.check_overextended_scalars(close=102.0, ma25=100.0, atr14=1.0))
+        self.assertTrue(MAStrategy.check_overextended_scalars(close=103.0, ma25=100.0, atr14=1.0))
+
+        # 2. Adverse-wick-only filter: long lower wick on LONG is allowed; long upper wick on LONG is blocked
+        self.assertFalse(MAStrategy.check_false_breakout_scalars(o=100.0, h=101.2, l=95.0, c=101.0, direction="long"))
+        self.assertTrue(MAStrategy.check_false_breakout_scalars(o=100.0, h=104.0, l=99.8, c=101.0, direction="long"))
+        # Symmetric for SHORT: long upper wick allowed; long lower wick blocked
+        self.assertFalse(MAStrategy.check_false_breakout_scalars(o=101.0, h=106.0, l=99.8, c=100.0, direction="short"))
+        self.assertTrue(MAStrategy.check_false_breakout_scalars(o=101.0, h=101.2, l=97.0, c=100.0, direction="short"))
+
+        # 3. Entry-bar-only wick check does NOT reset confirm_count mid-sequence
+        st = MAStrategy()
+        ma7_seq = (100.0, 100.5, 101.0)
+        ma25_seq = (99.0, 99.3, 99.6)
+        # Bar 1: clean long -> 1/3
+        s1 = st.evaluate_bar(101.0, 102.2, 100.9, 102.0, ma7_seq, ma25_seq, 98.0, 1.5, "long", confirm_candles=3)
+        self.assertEqual(s1["confirm"], 1)
+        self.assertTrue(s1.get("pending"))
+        # Bar 2: huge upper wick on intermediate bar -> must still advance to 2/3 (NOT reset!)
+        s2 = st.evaluate_bar(101.5, 106.0, 101.4, 102.0, ma7_seq, ma25_seq, 98.0, 1.5, "long", confirm_candles=3)
+        self.assertEqual(s2["confirm"], 2)
+        self.assertTrue(s2.get("pending"))
+        # Bar 3: huge upper wick on entry bar -> blocks entry (pending+blocked_by_wick) WITHOUT resetting count
+        s3 = st.evaluate_bar(101.5, 106.0, 101.4, 102.0, ma7_seq, ma25_seq, 98.0, 1.5, "long", confirm_candles=3)
+        self.assertEqual(s3["confirm"], 3)
+        self.assertTrue(s3.get("pending"))
+        self.assertTrue(s3.get("blocked_by_wick"))
+        # Bar 4: clean bar immediately opens without re-counting from 1
+        s4 = st.evaluate_bar(101.0, 102.2, 100.9, 102.0, ma7_seq, ma25_seq, 98.0, 1.5, "long", confirm_candles=3)
+        self.assertEqual(s4["confirm"], 3)
+        self.assertNotIn("pending", s4)
+
+        # 4. Exit logic: NO MA60 exit when not trailing; exits on MA25 when trailing
+        self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=95.0, ma25=100.0, trailing_active=False))
+        self.assertEqual(MAStrategy.evaluate_exit_bar("long", close=99.0, ma25=100.0, trailing_active=True), "ma25_trailing")
+        self.assertEqual(MAStrategy.evaluate_exit_bar("short", close=101.0, ma25=100.0, trailing_active=True), "ma25_trailing")
+        self.assertIsNone(MAStrategy.evaluate_exit_bar("long", close=101.0, ma25=100.0, trailing_active=True))
 
     def test_cache_rejects_unclosed_forming_candle(self):
         now_ms = int(time.time() * 1000)
