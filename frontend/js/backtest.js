@@ -59,6 +59,14 @@ const BacktestManager = (() => {
     if (tmaEl && cfg.trailing_ma) tmaEl.value = String(cfg.trailing_ma).toLowerCase();
   }
 
+  function toggleClassicFields() {
+    const mode = document.getElementById('btStrategyMode')?.value || '';
+    const isClassic = mode === 'classic';
+    document.querySelectorAll('.bt-classic-only').forEach((el) => {
+      el.style.display = isClassic ? '' : 'none';
+    });
+  }
+
   function init() {
     // Default date-time range: 1st day of current month 00:00 ~ now (down to minute)
     const now = new Date();
@@ -78,6 +86,13 @@ const BacktestManager = (() => {
     if (btSymEl) {
       btSymEl.addEventListener('change', (e) => syncSymbolParams(e.target.value));
     }
+
+    // Show 参考R / 触发R / 保本% only when classic mode is selected
+    const btModeEl = document.getElementById('btStrategyMode');
+    if (btModeEl) {
+      btModeEl.addEventListener('change', toggleClassicFields);
+    }
+    toggleClassicFields();
 
     // run backtest
     document.getElementById('btnRunBacktest').addEventListener('click', runBacktest);
@@ -102,6 +117,11 @@ const BacktestManager = (() => {
   async function runBacktest() {
     const titleVal = document.getElementById('btTitle')?.value?.trim();
     const btModeVal = document.getElementById('btStrategyMode')?.value || '';
+    if (!btModeVal) {
+      alert('请先选择策略方案');
+      document.getElementById('btStrategyMode')?.focus();
+      return;
+    }
     const payload = {
       title:         titleVal || null,
       symbol:        document.getElementById('btSymbol').value,
@@ -494,9 +514,10 @@ const BacktestManager = (() => {
     }
     const stMode = params.strategy_mode;
     const modeEl = document.getElementById('btStrategyMode');
-    if (modeEl && stMode) {
-      modeEl.value = String(stMode).toLowerCase();
+    if (modeEl) {
+      modeEl.value = stMode ? String(stMode).toLowerCase() : '';
     }
+    toggleClassicFields();
 
     // 初始资金
     const cap = params.initial_capital;

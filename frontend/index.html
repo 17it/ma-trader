@@ -413,7 +413,7 @@
                 <div class="col-md-2">
                   <label class="form-label small">策略方案</label>
                   <select class="form-select form-select-sm" id="btStrategyMode">
-                    <option value="">跟随全局设置</option>
+                    <option value="" selected disabled>请选择策略方案</option>
                     <option value="balanced">方案 A：高胜率均衡</option>
                     <option value="breakout">方案 B：单边爆发</option>
                     <option value="classic">经典多均线</option>
@@ -427,15 +427,15 @@
                   <label class="form-label small">确认K <span id="btConfirmLabel">2</span></label>
                   <input type="range" class="form-range" id="btConfirm" min="1" max="10" value="2" />
                 </div>
-                <div class="col-6 col-md-1">
+                <div class="col-6 col-md-1 bt-classic-only" style="display:none">
                   <label class="form-label small" title="经典模式参考盈亏比（填 0 不显示参考目标）">参考R</label>
                   <input type="number" class="form-control form-control-sm" id="btRR" min="0" max="20" step="0.1" value="1.5" />
                 </div>
-                <div class="col-4 col-md-1">
+                <div class="col-4 col-md-1 bt-classic-only" style="display:none">
                   <label class="form-label small" title="经典模式触发R（方案A固定1.0R，方案B固定1.2R）">触发R</label>
                   <input type="number" class="form-control form-control-sm" id="btTrailR" min="0.1" max="10" step="0.02" value="0.88" />
                 </div>
-                <div class="col-4 col-md-1">
+                <div class="col-4 col-md-1 bt-classic-only" style="display:none">
                   <label class="form-label small" title="经典模式保本%（方案A/B自动锁+0.35R且保底0.2%）">保本%</label>
                   <input type="number" class="form-control form-control-sm" id="btBeBuf" min="0" max="5" step="0.05" value="0.3" />
                 </div>
