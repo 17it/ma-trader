@@ -144,6 +144,15 @@ async def add_security_and_cache_headers(request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "font-src 'self' data: https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self' ws: wss: https://*.binance.com https://*.binance.vision;",
+    )
     path = request.url.path
     if path == "/" or path.endswith((".html", ".js", ".css")) or "/js/" in path or "/css/" in path:
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"

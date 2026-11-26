@@ -237,12 +237,31 @@ class Executor:
             logger.debug("Reconcile by origClientOrderId=%s failed: %s", client_order_id, exc)
         return None
 
+    def _cancel_all_open_sl_orders(self, symbol: str) -> None:
+        """Best-effort cleanup of any residual reduceOnly trigger orders for *symbol* after position close."""
+        if self.exchange is None or not hasattr(self.exchange, "fetch_open_orders"):
+            return
+        try:
+            open_trig = self.exchange.fetch_open_orders(symbol, params={"trigger": True})
+            if not isinstance(open_trig, list):
+                return
+            for od in open_trig:
+                if not isinstance(od, dict):
+                    continue
+                oid = od.get("id")
+                info = od.get("info") if isinstance(od.get("info"), dict) else {}
+                is_reduce = bool(od.get("reduceOnly") or str(info.get("reduceOnly", "")).lower() == "true")
+                if oid and is_reduce:
+                    self._cancel_sl_order(symbol, str(oid))
+        except Exception as exc:
+            logger.debug("_cancel_all_open_sl_orders(%s) skipped: %s", symbol, exc)
+
     def _place_sl_order(self, symbol: str, direction: str, qty: float, stop_loss: float) -> Optional[dict]:
         """Place a reduceOnly STOP_MARKET order with one retry."""
         sl_side = "sell" if direction == "long" else "buy"
         sl_price = self._fmt_price(symbol, stop_loss)
         sl_qty = self._fmt_qty(symbol, qty)
-        sl_params = {"stopPrice": sl_price, "reduceOnly": True}
+        sl_params = {"stopPrice": sl_price, "reduceOnly": True, "workingType": "CONTRACT_PRICE"}
         last_exc = None
         for attempt in range(2):
             try:
@@ -522,9 +541,10 @@ class Executor:
                         actual_exit_price = avg
                     exit_fee = self._resolve_order_fee(symbol, close_order)
 
-            # 2. Clean up any resting SL order after position is closed
+            # 2. Clean up resting SL order(s) after position is closed (prevents -4045 stop order accumulation)
             if sl_order_id:
                 self._cancel_sl_order(symbol, sl_order_id)
+            self._cancel_all_open_sl_orders(symbol)
 
         if direction == "long":
             gross_pnl = (actual_exit_price - entry) * qty

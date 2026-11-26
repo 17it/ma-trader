@@ -248,10 +248,19 @@ const SettingsManager = (() => {
     }
   }
 
+  function getSymbolConfig(symbolName) {
+    if (!symbolName) return null;
+    const target = String(symbolName).toUpperCase().trim();
+    return symbols.find(s => s.symbol === target) || null;
+  }
+
   // ─── Update other selects ──────────────────────────────────────────────
   function updateBacktestSymbolSelect() {
     const sel = document.getElementById('btSymbol');
     sel.innerHTML = symbols.map(s => `<option value="${_esc(s.symbol)}">${_esc(s.symbol)}</option>`).join('');
+    if (typeof BacktestManager !== 'undefined' && BacktestManager.syncSymbolParams) {
+      BacktestManager.syncSymbolParams(sel.value);
+    }
   }
 
   function updateStatsSymbolSelect() {
@@ -386,7 +395,7 @@ const SettingsManager = (() => {
 
   return {
     init, loadGlobalSettings, loadSymbols,
-    editSymbol, deleteSymbol,
+    editSymbol, deleteSymbol, getSymbolConfig,
     updateSymbolPrice, updateSymbolDirection
   };
 })();

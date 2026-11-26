@@ -191,8 +191,8 @@ class BacktestRunCreate(BaseModel):
     strategy_mode: Optional[Literal["balanced", "breakout", "classic"]] = None
     cooldown_bars: Optional[int] = Field(None, ge=0, le=500)
     initial_capital: float = Field(10000.0, gt=0, le=1e9)
-    risk_per_trade: float = Field(0.01, gt=0, le=0.2)
-    leverage: int = Field(5, ge=1, le=20)
+    risk_per_trade: Optional[float] = Field(None, gt=0, le=0.2)
+    leverage: Optional[int] = Field(None, ge=1, le=20)
     fee_rate: float = Field(0.0004, ge=0.0, le=0.01)
     slippage_rate: float = Field(0.0001, ge=0.0, le=0.01)
     params: Dict[str, Any] = Field(

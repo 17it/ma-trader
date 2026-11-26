@@ -127,6 +127,15 @@ async def create_backtest(
             30 if params["strategy_mode"] != "classic" else 0
         )
 
+    # V2-B1: Inherit per-symbol leverage & risk_per_trade from SymbolConfig when omitted by UI
+    if params.get("risk_per_trade") is None or params.get("leverage") is None:
+        from database import SymbolConfig
+        sym_cfg = db.query(SymbolConfig).filter(SymbolConfig.symbol == body.symbol.upper()).first()
+        if params.get("risk_per_trade") is None:
+            params["risk_per_trade"] = float(sym_cfg.risk_per_trade) if sym_cfg else 0.01
+        if params.get("leverage") is None:
+            params["leverage"] = int(sym_cfg.leverage) if sym_cfg else 5
+
     run = BacktestRun(
         title=body.title.strip() if body.title and body.title.strip() else None,
         symbol=body.symbol.upper(),

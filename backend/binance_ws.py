@@ -25,16 +25,32 @@ PRIMARY_SPOT_WS_URL = "wss://data-stream.binance.vision/stream"
 FALLBACK_SPOT_WS_URL = "wss://stream.binance.com:9443/stream"
 
 _WS_SUPPORTS_PROXY = "proxy" in inspect.signature(websockets.connect).parameters
+try:
+    import python_socks  # noqa: F401
+    _HAS_PYTHON_SOCKS = True
+except ImportError:
+    _HAS_PYTHON_SOCKS = False
+_WARNED_MISSING_SOCKS = False
 
 
 def _normalize_ws_proxy(proxy: Optional[str]) -> Optional[str]:
+    global _WARNED_MISSING_SOCKS
     p = (proxy or "").strip()
     if not p:
         p = (os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or "").strip()
     if not p:
         return None
     if p.startswith("socks5h://"):
-        return "socks5://" + p[len("socks5h://"):]
+        p = "socks5://" + p[len("socks5h://"):]
+    if p.lower().startswith("socks") and not _HAS_PYTHON_SOCKS:
+        if not _WARNED_MISSING_SOCKS:
+            logger.error(
+                "BinanceWSStreamer: SOCKS proxy configured (%s) but 'python-socks[asyncio]' is not installed; "
+                "run 'pip install python-socks[asyncio]' to enable WebSocket SOCKS proxy.",
+                p.split("@")[-1],
+            )
+            _WARNED_MISSING_SOCKS = True
+        return None
     return p
 
 

@@ -136,11 +136,11 @@ def find_missing_intervals(
     for i in range(len(cached_bars) - 1):
         curr_ts = cached_bars[i][0]
         next_ts = cached_bars[i + 1][0]
-        if next_ts - curr_ts > step_ms * 2:
+        if next_ts - curr_ts > step_ms:
             missing.append((curr_ts + step_ms, next_ts))
 
     last_ts = cached_bars[-1][0]
-    if last_ts + max(step_ms * 4, 3600_000) < effective_until:
+    if last_ts + step_ms < effective_until:
         missing.append((last_ts + step_ms, effective_until))
 
     return missing

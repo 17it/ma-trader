@@ -84,6 +84,26 @@ def _sleep_until_next_poll(timeframe: str) -> float:
     return max(2.0, min(float(max_poll), to_bar_close))
 
 
+def _to_utc_ts(val) -> float:
+    """Convert naive/aware datetime, pandas Timestamp, ISO string, or numeric epoch to UTC seconds."""
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        v = float(val)
+        return v / 1000.0 if v > 1e11 else v
+    if hasattr(val, "timestamp"):
+        if getattr(val, "tzinfo", None) is None and isinstance(val, datetime):
+            return val.replace(tzinfo=timezone.utc).timestamp()
+        return float(val.timestamp())
+    try:
+        dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 def _config_signature(cfg) -> tuple:
     return (
         getattr(cfg, "timeframe", "1m"),
@@ -244,6 +264,7 @@ class TradingBot:
                         "exchange_order_id": getattr(ot, "exchange_order_id", None),
                         "sl_order_id": getattr(ot, "sl_order_id", None),
                         "trailing_active": bool(getattr(ot, "trailing_active", False)),
+                        "trailing_activated_at": getattr(ot, "trailing_activated_at", None),
                         "risk_r": saved_risk,
                         "trailing_activate_r": (
                             float(ot.trailing_activate_r)
@@ -269,6 +290,22 @@ class TradingBot:
                     }
                 if open_trades:
                     logger.info("Restored %d open trades from database into memory", len(open_trades))
+
+                # Restore remaining post-close cooldown across restarts (fixes V2-B3)
+                if self.cooldown_bars > 0 and self.strategy_mode != "classic":
+                    recent_closed = (
+                        session.query(Trade)
+                        .filter(Trade.status == "closed", Trade.is_paper == self.is_paper, Trade.close_time.isnot(None))
+                        .order_by(Trade.close_time.desc())
+                        .limit(50)
+                        .all()
+                    )
+                    seen_syms = set()
+                    for ct in recent_closed:
+                        if ct.symbol in seen_syms:
+                            continue
+                        seen_syms.add(ct.symbol)
+                        self.register_close_cooldown(ct.symbol, ct.timeframe, close_dt=ct.close_time)
             finally:
                 session.close()
         except Exception as exc:
@@ -370,6 +407,21 @@ class TradingBot:
                 "level": "info",
                 "message": f"⚙️ 已热切换全局策略模式为: {mode_names.get(self.strategy_mode, self.strategy_mode)} (平仓冷却 {self.cooldown_bars} 根K线)",
             })
+
+    def register_close_cooldown(
+        self,
+        symbol: str,
+        timeframe: Optional[str] = None,
+        close_dt: Optional[datetime] = None,
+    ) -> None:
+        """Record post-close cooldown expiry for *symbol* (shared by auto-close, manual-close, and restart)."""
+        if self.cooldown_bars <= 0 or self.strategy_mode == "classic":
+            return
+        base_ts = _to_utc_ts(close_dt) if close_dt is not None else time.time()
+        tf_sec = _TF_SECONDS.get(timeframe or "1m", 60)
+        until_ts = base_ts + self.cooldown_bars * tf_sec
+        if until_ts > time.time():
+            self.cooldown_until_ts[symbol] = max(self.cooldown_until_ts.get(symbol, 0.0), until_ts)
 
     async def _start_symbol(self, config):
         symbol = config.symbol
@@ -533,11 +585,16 @@ class TradingBot:
                             })
                     else:
                         self.confirm_counts[symbol] = signal["confirm"]
+                        if len(_RECENT_SIGNAL_EVENTS) > 200:
+                            _RECENT_SIGNAL_EVENTS.clear()
+                        in_cd = (symbol not in self.positions) and (time.time() < self.cooldown_until_ts.get(symbol, 0.0))
+                        rem_min = max(1, int((self.cooldown_until_ts[symbol] - time.time()) / 60)) if in_cd else 0
                         sig_fp = (
                             str(closed_candle_ts),
                             signal["direction"],
                             signal["confirm"],
                             bool(signal.get("blocked_by_wick")),
+                            in_cd,
                         )
                         if _RECENT_SIGNAL_EVENTS.get(symbol) != sig_fp:
                             _RECENT_SIGNAL_EVENTS[symbol] = sig_fp
@@ -548,10 +605,10 @@ class TradingBot:
                                 "confirm": signal["confirm"],
                                 "max_confirm": signal["max_confirm"],
                                 "blocked_by_wick": bool(signal.get("blocked_by_wick")),
+                                "cooldown_left_min": rem_min,
                             })
                         if symbol not in self.positions:
-                            if time.time() < self.cooldown_until_ts.get(symbol, 0.0):
-                                rem_min = max(1, int((self.cooldown_until_ts[symbol] - time.time()) / 60))
+                            if in_cd:
                                 logger.info("[%s] Signal skipped due to post-close cooldown (%dm left)", symbol, rem_min)
                             else:
                                 await self._handle_signal(symbol, signal, closed_df, symbol_config, closed_htf=closed_htf)
@@ -574,10 +631,7 @@ class TradingBot:
     def _is_daily_loss_exceeded(self, session, is_paper: bool, base_balance: float) -> bool:
         """Return True if today's realized loss exceeds max_daily_loss % of base_balance."""
         try:
-            try:
-                from backend.database import Trade, SettingModel
-            except ImportError:
-                from database import Trade, SettingModel
+            from database import Trade, SettingModel
 
             row = session.query(SettingModel).filter(SettingModel.key == "max_daily_loss").first()
             max_pct = float(row.value) if row and row.value else 5.0
@@ -665,7 +719,8 @@ class TradingBot:
         is_paper = self.is_paper
 
         if is_paper:
-            balance = 10_000.0
+            from database import get_paper_equity
+            balance = get_paper_equity()
         else:
             balance = await asyncio.to_thread(self.data_feed.get_account_balance)
             if balance is None or balance <= 0:
@@ -685,10 +740,7 @@ class TradingBot:
             return
 
         try:
-            try:
-                from backend.database import Trade
-            except ImportError:
-                from database import Trade
+            from database import Trade
             session = self.db_session_factory()
             try:
                 if self._is_daily_loss_exceeded(session, is_paper, balance):
@@ -778,6 +830,7 @@ class TradingBot:
                     "exchange_order_id": exchange_order_id,
                     "sl_order_id": sl_order_id,
                     "trailing_active": False,
+                    "trailing_activated_at": None,
                     "risk_r": sl_distance,
                     "trailing_activate_r": trailing_activate_r,
                     "breakeven_buffer": breakeven_buffer,
@@ -880,7 +933,17 @@ class TradingBot:
         if isinstance(res, dict) and res.get("updated"):
             pos["sl_order_id"] = res.get("sl_order_id")
             return float(res.get("stop_loss") or new_sl)
-        return new_sl
+        # V2-T2: NEVER overwrite local/DB stop_loss when exchange SL placement failed — preserve old SL so next cycle retries!
+        old_sl = float(pos.get("stop_loss") or new_sl)
+        err_detail = res.get("error") if isinstance(res, dict) else "unknown"
+        logger.warning("[LIVE] _sync_exchange_sl failed for %s (target=%s, keeping=%s): %s", symbol, new_sl, old_sl, err_detail)
+        self.broadcast({
+            "type": "log",
+            "level": "warning",
+            "symbol": symbol,
+            "message": f"⚠️ [{symbol}] 交易所移动止损同步未成功，保留原止损 {old_sl:.4f}，将在下轮自动重试",
+        })
+        return old_sl
 
     async def _reconcile_live_position(self, symbol: str, pos: dict, fallback_price: Optional[float]) -> bool:
         """
@@ -1012,12 +1075,15 @@ class TradingBot:
                             close_reason = "trailing_stop" if trailing_active else "stop_loss"
                         elif not trailing_active and price >= entry_price + eff_act_r * risk_r:
                             trailing_active = True
+                            act_now = datetime.now(timezone.utc)
                             stop_loss = MAStrategy.compute_mode_trailing_lock_sl(
                                 "long", entry_price, risk_r, stop_loss,
                                 strategy_mode=pos_mode, activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
                             )
+                            stop_loss = min(stop_loss, price * 0.9995)
                             sl_updated = True
                             pos["trailing_active"] = True
+                            pos["trailing_activated_at"] = act_now
                             self.broadcast({
                                 "type": "log",
                                 "level": "info",
@@ -1028,12 +1094,15 @@ class TradingBot:
                             close_reason = "trailing_stop" if trailing_active else "stop_loss"
                         elif not trailing_active and price <= entry_price - eff_act_r * risk_r:
                             trailing_active = True
+                            act_now = datetime.now(timezone.utc)
                             stop_loss = MAStrategy.compute_mode_trailing_lock_sl(
                                 "short", entry_price, risk_r, stop_loss,
                                 strategy_mode=pos_mode, activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
                             )
+                            stop_loss = max(stop_loss, price * 1.0005)
                             sl_updated = True
                             pos["trailing_active"] = True
+                            pos["trailing_activated_at"] = act_now
                             self.broadcast({
                                 "type": "log",
                                 "level": "info",
@@ -1044,7 +1113,7 @@ class TradingBot:
                     await self._close_trade(symbol, pos, close_reason, price)
                     continue
 
-                # 2. Once trailing is active: tighten SL along configured MA (HTF MA for Plan A/B, LTF MA for classic)
+                # 2. Once trailing is active: ONLY evaluate candles that CLOSED AFTER max(open_time, trailing_activated_at) (fixes V2-T1)
                 strategy = self.strategies.get(symbol)
                 if trailing_active and strategy is not None:
                     rail_tf = htf_timeframe if use_htf_rail else timeframe
@@ -1054,32 +1123,50 @@ class TradingBot:
                         eval_df = df.iloc[:-1] if len(df) >= 2 else df
 
                         if len(eval_df) >= 1:
-                            trail_ma_val = float(eval_df.iloc[-1][pos_trail_ma])
-                            pad_long = 0.999 if use_htf_rail else 0.9995
-                            pad_short = 1.001 if use_htf_rail else 1.0005
-                            if direction == "long":
-                                new_sl = max(stop_loss, trail_ma_val * pad_long)
-                                if new_sl > stop_loss:
-                                    stop_loss = new_sl
-                                    sl_updated = True
-                            else:
-                                new_sl = min(stop_loss, trail_ma_val * pad_short)
-                                if new_sl < stop_loss:
-                                    stop_loss = new_sl
-                                    sl_updated = True
-
-                        position_dict = {
-                            "direction": direction,
-                            "open_time": open_time,
-                            "trailing_active": True,
-                            "trailing_ma": pos_trail_ma,
-                        }
-                        exit_sig = strategy.check_exit(eval_df, position_dict, is_htf_rail=use_htf_rail)
-                        if exit_sig:
-                            await self._close_trade(
-                                symbol, pos, exit_sig, price or float(df.iloc[-1]["close"])
+                            last_eval = eval_df.iloc[-1]
+                            bar_close_ts = (
+                                (_to_utc_ts(last_eval["timestamp"]) + _TF_SECONDS.get(rail_tf, 60))
+                                if "timestamp" in eval_df.columns
+                                else float("inf")
                             )
-                            continue
+                            min_req_ts = max(
+                                _to_utc_ts(open_time),
+                                _to_utc_ts(pos.get("trailing_activated_at")),
+                            )
+                            if bar_close_ts > min_req_ts:
+                                trail_ma_val = float(last_eval[pos_trail_ma])
+                                pad_long = 0.999 if use_htf_rail else 0.9995
+                                pad_short = 1.001 if use_htf_rail else 1.0005
+                                if direction == "long":
+                                    cand_sl = trail_ma_val * pad_long
+                                    # V2-T2: Clamp inside live price to prevent Binance -2021 immediate-trigger rejection
+                                    if price is not None and price > 0:
+                                        cand_sl = min(cand_sl, price * 0.999)
+                                    new_sl = max(stop_loss, cand_sl)
+                                    if new_sl > stop_loss:
+                                        stop_loss = new_sl
+                                        sl_updated = True
+                                else:
+                                    cand_sl = trail_ma_val * pad_short
+                                    if price is not None and price > 0:
+                                        cand_sl = max(cand_sl, price * 1.001)
+                                    new_sl = min(stop_loss, cand_sl)
+                                    if new_sl < stop_loss:
+                                        stop_loss = new_sl
+                                        sl_updated = True
+
+                                position_dict = {
+                                    "direction": direction,
+                                    "open_time": open_time,
+                                    "trailing_active": True,
+                                    "trailing_ma": pos_trail_ma,
+                                }
+                                exit_sig = strategy.check_exit(eval_df, position_dict, is_htf_rail=use_htf_rail)
+                                if exit_sig:
+                                    await self._close_trade(
+                                        symbol, pos, exit_sig, price or float(df.iloc[-1]["close"])
+                                    )
+                                    continue
 
                 # 3. Persist updated SL & sync exchange SL order (only if SL moved meaningfully >= 0.02% or trailing toggled)
                 if sl_updated:
@@ -1088,7 +1175,11 @@ class TradingBot:
                         stop_loss = await self._sync_exchange_sl(symbol, pos, stop_loss)
                     pos["stop_loss"] = stop_loss
                     self._persist_trailing_update(
-                        pos["id"], stop_loss, trailing_active, pos.get("sl_order_id")
+                        pos["id"],
+                        stop_loss,
+                        trailing_active,
+                        pos.get("sl_order_id"),
+                        pos.get("trailing_activated_at"),
                     )
 
             except Exception as exc:
@@ -1100,13 +1191,11 @@ class TradingBot:
         stop_loss: float,
         trailing_active: bool,
         sl_order_id: Optional[str] = None,
+        trailing_activated_at: Optional[datetime] = None,
     ):
         """Persist updated trailing stop_loss / trailing_active / sl_order_id to SQLite."""
         try:
-            try:
-                from backend.database import Trade
-            except ImportError:
-                from database import Trade
+            from database import Trade
             session = self.db_session_factory()
             try:
                 updates = {
@@ -1115,6 +1204,8 @@ class TradingBot:
                 }
                 if sl_order_id is not None:
                     updates["sl_order_id"] = sl_order_id
+                if trailing_activated_at is not None:
+                    updates["trailing_activated_at"] = trailing_activated_at
                 session.query(Trade).filter_by(id=trade_id, status="open").update(updates)
                 session.commit()
             finally:
@@ -1218,9 +1309,8 @@ class TradingBot:
                     session.close()
 
                 self.positions.pop(symbol, None)
-                if self.cooldown_bars > 0 and self.strategy_mode != "classic":
-                    pos_tf = (pos.get("timeframe") if isinstance(pos, dict) else getattr(pos, "timeframe", None)) or "1m"
-                    self.cooldown_until_ts[symbol] = time.time() + self.cooldown_bars * _TF_SECONDS.get(pos_tf, 60)
+                pos_tf = (pos.get("timeframe") if isinstance(pos, dict) else getattr(pos, "timeframe", None)) or "1m"
+                self.register_close_cooldown(symbol, pos_tf)
 
                 if trade_dict:
                     self.broadcast({"type": "trade_closed", "trade": trade_dict})
@@ -1302,6 +1392,9 @@ class TradingBot:
                 confirm = message.get("confirm", 0)
                 max_c = message.get("max_confirm", 2)
                 suffix = "（反向长影线拦截，暂缓开仓）" if message.get("blocked_by_wick") else ""
+                cd_left = int(message.get("cooldown_left_min") or 0)
+                if cd_left > 0:
+                    suffix += f"（平仓冷却剩余 {cd_left}m，暂缓开仓）"
                 log_msg = f"[信号] {log_symbol} {direction} 确认 {confirm}/{max_c}{suffix}"
                 log_level = "info"
             elif mtype == "log":

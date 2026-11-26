@@ -35,6 +35,30 @@ const BacktestManager = (() => {
     return s.slice(0, 16);
   }
 
+  function syncSymbolParams(symbolName) {
+    if (typeof SettingsManager === 'undefined' || !SettingsManager.getSymbolConfig) return;
+    const cfg = SettingsManager.getSymbolConfig(symbolName);
+    if (!cfg) return;
+    const tfEl = document.getElementById('btTimeframe');
+    const htfEl = document.getElementById('btHtf');
+    const confEl = document.getElementById('btConfirm');
+    const confLbl = document.getElementById('btConfirmLabel');
+    const rrEl = document.getElementById('btRR');
+    const trailREl = document.getElementById('btTrailR');
+    const beEl = document.getElementById('btBeBuf');
+    const tmaEl = document.getElementById('btTrailingMa');
+    if (tfEl && cfg.timeframe) tfEl.value = cfg.timeframe;
+    if (htfEl && cfg.htf_timeframe) htfEl.value = cfg.htf_timeframe;
+    if (confEl && cfg.confirm_candles != null) {
+      confEl.value = cfg.confirm_candles;
+      if (confLbl) confLbl.textContent = cfg.confirm_candles;
+    }
+    if (rrEl && cfg.rr_ratio != null) rrEl.value = cfg.rr_ratio;
+    if (trailREl && cfg.trailing_activate_r != null) trailREl.value = cfg.trailing_activate_r;
+    if (beEl && cfg.breakeven_buffer != null) beEl.value = Number((cfg.breakeven_buffer * 100).toFixed(3));
+    if (tmaEl && cfg.trailing_ma) tmaEl.value = String(cfg.trailing_ma).toLowerCase();
+  }
+
   function init() {
     // Default date-time range: 1st day of current month 00:00 ~ now (down to minute)
     const now = new Date();
@@ -48,6 +72,12 @@ const BacktestManager = (() => {
     document.getElementById('btConfirm').addEventListener('input', (e) => {
       document.getElementById('btConfirmLabel').textContent = e.target.value;
     });
+
+    // V2-B5: Auto-populate saved symbol parameters when switching symbol in backtest form
+    const btSymEl = document.getElementById('btSymbol');
+    if (btSymEl) {
+      btSymEl.addEventListener('change', (e) => syncSymbolParams(e.target.value));
+    }
 
     // run backtest
     document.getElementById('btnRunBacktest').addEventListener('click', runBacktest);
@@ -491,5 +521,5 @@ const BacktestManager = (() => {
     }
   }
 
-  return { init, loadHistory, viewRun, deleteRun, clearAllHistory };
+  return { init, loadHistory, viewRun, deleteRun, clearAllHistory, syncSymbolParams };
 })();

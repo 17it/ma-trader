@@ -63,8 +63,6 @@ class TestSecurityAndAPI(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.client_cm.__exit__(None, None, None)
-        db_mod.engine.dispose()
-        _TMP_DIR.cleanup()
 
     def setUp(self):
         auth_mod._login_fails.clear()
@@ -405,6 +403,30 @@ class TestSecurityAndAPI(unittest.TestCase):
         self.assertEqual(r_clr.status_code, 200)
         r_empty = self.client.get("/api/system-logs", headers=self.auth_headers)
         self.assertEqual(r_empty.json()["total"], 0)
+
+        # V2-B1: /api/backtest inherits symbol's configured leverage & risk_per_trade when omitted
+        r_sym = self.client.post(
+            "/api/symbols",
+            headers=self.auth_headers,
+            json={"symbol": "AVAXUSDT", "timeframe": "5m", "htf_timeframe": "1h", "leverage": 12, "risk_per_trade": 0.018},
+        )
+        self.assertEqual(r_sym.status_code, 201)
+        sym_id = r_sym.json()["id"]
+        async def _noop_bt(*_args, **_kwargs):
+            return None
+
+        with patch("routers.backtest._run_backtest_task", side_effect=_noop_bt):
+            r_bt = self.client.post(
+                "/api/backtest",
+                headers=self.auth_headers,
+                json={"symbol": "AVAXUSDT", "timeframe": "5m", "htf_timeframe": "1h", "start_date": "2026-10-01", "end_date": "2026-10-05"},
+            )
+        self.assertEqual(r_bt.status_code, 202)
+        import json as _json
+        saved_params = _json.loads(r_bt.json()["params"])
+        self.assertEqual(saved_params["leverage"], 12)
+        self.assertAlmostEqual(saved_params["risk_per_trade"], 0.018)
+        self.client.delete(f"/api/symbols/{sym_id}", headers=self.auth_headers)
 
 
 class TestLiveExecutionSafeguards(unittest.TestCase):
@@ -864,6 +886,155 @@ class TestSecondAuditFixes(unittest.TestCase):
             auth_mod.record_login_failure("203.0.113.9", "admin")
         self.assertGreater(auth_mod.login_retry_after("203.0.113.9", "admin"), 0)
         self.assertEqual(auth_mod.login_retry_after("198.51.100.2", "admin"), 0)
+
+
+class TestThirdAuditFixes(unittest.TestCase):
+    """Tests for V2 audit report fixes (V2-T1, V2-T2, V2-B1, V2-B2, V2-B3)."""
+
+    def test_v2_t1_stale_pre_activation_htf_candle_never_closes_winning_trade(self):
+        from trader import TradingBot
+
+        db = db_mod.SessionLocal()
+        try:
+            now_utc = datetime.now(timezone.utc)
+            tr = db_mod.Trade(
+                symbol="BTCUSDT",
+                direction="long",
+                entry_price=60000.0,
+                stop_loss=59400.0,
+                take_profit=60900.0,
+                quantity=0.1,
+                status="open",
+                is_paper=True,
+                open_time=now_utc,
+                timeframe="1m",
+                confirm_count=2,
+                initial_risk=600.0,
+                trailing_activate_r=1.0,
+                breakeven_buffer=0.002,
+                trailing_ma="ma25",
+                strategy_mode="balanced",
+            )
+            db.add(tr)
+            db.commit()
+            tid = tr.id
+        finally:
+            db.close()
+
+        # Construct 15m klines where the LAST CLOSED 15m bar closed 2 minutes BEFORE open_time
+        # AND closed BELOW MA25 (pullback bar), while the current 15m bar is still forming.
+        closed_before_open = now_utc - timedelta(minutes=17)  # closes at now_utc - 2m < open_time!
+        rows = []
+        for k in range(70):
+            ts_dt = closed_before_open - timedelta(minutes=15 * (69 - k))
+            px = 60500.0 if k < 69 else 59800.0  # last closed bar dipped below MA25 (~60470)!
+            rows.append({"timestamp": ts_dt, "open": px, "high": px + 20, "low": px - 20, "close": px, "volume": 10.0})
+        # Forming bar (dropped by iloc[:-1])
+        rows.append({"timestamp": now_utc - timedelta(minutes=2), "open": 60000.0, "high": 60700.0, "low": 59990.0, "close": 60650.0, "volume": 5.0})
+        df_15m = pd.DataFrame(rows)
+
+        feed = MagicMock()
+        feed.get_ticker.return_value = 60650.0  # >= 60000 + 1.0 * 600 -> activates trailing!
+        feed.get_ohlcv.return_value = df_15m
+
+        bot = TradingBot(
+            db_session_factory=db_mod.SessionLocal,
+            data_feed=feed,
+            executor=MagicMock(is_paper=True),
+            notifier=MagicMock(),
+            ws_streamer=MagicMock(),
+            is_paper=True,
+        )
+        bot.strategies["BTCUSDT"] = MAStrategy(strategy_mode="balanced")
+        bot.positions["BTCUSDT"] = {
+            "id": tid,
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "entry_price": 60000.0,
+            "stop_loss": 59400.0,
+            "take_profit": 60900.0,
+            "quantity": 0.1,
+            "status": "open",
+            "is_paper": True,
+            "open_time": now_utc,
+            "timeframe": "1m",
+            "htf_timeframe": "15m",
+            "trailing_active": False,
+            "trailing_activated_at": None,
+            "risk_r": 600.0,
+            "trailing_activate_r": 1.0,
+            "breakeven_buffer": 0.002,
+            "trailing_ma": "ma25",
+            "strategy_mode": "balanced",
+        }
+
+        asyncio.run(bot._check_exits())
+        # Trade MUST still be open (NOT falsely closed by the pre-entry 15m candle!), with trailing activated & profit locked
+        self.assertIn("BTCUSDT", bot.positions)
+        self.assertTrue(bot.positions["BTCUSDT"]["trailing_active"])
+        self.assertGreater(bot.positions["BTCUSDT"]["stop_loss"], 60000.0)
+
+        db = db_mod.SessionLocal()
+        try:
+            db.query(db_mod.Trade).filter_by(id=tid).delete()
+            db.commit()
+        finally:
+            db.close()
+
+    def test_v2_t2_failed_sl_sync_preserves_old_sl_for_retry(self):
+        from trader import TradingBot
+
+        ex = MagicMock()
+        ex.markets = {"BTCUSDT": {}}
+        ex.amount_to_precision.side_effect = lambda sym, qty: f"{qty:.3f}"
+        ex.price_to_precision.side_effect = lambda sym, price: f"{price:.2f}"
+        ex.create_order.side_effect = RuntimeError("-2021 Order would immediately trigger")
+
+        bot = TradingBot(
+            db_session_factory=db_mod.SessionLocal,
+            data_feed=MagicMock(),
+            executor=Executor(exchange=ex, config={}, is_paper=False),
+            notifier=MagicMock(),
+            ws_streamer=MagicMock(),
+            is_paper=False,
+        )
+        pos = {
+            "id": 99999,
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "stop_loss": 59500.0,
+            "quantity": 0.1,
+            "is_paper": False,
+            "sl_order_id": "sl_orig",
+        }
+        resulting_sl = asyncio.run(bot._sync_exchange_sl("BTCUSDT", pos, 60200.0))
+        # MUST keep 59500.0 (not overwrite with 60200.0!) so next 15s cycle sees moved_enough=True and retries
+        self.assertEqual(resulting_sl, 59500.0)
+        self.assertEqual(pos["sl_order_id"], "sl_orig")
+
+    def test_v2_b2_cache_detects_sub_hour_tail_and_single_bar_gap(self):
+        from backtest_cache import find_missing_intervals
+
+        now_ms = int(time.time() * 1000)
+        step = 60_000  # 1m
+        last_closed = (now_ms // step) * step
+        # Cached bars stop 20 minutes ago (previously skipped due to 1h blind spot!) and have a 2m single-bar gap
+        t0 = last_closed - 25 * step
+        cached = [
+            [t0, 1, 1, 1, 1, 1],
+            [t0 + step, 1, 1, 1, 1, 1],
+            # missing t0 + 2*step!
+            [t0 + 3 * step, 1, 1, 1, 1, 1],
+            [t0 + 4 * step, 1, 1, 1, 1, 1],
+        ]
+        missing = find_missing_intervals(cached, t0, last_closed, step)
+        self.assertIn((t0 + 2 * step, t0 + 3 * step), missing)
+        self.assertIn((t0 + 5 * step, last_closed), missing)
+
+
+def tearDownModule():
+    db_mod.engine.dispose()
+    _TMP_DIR.cleanup()
 
 
 if __name__ == "__main__":

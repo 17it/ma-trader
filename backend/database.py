@@ -117,6 +117,7 @@ class Trade(Base):
     exchange_order_id = Column(String, nullable=True)
     sl_order_id = Column(String, nullable=True)
     trailing_active = Column(Boolean, default=False)
+    trailing_activated_at = Column(DateTime, nullable=True)    # 激活移动止盈的时刻，防止读旧 K 线误平仓
     initial_risk = Column(Float, nullable=True)                # 开仓时 1R 距离（|entry - 初始止损|），重启后用于分档止盈
     trailing_activate_r = Column(Float, nullable=True)         # 开仓时该交易对的追踪触发 R
     breakeven_buffer = Column(Float, nullable=True)            # 开仓时该交易对的保本缓冲比例
@@ -386,6 +387,8 @@ def create_tables() -> None:
             conn.execute(text("ALTER TABLE trades ADD COLUMN sl_order_id VARCHAR"))
         if "trailing_active" not in cols:
             conn.execute(text("ALTER TABLE trades ADD COLUMN trailing_active BOOLEAN DEFAULT 0"))
+        if "trailing_activated_at" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN trailing_activated_at DATETIME"))
         if "initial_risk" not in cols:
             conn.execute(text("ALTER TABLE trades ADD COLUMN initial_risk FLOAT"))
         if "trailing_activate_r" not in cols:
@@ -498,3 +501,22 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def get_paper_equity(db=None, base_capital: float = 10_000.0) -> float:
+    """Compute current paper account equity = base_capital + realized net P&L of closed paper trades."""
+    from sqlalchemy import func
+    own = db is None
+    session = SessionLocal() if own else db
+    try:
+        realized = (
+            session.query(func.coalesce(func.sum(Trade.pnl), 0.0))
+            .filter(Trade.status == "closed", Trade.is_paper == True)  # noqa: E712
+            .scalar()
+        )
+        return max(100.0, float(base_capital) + float(realized or 0.0))
+    except Exception:
+        return float(base_capital)
+    finally:
+        if own:
+            session.close()

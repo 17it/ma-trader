@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # MA Auto Trader — startup script
 # Usage:
-#   ./run.sh           — production mode (listens on 127.0.0.1:8080 by default)
+#   ./run.sh           — production mode (listens on 127.0.0.1:8888 by default, override via PORT=8080)
 #   ./run.sh --reload  — development mode (auto-reload on file changes)
 #   HOST=0.0.0.0 ./run.sh — override bind address explicitly
 # ---------------------------------------------------------------------------

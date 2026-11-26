@@ -1761,8 +1761,11 @@ const AppController = (() => {
             bar.className = 'progress-bar signal-progress-bar ' + (isLong ? 'bg-success' : 'bg-danger');
           }
         }
-        const wickNote = msg.blocked_by_wick ? '（反向长影线过滤，等待下一根确认）' : '';
-        appendLog(`[信号] ${msg.symbol} ${msg.direction.toUpperCase()} 确认 ${msg.confirm}/${msg.max_confirm}${wickNote}`, 'info');
+        let suffix = msg.blocked_by_wick ? '（反向长影线过滤，等待下一根确认）' : '';
+        if (msg.cooldown_left_min && msg.cooldown_left_min > 0) {
+          suffix += `（平仓冷却剩余 ${msg.cooldown_left_min}m，暂缓开仓）`;
+        }
+        appendLog(`[信号] ${msg.symbol} ${msg.direction.toUpperCase()} 确认 ${msg.confirm}/${msg.max_confirm}${suffix}`, 'info');
         break;
       }
 

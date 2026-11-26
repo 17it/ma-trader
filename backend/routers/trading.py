@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from database import (
     get_db,
+    get_paper_equity,
     Trade,
     SymbolConfig,
     OperationLog,
@@ -410,6 +411,7 @@ async def simulate_trade(
     risk_pct = sym_cfg.risk_per_trade if sym_cfg else 0.01
     leverage = sym_cfg.leverage if sym_cfg else 5
     timeframe = sym_cfg.timeframe if sym_cfg else "1m"
+    htf_timeframe = sym_cfg.htf_timeframe if sym_cfg else "15m"
     confirm_count = sym_cfg.confirm_candles if sym_cfg else 2
     trailing_activate_r = (
         float(sym_cfg.trailing_activate_r)
@@ -426,6 +428,9 @@ async def simulate_trade(
         if sym_cfg and getattr(sym_cfg, "trailing_ma", None)
         else "ma25"
     )
+    config_mgr = getattr(request.app.state, "config", None)
+    cfg = config_mgr.get_all_cached() if (config_mgr is not None and hasattr(config_mgr, "get_all_cached")) else {}
+    strategy_mode = MAStrategy.normalize_mode(cfg.get("strategy_mode") or "balanced")
 
     sl_pct = 0.005
     if direction == "long":
@@ -436,7 +441,7 @@ async def simulate_trade(
         tp = entry_price - (sl - entry_price) * rr
 
     price_risk = abs(entry_price - sl)
-    balance = 10_000.0
+    balance = get_paper_equity(db)
     qty = MAStrategy.calc_position_size(
         capital=balance,
         risk_pct=risk_pct,
@@ -464,6 +469,7 @@ async def simulate_trade(
         trailing_activate_r=trailing_activate_r,
         breakeven_buffer=breakeven_buffer,
         trailing_ma=trailing_ma,
+        strategy_mode=strategy_mode,
         fee=0.0,
     )
     db.add(trade)
@@ -486,13 +492,16 @@ async def simulate_trade(
             "is_paper": True,
             "open_time": trade.open_time,
             "timeframe": trade.timeframe,
+            "htf_timeframe": htf_timeframe,
             "exchange_order_id": None,
             "sl_order_id": None,
             "trailing_active": False,
+            "trailing_activated_at": None,
             "risk_r": price_risk,
             "trailing_activate_r": trailing_activate_r,
             "breakeven_buffer": breakeven_buffer,
             "trailing_ma": trailing_ma,
+            "strategy_mode": strategy_mode,
         }
 
     dir_label = "做多" if direction == "long" else "做空"
@@ -648,11 +657,14 @@ async def manual_close_trade(
         db=db,
     )
 
-    if target_bot is not None and hasattr(target_bot, "positions"):
-        pos = target_bot.positions.get(trade.symbol)
-        pos_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
-        if pos_id == trade.id or pos_id is None:
-            target_bot.positions.pop(trade.symbol, None)
+    if target_bot is not None:
+        if hasattr(target_bot, "positions"):
+            pos = target_bot.positions.get(trade.symbol)
+            pos_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)
+            if pos_id == trade.id or pos_id is None:
+                target_bot.positions.pop(trade.symbol, None)
+        if hasattr(target_bot, "register_close_cooldown"):
+            target_bot.register_close_cooldown(trade.symbol, trade.timeframe, close_dt=trade.close_time)
 
     ws_manager = _get_ws_manager(request)
     if ws_manager is not None:
