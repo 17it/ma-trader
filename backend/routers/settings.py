@@ -12,8 +12,15 @@ Endpoints:
 
 from __future__ import annotations
 
+import os
 import re
-from typing import Dict, List
+import shutil
+import sys
+import threading
+import time
+from collections import deque
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -365,3 +372,220 @@ async def test_telegram_notification(request: Request, db: Session = Depends(get
         "chat_id": chat_id,
         "message": f"测试消息发送成功！(目标 Chat ID: {chat_id})",
     }
+
+
+# ─── Lightweight Server Resource Monitor (/proc + shutil) ─────────────────────
+
+_PROCESS_START_TS = time.time()
+_METRICS_LOCK = threading.Lock()
+_METRICS_HISTORY: deque = deque(maxlen=60)
+_PREV_CPU_TIMES: Optional[Tuple[int, int]] = None
+_LAST_SAMPLE_TS: float = 0.0
+_LATEST_SNAPSHOT: Optional[dict] = None
+
+
+def _read_linux_cpu_times() -> Optional[Tuple[int, int]]:
+    try:
+        with open("/proc/stat", "r", encoding="utf-8") as f:
+            first = f.readline().strip()
+        if not first.startswith("cpu "):
+            return None
+        parts = [int(x) for x in first.split()[1:]]
+        idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
+        total = sum(parts)
+        return total, idle
+    except Exception:
+        return None
+
+
+def _read_linux_cpu_ghz() -> Optional[float]:
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.lower().startswith("cpu mhz"):
+                    _, val = line.split(":", 1)
+                    return round(float(val.strip()) / 1000.0, 2)
+    except Exception:
+        pass
+    return None
+
+
+def _read_linux_meminfo() -> Dict[str, int]:
+    info: Dict[str, int] = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                k, rest = line.split(":", 1)
+                num_str = rest.strip().split()[0]
+                if num_str.isdigit():
+                    info[k] = int(num_str)
+    except Exception:
+        pass
+    return info
+
+
+def _read_linux_proc_status() -> Tuple[float, int]:
+    rss_mb = 0.0
+    threads = threading.active_count()
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_mb = round(int(line.split()[1]) / 1024.0, 2)
+                elif line.startswith("Threads:"):
+                    threads = int(line.split()[1])
+    except Exception:
+        pass
+    return rss_mb, threads
+
+
+def _read_linux_uptime() -> Optional[float]:
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as f:
+            return float(f.read().split()[0])
+    except Exception:
+        return None
+
+
+def _collect_system_metrics_locked() -> dict:
+    global _PREV_CPU_TIMES, _LAST_SAMPLE_TS, _LATEST_SNAPSHOT
+
+    now = time.time()
+    if _LATEST_SNAPSHOT is not None and (now - _LAST_SAMPLE_TS) < 2.0:
+        return _LATEST_SNAPSHOT
+
+    cores = os.cpu_count() or 1
+    cpu_ghz = _read_linux_cpu_ghz()
+
+    # CPU %
+    cpu_pct = 0.0
+    cur_cpu = _read_linux_cpu_times()
+    if cur_cpu is not None:
+        if _PREV_CPU_TIMES is None:
+            _PREV_CPU_TIMES = cur_cpu
+            time.sleep(0.05)
+            cur_cpu = _read_linux_cpu_times() or cur_cpu
+        d_total = cur_cpu[0] - _PREV_CPU_TIMES[0]
+        d_idle = cur_cpu[1] - _PREV_CPU_TIMES[1]
+        if d_total > 0:
+            cpu_pct = max(0.0, min(100.0, (1.0 - d_idle / d_total) * 100.0))
+        _PREV_CPU_TIMES = cur_cpu
+    else:
+        try:
+            load1 = os.getloadavg()[0]
+            cpu_pct = max(0.0, min(100.0, (load1 / cores) * 100.0))
+        except Exception:
+            cpu_pct = 0.0
+
+    # Memory & Swap
+    meminfo = _read_linux_meminfo()
+    if meminfo.get("MemTotal"):
+        mem_total_kb = meminfo["MemTotal"]
+        mem_avail_kb = meminfo.get(
+            "MemAvailable",
+            meminfo.get("MemFree", 0) + meminfo.get("Buffers", 0) + meminfo.get("Cached", 0),
+        )
+        mem_used_kb = max(0, mem_total_kb - mem_avail_kb)
+        mem_total_mb = round(mem_total_kb / 1024.0, 2)
+        mem_used_mb = round(mem_used_kb / 1024.0, 2)
+        mem_pct = round((mem_used_kb / mem_total_kb) * 100.0, 1)
+
+        swap_total_kb = meminfo.get("SwapTotal", 0)
+        swap_free_kb = meminfo.get("SwapFree", 0)
+        swap_used_kb = max(0, swap_total_kb - swap_free_kb)
+        swap_total_gb = round(swap_total_kb / (1024.0 * 1024.0), 2)
+        swap_used_gb = round(swap_used_kb / (1024.0 * 1024.0), 2)
+        swap_pct = round((swap_used_kb / swap_total_kb) * 100.0, 1) if swap_total_kb > 0 else 0.0
+    else:
+        mem_total_mb = 0.0
+        mem_used_mb = 0.0
+        mem_pct = 0.0
+        swap_total_gb = 0.0
+        swap_used_gb = 0.0
+        swap_pct = 0.0
+
+    # Disk
+    disk_usage = shutil.disk_usage(Path("/"))
+    disk_total_gb = round(disk_usage.total / (1024.0 ** 3), 2)
+    disk_used_gb = round(disk_usage.used / (1024.0 ** 3), 2)
+    disk_free_gb = round(disk_usage.free / (1024.0 ** 3), 2)
+    disk_pct = round((disk_usage.used / disk_usage.total) * 100.0, 1) if disk_usage.total > 0 else 0.0
+
+    # Uptime & Process info
+    app_uptime_sec = max(0, int(now - _PROCESS_START_TS))
+    os_uptime_raw = _read_linux_uptime()
+    os_uptime_sec = int(os_uptime_raw) if os_uptime_raw is not None else app_uptime_sec
+
+    proc_rss_mb, proc_threads = _read_linux_proc_status()
+    if proc_rss_mb <= 0:
+        try:
+            import resource
+            ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            divisor = (1024.0 * 1024.0) if sys.platform == "darwin" else 1024.0
+            proc_rss_mb = round(ru / divisor, 2)
+        except Exception:
+            proc_rss_mb = 0.0
+
+    point = {
+        "t": int(now),
+        "cpu": round(cpu_pct, 1),
+        "mem": mem_pct,
+        "swap": swap_pct,
+        "disk": disk_pct,
+    }
+    _METRICS_HISTORY.append(point)
+    _LAST_SAMPLE_TS = now
+
+    hist = list(_METRICS_HISTORY)
+
+    def _agg(key: str) -> dict:
+        vals = [p[key] for p in hist]
+        return {
+            "avg": round(sum(vals) / len(vals), 1) if vals else 0.0,
+            "peak": round(max(vals), 1) if vals else 0.0,
+        }
+
+    _LATEST_SNAPSHOT = {
+        "cpu": {
+            "pct": point["cpu"],
+            "cores": cores,
+            "ghz": cpu_ghz,
+            **_agg("cpu"),
+        },
+        "memory": {
+            "pct": mem_pct,
+            "used_mb": mem_used_mb,
+            "total_mb": mem_total_mb,
+            **_agg("mem"),
+        },
+        "swap": {
+            "pct": swap_pct,
+            "used_gb": swap_used_gb,
+            "total_gb": swap_total_gb,
+            **_agg("swap"),
+        },
+        "disk": {
+            "pct": disk_pct,
+            "used_gb": disk_used_gb,
+            "total_gb": disk_total_gb,
+            "free_gb": disk_free_gb,
+            **_agg("disk"),
+        },
+        "runtime": {
+            "app_uptime_sec": app_uptime_sec,
+            "os_uptime_sec": os_uptime_sec,
+            "proc_mem_mb": proc_rss_mb,
+            "proc_threads": proc_threads,
+        },
+        "history": hist,
+    }
+    return _LATEST_SNAPSHOT
+
+
+@router.get("/system/metrics", summary="Get lightweight server resource metrics")
+def get_system_metrics():
+    """Return CPU, memory, swap, disk, uptime, and process metrics from /proc."""
+    with _METRICS_LOCK:
+        return _collect_system_metrics_locked()

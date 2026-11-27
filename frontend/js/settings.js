@@ -6,6 +6,7 @@ const SettingsManager = (() => {
   let symbols = [];
   let modalInstance = null;
   let editingId = null;
+  let monitorTimer = null;
 
   function _esc(str) {
     if (str === null || str === undefined) return '';
@@ -55,6 +56,152 @@ const SettingsManager = (() => {
     const btnTestTg = document.getElementById('btnTestTg');
     if (btnTestTg) {
       btnTestTg.addEventListener('click', testTelegramNotification);
+    }
+
+    // server monitor polling (only while Settings tab is visible)
+    const tabSettingsLink = document.querySelector('a[href="#tabSettings"]');
+    if (tabSettingsLink) {
+      tabSettingsLink.addEventListener('shown.bs.tab', startMonitorPolling);
+      tabSettingsLink.addEventListener('hidden.bs.tab', stopMonitorPolling);
+    }
+    document.addEventListener('visibilitychange', () => {
+      const pane = document.getElementById('tabSettings');
+      if (document.hidden) {
+        stopMonitorPolling();
+      } else if (pane && pane.classList.contains('active')) {
+        startMonitorPolling();
+      }
+    });
+  }
+
+  // ─── Server Resource Monitor ─────────────────────────────────────────
+  function _fmtUptime(sec) {
+    const s = Math.max(0, Number(sec) || 0);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  }
+
+  function _renderSparkline(svgId, values, color, avgVal) {
+    const svg = document.getElementById(svgId);
+    if (!svg) return;
+    const W = 180;
+    const H = 42;
+    const pts = (values && values.length) ? values : [0];
+    const norm = pts.length === 1 ? [pts[0], pts[0]] : pts;
+    const step = W / (norm.length - 1);
+    const coords = norm.map((v, i) => {
+      const clamped = Math.max(0, Math.min(100, Number(v) || 0));
+      const x = (i * step).toFixed(1);
+      const y = (H - 4 - (clamped / 100) * (H - 8)).toFixed(1);
+      return [x, y];
+    });
+    const lineD = coords.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x},${y}`).join(' ');
+    const areaD = `${lineD} L${W},${H} L0,${H} Z`;
+    const avgClamped = Math.max(0, Math.min(100, Number(avgVal) || 0));
+    const avgY = (H - 4 - (avgClamped / 100) * (H - 8)).toFixed(1);
+    const gradId = `${svgId}_grad`;
+
+    svg.innerHTML = `
+      <defs>
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${color}" stop-opacity="0.28"/>
+          <stop offset="100%" stop-color="${color}" stop-opacity="0.02"/>
+        </linearGradient>
+      </defs>
+      <path d="${areaD}" fill="url(#${gradId})"/>
+      <line x1="0" y1="${avgY}" x2="${W}" y2="${avgY}" stroke="currentColor" stroke-opacity="0.25" stroke-width="1" stroke-dasharray="3 3"/>
+      <path d="${lineD}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    `;
+  }
+
+  async function loadSystemMetrics() {
+    try {
+      const res = await fetch('/api/system/metrics');
+      if (!res.ok) return;
+      const d = await res.json();
+      const hist = d.history || [];
+
+      // CPU
+      const cpu = d.cpu || {};
+      const cpuEl = document.getElementById('monCpuPct');
+      if (cpuEl) cpuEl.textContent = cpu.pct != null ? Number(cpu.pct).toFixed(1) : '—';
+      const cpuSub = document.getElementById('monCpuSub');
+      if (cpuSub) {
+        const ghzPart = cpu.ghz ? ` · ${Number(cpu.ghz).toFixed(2)} GHz` : '';
+        cpuSub.textContent = `${cpu.cores || 1} Core${ghzPart}`;
+      }
+      const cpuAvg = document.getElementById('monCpuAvg');
+      const cpuPeak = document.getElementById('monCpuPeak');
+      if (cpuAvg) cpuAvg.textContent = cpu.avg != null ? `${cpu.avg}%` : '—';
+      if (cpuPeak) cpuPeak.textContent = cpu.peak != null ? `${cpu.peak}%` : '—';
+      _renderSparkline('sparkCpu', hist.map(p => p.cpu), '#409eff', cpu.avg);
+
+      // Memory
+      const mem = d.memory || {};
+      const memEl = document.getElementById('monMemPct');
+      if (memEl) memEl.textContent = mem.pct != null ? Number(mem.pct).toFixed(1) : '—';
+      const memSub = document.getElementById('monMemSub');
+      if (memSub) memSub.textContent = `${Number(mem.used_mb || 0).toFixed(2)} MB / ${Number(mem.total_mb || 0).toFixed(2)} MB`;
+      const memAvg = document.getElementById('monMemAvg');
+      const memPeak = document.getElementById('monMemPeak');
+      if (memAvg) memAvg.textContent = mem.avg != null ? `${mem.avg}%` : '—';
+      if (memPeak) memPeak.textContent = mem.peak != null ? `${mem.peak}%` : '—';
+      const memColor = (mem.pct || 0) >= 85 ? '#e6a23c' : '#409eff';
+      _renderSparkline('sparkMem', hist.map(p => p.mem), memColor, mem.avg);
+
+      // Swap
+      const swap = d.swap || {};
+      const swapEl = document.getElementById('monSwapPct');
+      if (swapEl) swapEl.textContent = swap.pct != null ? Number(swap.pct).toFixed(1) : '—';
+      const swapSub = document.getElementById('monSwapSub');
+      if (swapSub) swapSub.textContent = `${Number(swap.used_gb || 0).toFixed(2)} GB / ${Number(swap.total_gb || 0).toFixed(2)} GB`;
+      const swapAvg = document.getElementById('monSwapAvg');
+      const swapPeak = document.getElementById('monSwapPeak');
+      if (swapAvg) swapAvg.textContent = swap.avg != null ? `${swap.avg}%` : '—';
+      if (swapPeak) swapPeak.textContent = swap.peak != null ? `${swap.peak}%` : '—';
+      _renderSparkline('sparkSwap', hist.map(p => p.swap), '#409eff', swap.avg);
+
+      // Disk
+      const disk = d.disk || {};
+      const diskEl = document.getElementById('monDiskPct');
+      if (diskEl) diskEl.textContent = disk.pct != null ? Number(disk.pct).toFixed(1) : '—';
+      const diskSub = document.getElementById('monDiskSub');
+      if (diskSub) diskSub.textContent = `${Number(disk.used_gb || 0).toFixed(2)} GB / ${Number(disk.total_gb || 0).toFixed(2)} GB`;
+      const diskFree = document.getElementById('monDiskFree');
+      const diskAvg = document.getElementById('monDiskAvg');
+      if (diskFree) diskFree.textContent = disk.free_gb != null ? `${Number(disk.free_gb).toFixed(2)} GB` : '—';
+      if (diskAvg) diskAvg.textContent = disk.avg != null ? `${disk.avg}%` : '—';
+      _renderSparkline('sparkDisk', hist.map(p => p.disk), '#409eff', disk.avg);
+
+      // Runtime
+      const rt = d.runtime || {};
+      const appUp = document.getElementById('monAppUptime');
+      const osUp = document.getElementById('monOsUptime');
+      const procMem = document.getElementById('monProcMem');
+      const procThr = document.getElementById('monProcThreads');
+      if (appUp) appUp.textContent = _fmtUptime(rt.app_uptime_sec);
+      if (osUp) osUp.textContent = _fmtUptime(rt.os_uptime_sec);
+      if (procMem) procMem.textContent = `${Number(rt.proc_mem_mb || 0).toFixed(2)} MB`;
+      if (procThr) procThr.textContent = rt.proc_threads ?? '—';
+    } catch (err) {
+      console.warn('获取系统监控指标失败', err);
+    }
+  }
+
+  function startMonitorPolling() {
+    stopMonitorPolling();
+    loadSystemMetrics();
+    monitorTimer = setInterval(loadSystemMetrics, 4000);
+  }
+
+  function stopMonitorPolling() {
+    if (monitorTimer) {
+      clearInterval(monitorTimer);
+      monitorTimer = null;
     }
   }
 

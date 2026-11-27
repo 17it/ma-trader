@@ -924,3 +924,109 @@ hr {
   color: var(--text-muted);
   font-size: 12px;
 }
+
+/* ─── Server Resource Monitor (Settings Tab) ─────────────────── */
+.sys-mon-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 12px 14px 8px;
+  box-shadow: var(--card-shadow);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.sys-mon-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.sys-mon-val {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.sys-mon-val small {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 2px;
+}
+.sys-mon-sub {
+  font-size: 11px;
+  color: var(--text-regular);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sys-mon-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+.sys-mon-meta strong {
+  color: var(--text-regular);
+  font-weight: 600;
+}
+.sys-sparkline {
+  width: 100%;
+  height: 40px;
+  display: block;
+  margin-top: auto;
+}
+.sys-mon-footer {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 12px 18px;
+  box-shadow: var(--card-shadow);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.sys-mon-footer-group {
+  flex: 1 1 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sys-mon-footer-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.sys-mon-footer-items {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sys-mon-footer-items > div:not(.sys-mon-divider) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.sys-mon-item-k {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.2;
+}
+.sys-mon-footer-items strong {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.sys-mon-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--border-light);
+}

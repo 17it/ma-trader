@@ -331,8 +331,81 @@
             </div>
           </div>
 
-          <!-- Symbol management -->
+          <!-- Right column: Server monitor + Symbol management -->
           <div class="col-lg-8">
+            <!-- Server Resource Monitor -->
+            <div class="mb-3" id="sysMonitorSection">
+              <div class="row g-2 mb-2">
+                <div class="col-6 col-xl-3">
+                  <div class="sys-mon-card">
+                    <div class="sys-mon-title"><i class="fa-solid fa-gauge-high text-primary me-1"></i>CPU</div>
+                    <div class="sys-mon-val"><span id="monCpuPct">—</span><small>%</small></div>
+                    <div class="sys-mon-sub" id="monCpuSub">— Core</div>
+                    <div class="sys-mon-meta">
+                      <span>均值 <strong id="monCpuAvg">—</strong></span>
+                      <span>峰值 <strong id="monCpuPeak">—</strong></span>
+                    </div>
+                    <svg class="sys-sparkline" id="sparkCpu" viewBox="0 0 180 42" preserveAspectRatio="none"></svg>
+                  </div>
+                </div>
+                <div class="col-6 col-xl-3">
+                  <div class="sys-mon-card">
+                    <div class="sys-mon-title"><i class="fa-solid fa-memory text-primary me-1"></i>内存</div>
+                    <div class="sys-mon-val"><span id="monMemPct">—</span><small>%</small></div>
+                    <div class="sys-mon-sub" id="monMemSub">— MB / — MB</div>
+                    <div class="sys-mon-meta">
+                      <span>均值 <strong id="monMemAvg">—</strong></span>
+                      <span>峰值 <strong id="monMemPeak">—</strong></span>
+                    </div>
+                    <svg class="sys-sparkline" id="sparkMem" viewBox="0 0 180 42" preserveAspectRatio="none"></svg>
+                  </div>
+                </div>
+                <div class="col-6 col-xl-3">
+                  <div class="sys-mon-card">
+                    <div class="sys-mon-title"><i class="fa-solid fa-arrow-right-arrow-left text-primary me-1"></i>交换空间</div>
+                    <div class="sys-mon-val"><span id="monSwapPct">—</span><small>%</small></div>
+                    <div class="sys-mon-sub" id="monSwapSub">— GB / — GB</div>
+                    <div class="sys-mon-meta">
+                      <span>均值 <strong id="monSwapAvg">—</strong></span>
+                      <span>峰值 <strong id="monSwapPeak">—</strong></span>
+                    </div>
+                    <svg class="sys-sparkline" id="sparkSwap" viewBox="0 0 180 42" preserveAspectRatio="none"></svg>
+                  </div>
+                </div>
+                <div class="col-6 col-xl-3">
+                  <div class="sys-mon-card">
+                    <div class="sys-mon-title"><i class="fa-solid fa-hard-drive text-primary me-1"></i>存储</div>
+                    <div class="sys-mon-val"><span id="monDiskPct">—</span><small>%</small></div>
+                    <div class="sys-mon-sub" id="monDiskSub">— GB / — GB</div>
+                    <div class="sys-mon-meta">
+                      <span>剩余 <strong id="monDiskFree">—</strong></span>
+                      <span>均值 <strong id="monDiskAvg">—</strong></span>
+                    </div>
+                    <svg class="sys-sparkline" id="sparkDisk" viewBox="0 0 180 42" preserveAspectRatio="none"></svg>
+                  </div>
+                </div>
+              </div>
+              <div class="sys-mon-footer">
+                <div class="sys-mon-footer-group">
+                  <div class="sys-mon-footer-label"><i class="fa-regular fa-clock me-1"></i>运行时间</div>
+                  <div class="sys-mon-footer-items">
+                    <div><span class="sys-mon-item-k">MA-TRADE</span><strong id="monAppUptime">—</strong></div>
+                    <div class="sys-mon-divider"></div>
+                    <div><span class="sys-mon-item-k">OS</span><strong id="monOsUptime">—</strong></div>
+                  </div>
+                </div>
+                <div class="sys-mon-footer-group">
+                  <div class="sys-mon-footer-label"><i class="fa-solid fa-server me-1"></i>进程</div>
+                  <div class="sys-mon-footer-items">
+                    <div><span class="sys-mon-item-k">内存</span><strong id="monProcMem">—</strong></div>
+                    <div class="sys-mon-divider"></div>
+                    <div><span class="sys-mon-item-k">线程</span><strong id="monProcThreads">—</strong></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Symbol management -->
             <div class="card card-dark">
               <div class="card-header d-flex justify-content-between align-items-center">
                 <span><i class="fa-solid fa-coins me-2"></i>交易对管理</span>
