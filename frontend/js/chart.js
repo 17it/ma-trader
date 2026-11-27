@@ -31,9 +31,30 @@ const ChartManager = (() => {
   let currentData = { klines: [], trades: [] };
   let currentZoom = null;
   let onReachStartCallback = null;
+  let chartResizeObserver = null;
+  let resizeRafId = null;
 
   function setOnReachStart(callback) {
     onReachStartCallback = callback;
+  }
+
+  function resize() {
+    const klineEl = document.getElementById('klineChart');
+    const volEl   = document.getElementById('volumeChart');
+    if (klineEl && klineEl.clientWidth > 0 && klineEl.clientHeight > 0) {
+      klineChart?.resize();
+    }
+    if (volEl && volEl.clientWidth > 0 && volEl.clientHeight > 0) {
+      volumeChart?.resize();
+    }
+  }
+
+  function _scheduleResize() {
+    if (resizeRafId) cancelAnimationFrame(resizeRafId);
+    resizeRafId = requestAnimationFrame(() => {
+      resizeRafId = null;
+      resize();
+    });
   }
 
   // ─── Init ───────────────────────────────────────────────────────────
@@ -76,10 +97,17 @@ const ChartManager = (() => {
       }
     });
 
-    window.addEventListener('resize', () => {
-      klineChart?.resize();
-      volumeChart?.resize();
-    });
+    if (!chartResizeObserver && typeof ResizeObserver !== 'undefined') {
+      chartResizeObserver = new ResizeObserver(() => {
+        _scheduleResize();
+      });
+      chartResizeObserver.observe(klineEl);
+      if (klineEl.parentElement) {
+        chartResizeObserver.observe(klineEl.parentElement);
+      }
+    }
+
+    window.addEventListener('resize', _scheduleResize);
   }
 
   // ─── Helper: compute MA ─────────────────────────────────────────────
@@ -284,6 +312,12 @@ const ChartManager = (() => {
         barMaxWidth: 6
       }]
     }, true);
+
+    // Ensure ECharts canvas matches actual flex container dimensions even if init ran before layout settled
+    const klineEl = document.getElementById('klineChart');
+    if (klineEl && klineChart && (klineChart.getWidth() !== klineEl.clientWidth || klineChart.getHeight() !== klineEl.clientHeight)) {
+      _scheduleResize();
+    }
   }
 
   // ─── Highlight a trade's candle ─────────────────────────────────────
@@ -401,7 +435,7 @@ const ChartManager = (() => {
     }
   }
 
-  return { init, render, highlightTrade, appendCandle, prependHistory, setOnReachStart, updateTheme };
+  return { init, render, resize, highlightTrade, appendCandle, prependHistory, setOnReachStart, updateTheme };
 })();
 
 // ─── Stats charts ─────────────────────────────────────────────────────

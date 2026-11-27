@@ -176,6 +176,11 @@ def _hot_reload_bot_settings(request: Request, full_settings: Dict[str, str]) ->
             except Exception:
                 pass
 
+    # Also update shared paper DataFeed if initialized
+    shared_feed = getattr(request.app.state, "shared_paper_feed", None)
+    if shared_feed is not None and hasattr(shared_feed, "update_proxy"):
+        shared_feed.update_proxy(proxy)
+
     # Invalidate cached public kline exchange so new proxy takes effect immediately
     try:
         from routers.trading import invalidate_public_exchange_cache

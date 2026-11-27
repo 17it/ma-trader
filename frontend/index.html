@@ -24,7 +24,7 @@
   <!-- FontAwesome 6 -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
   <!-- Custom Element-UI themed styles -->
-  <link rel="stylesheet" href="css/style.css?v=20261124_11" />
+  <link rel="stylesheet" href="css/style.css?v=20261127_4" />
 </head>
 <body>
 
@@ -69,8 +69,8 @@
   <button class="btn btn-sm" id="btnToggleSidebar" type="button" title="展开/收起左侧交易对栏">
     <i class="fa-solid fa-bars"></i>
   </button>
-  <span class="navbar-brand mb-0 fw-bold fs-5 me-2 d-inline-flex align-items-center">
-    <img src="/static/favicon.svg?v=20261126" alt="MA Trader" width="24" height="24" class="me-2" style="border-radius: 6px;" />MA Trader
+  <span class="navbar-brand mb-0 fw-bold fs-5 me-sm-2 d-inline-flex align-items-center">
+    <img src="/static/favicon.svg?v=20261126" alt="MA Trader" width="24" height="24" style="border-radius: 6px;" /><span class="d-none d-sm-inline ms-2">MA Trader</span>
   </span>
 
   <div class="d-flex align-items-center gap-2 me-auto">
@@ -238,7 +238,14 @@
             </div>
             <hr class="my-0 border-secondary" />
             <div>
-              <div class="text-secondary small mb-2"><i class="fa-solid fa-gamepad me-1"></i>模拟下单</div>
+              <div class="d-flex align-items-center justify-content-between mb-2">
+                <span class="text-secondary small"><i class="fa-solid fa-gamepad me-1"></i>模拟下单</span>
+                <select class="form-select form-select-sm py-0 px-2 w-auto" id="simStrategyMode" style="font-size:11px;height:24px" title="归属模拟策略账户">
+                  <option value="balanced">方案 A</option>
+                  <option value="breakout">方案 B</option>
+                  <option value="classic">经典</option>
+                </select>
+              </div>
               <div class="input-group input-group-sm mb-2">
                 <span class="input-group-text">价格</span>
                 <input type="number" step="any" class="form-control" id="simEntryPrice" placeholder="自动填入最新价" />
@@ -623,6 +630,17 @@
               <option value="paper">模拟</option>
               <option value="live">实盘</option>
             </select>
+            <div class="d-inline-flex flex-wrap align-items-center gap-1" id="statsStrategyBtns" role="group" aria-label="统计策略筛选">
+              <button type="button" class="btn btn-sm btn-primary active" data-strategy="balanced">
+                <i class="fa-solid fa-check me-1 strat-check-icon"></i>方案 A：高胜率均衡
+              </button>
+              <button type="button" class="btn btn-sm btn-primary active" data-strategy="breakout">
+                <i class="fa-solid fa-check me-1 strat-check-icon"></i>方案 B：单边爆发
+              </button>
+              <button type="button" class="btn btn-sm btn-primary active" data-strategy="classic">
+                <i class="fa-solid fa-check me-1 strat-check-icon"></i>经典多均线
+              </button>
+            </div>
             <button class="btn btn-sm btn-outline-secondary" id="btnRefreshStats">
               <i class="fa-solid fa-rotate-right"></i>
             </button>
@@ -684,7 +702,7 @@
       <!-- ══════════ TAB 5: TRADES ══════════ -->
       <div class="tab-pane fade h-100 overflow-auto" id="tabTrades">
         <div class="p-3">
-          <!-- Mode sub-tabs: Paper vs Live -->
+          <!-- Mode sub-tabs: Paper vs Live + Strategy Filter -->
           <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
             <div class="btn-group btn-group-sm" id="tradesModeTabs" role="group">
               <button type="button" class="btn btn-primary active" data-mode="paper">
@@ -693,6 +711,20 @@
               <button type="button" class="btn btn-outline-secondary" data-mode="live">
                 <i class="fa-solid fa-bolt me-1"></i>实盘交易 <span class="badge bg-danger-subtle text-danger ms-1" id="liveTradeBadge">0</span>
               </button>
+            </div>
+            <div class="d-flex flex-wrap align-items-center gap-2">
+              <span class="text-secondary small">策略筛选</span>
+              <div class="d-inline-flex flex-wrap align-items-center gap-1" id="tradesStrategyBtns" role="group" aria-label="交易策略筛选">
+                <button type="button" class="btn btn-sm btn-primary active" data-strategy="balanced">
+                  <i class="fa-solid fa-check me-1 strat-check-icon"></i>方案 A：高胜率均衡
+                </button>
+                <button type="button" class="btn btn-sm btn-primary active" data-strategy="breakout">
+                  <i class="fa-solid fa-check me-1 strat-check-icon"></i>方案 B：单边爆发
+                </button>
+                <button type="button" class="btn btn-sm btn-primary active" data-strategy="classic">
+                  <i class="fa-solid fa-check me-1 strat-check-icon"></i>经典多均线
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1269,7 +1301,7 @@
 
 <!-- ══════════ MODAL: BOT START/STOP CONFIRM ══════════ -->
 <div class="modal fade" id="botConfirmModal" tabindex="-1">
-  <div class="modal-dialog modal-dialog-centered modal-sm">
+  <div class="modal-dialog modal-dialog-centered" style="max-width:440px">
     <div class="modal-content card-dark shadow-lg">
       <div class="modal-header py-2" id="botModalHeader">
         <h6 class="modal-title fs-6 d-flex align-items-center gap-2" id="botModalTitle">
@@ -1280,7 +1312,7 @@
       <div class="modal-body py-3" id="botModalBody">
         <!-- Dynamic content injected by app.js -->
       </div>
-      <div class="modal-footer py-2">
+      <div class="modal-footer py-2" id="botModalFooter">
         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
         <button type="button" class="btn btn-primary btn-sm" id="btnConfirmBotAction">确定</button>
       </div>
@@ -1291,10 +1323,10 @@
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/auth.js?v=20261126_4"></script>
-<script src="js/chart.js?v=20261126_4"></script>
-<script src="js/settings.js?v=20261126_4"></script>
-<script src="js/backtest.js?v=20261126_4"></script>
-<script src="js/app.js?v=20261126_1"></script>
+<script src="js/auth.js?v=20261127_4"></script>
+<script src="js/chart.js?v=20261127_4"></script>
+<script src="js/settings.js?v=20261127_4"></script>
+<script src="js/backtest.js?v=20261127_4"></script>
+<script src="js/app.js?v=20261127_4"></script>
 </body>
 </html>

@@ -6,6 +6,8 @@ when allow_spot_fallback=False (live trading mode).
 
 import logging
 import os
+import threading
+import time
 from typing import Optional
 
 import httpx
@@ -49,6 +51,11 @@ class DataFeed:
         self._secret = secret or ""
         self._authenticated = bool(api_key and secret)
         self._proxy = (proxy or "").strip() or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
+        self._call_lock = threading.Lock()
+        self._ohlcv_cache: dict[tuple[str, str, int], tuple[float, pd.DataFrame]] = {}
+        self._ticker_cache: dict[str, tuple[float, float]] = {}
+        self._ohlcv_ttl: float = 2.5
+        self._ticker_ttl: float = 1.5
         self._exchange = self._create_exchange()
 
     def _create_exchange(self):
@@ -85,9 +92,12 @@ class DataFeed:
         """Hot-reload proxy setting without restarting the bot."""
         new_proxy = (proxy or "").strip() or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
         if new_proxy != self._proxy:
-            self._proxy = new_proxy
-            self._geo_blocked = False
-            self._exchange = self._create_exchange()
+            with self._call_lock:
+                self._proxy = new_proxy
+                self._geo_blocked = False
+                self._ohlcv_cache.clear()
+                self._ticker_cache.clear()
+                self._exchange = self._create_exchange()
 
     def update_credentials(self, api_key: Optional[str], secret: Optional[str], proxy: Optional[str] = None) -> None:
         """Hot-reload Binance API credentials and proxy on a running live DataFeed."""
@@ -97,12 +107,15 @@ class DataFeed:
             (proxy or "").strip() if proxy is not None else self._proxy
         ) or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
         if new_key != self._api_key or new_secret != self._secret or new_proxy != self._proxy:
-            self._api_key = new_key
-            self._secret = new_secret
-            self._authenticated = bool(new_key and new_secret)
-            self._proxy = new_proxy
-            self._geo_blocked = False
-            self._exchange = self._create_exchange()
+            with self._call_lock:
+                self._api_key = new_key
+                self._secret = new_secret
+                self._authenticated = bool(new_key and new_secret)
+                self._proxy = new_proxy
+                self._geo_blocked = False
+                self._ohlcv_cache.clear()
+                self._ticker_cache.clear()
+                self._exchange = self._create_exchange()
 
     def set_ws_streamer(self, ws_streamer):
         """Attach or update the WebSocket real-time price streamer."""
@@ -180,45 +193,57 @@ class DataFeed:
         return None
 
     # ------------------------------------------------------------------
-    # OHLCV
+    # OHLCV (thread-safe with short TTL cache for multi-bot sharing)
     # ------------------------------------------------------------------
     def get_ohlcv(
         self, symbol: str, timeframe: str = "1m", limit: int = 200
     ) -> Optional[pd.DataFrame]:
-        if self._exchange is not None and not self._geo_blocked:
-            try:
-                raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-                if raw:
-                    df = pd.DataFrame(
-                        raw, columns=["timestamp", "open", "high", "low", "close", "volume"]
-                    )
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-                    for col in ("open", "high", "low", "close", "volume"):
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                    df = df.dropna(subset=["close"]).reset_index(drop=True)
-                    return df
-            except Exception as exc:
-                err_str = str(exc)
-                if "451" in err_str or "restricted location" in err_str.lower():
-                    if not self._geo_blocked:
-                        logger.warning(
-                            "Binance API returned HTTP 451 (geo-restricted). "
-                            "Spot fallback enabled=%s.",
-                            self._allow_spot_fallback,
+        cache_key = (symbol.upper(), timeframe, int(limit))
+        with self._call_lock:
+            now = time.monotonic()
+            cached_entry = self._ohlcv_cache.get(cache_key)
+            if cached_entry is not None and (now - cached_entry[0]) <= self._ohlcv_ttl:
+                return cached_entry[1].copy()
+
+            df: Optional[pd.DataFrame] = None
+            if self._exchange is not None and not self._geo_blocked:
+                try:
+                    raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+                    if raw:
+                        df = pd.DataFrame(
+                            raw, columns=["timestamp", "open", "high", "low", "close", "volume"]
                         )
-                        self._geo_blocked = True
-                else:
-                    logger.warning("get_ohlcv ccxt error (%s): %s", symbol, exc)
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+                        for col in ("open", "high", "low", "close", "volume"):
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+                        df = df.dropna(subset=["close"]).reset_index(drop=True)
+                except Exception as exc:
+                    err_str = str(exc)
+                    if "451" in err_str or "restricted location" in err_str.lower():
+                        if not self._geo_blocked:
+                            logger.warning(
+                                "Binance API returned HTTP 451 (geo-restricted). "
+                                "Spot fallback enabled=%s.",
+                                self._allow_spot_fallback,
+                            )
+                            self._geo_blocked = True
+                    else:
+                        logger.warning("get_ohlcv ccxt error (%s): %s", symbol, exc)
 
-        real_df = self._fetch_fallback_ohlcv(symbol, timeframe, limit)
-        if real_df is not None:
-            return real_df
+            if df is None:
+                df = self._fetch_fallback_ohlcv(symbol, timeframe, limit)
 
-        logger.error(
-            "Failed to fetch OHLCV for %s (futures=%s, spot_fallback=%s).",
-            symbol, self._use_futures, self._allow_spot_fallback,
-        )
-        return None
+            if df is not None:
+                if len(self._ohlcv_cache) > 64:
+                    self._ohlcv_cache.clear()
+                self._ohlcv_cache[cache_key] = (time.monotonic(), df)
+                return df.copy()
+
+            logger.error(
+                "Failed to fetch OHLCV for %s (futures=%s, spot_fallback=%s).",
+                symbol, self._use_futures, self._allow_spot_fallback,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Ticker
@@ -231,28 +256,37 @@ class DataFeed:
             if cached is not None and cached > 0:
                 return cached
 
-        # 2. REST fallback
-        if self._exchange is not None and not self._geo_blocked:
-            try:
-                ticker = self._exchange.fetch_ticker(symbol)
-                price = float(ticker.get("last") or ticker.get("close") or 0)
-                if price > 0:
-                    return price
-            except Exception as exc:
-                err_str = str(exc)
-                if "451" in err_str or "restricted location" in err_str.lower():
-                    if not self._geo_blocked:
-                        logger.warning("Binance API returned HTTP 451 on fetch_ticker.")
-                        self._geo_blocked = True
-                else:
-                    logger.warning("get_ticker ccxt error (%s): %s", symbol, exc)
+        sym_key = symbol.upper()
+        with self._call_lock:
+            now = time.monotonic()
+            cached_t = self._ticker_cache.get(sym_key)
+            if cached_t is not None and (now - cached_t[0]) <= self._ticker_ttl:
+                return cached_t[1]
 
-        real_p = self._fetch_fallback_ticker(symbol)
-        if real_p is not None:
-            return real_p
+            # 2. REST fallback
+            if self._exchange is not None and not self._geo_blocked:
+                try:
+                    ticker = self._exchange.fetch_ticker(symbol)
+                    price = float(ticker.get("last") or ticker.get("close") or 0)
+                    if price > 0:
+                        self._ticker_cache[sym_key] = (time.monotonic(), price)
+                        return price
+                except Exception as exc:
+                    err_str = str(exc)
+                    if "451" in err_str or "restricted location" in err_str.lower():
+                        if not self._geo_blocked:
+                            logger.warning("Binance API returned HTTP 451 on fetch_ticker.")
+                            self._geo_blocked = True
+                    else:
+                        logger.warning("get_ticker ccxt error (%s): %s", symbol, exc)
 
-        logger.error("Failed to fetch ticker for %s.", symbol)
-        return None
+            real_p = self._fetch_fallback_ticker(symbol)
+            if real_p is not None:
+                self._ticker_cache[sym_key] = (time.monotonic(), real_p)
+                return real_p
+
+            logger.error("Failed to fetch ticker for %s.", symbol)
+            return None
 
     # ------------------------------------------------------------------
     # Account balance

@@ -118,6 +118,19 @@ def _config_signature(cfg) -> tuple:
     )
 
 
+STRATEGY_MODE_NAMES: Dict[str, str] = {
+    "balanced": "方案A(高胜率均衡)",
+    "breakout": "方案B(单边爆发)",
+    "classic": "经典多均线",
+}
+STRATEGY_SHORT_NAMES: Dict[str, str] = {
+    "balanced": "方案A",
+    "breakout": "方案B",
+    "classic": "经典",
+}
+_LAST_MA_BROADCAST: Dict[str, tuple] = {}
+
+
 class TradingBot:
     """Manages concurrent monitoring of multiple trading symbols."""
 
@@ -129,6 +142,7 @@ class TradingBot:
         notifier,
         ws_streamer: Optional[BinanceWSStreamer] = None,
         is_paper: Optional[bool] = None,
+        fixed_strategy_mode: Optional[str] = None,
     ):
         self.db_session_factory = db_session_factory
         self.data_feed = data_feed
@@ -141,9 +155,12 @@ class TradingBot:
         else:
             self.is_paper = True
 
+        self.fixed_strategy_mode: Optional[str] = (
+            MAStrategy.normalize_mode(fixed_strategy_mode) if fixed_strategy_mode else None
+        )
         self.running: bool = False
         self._started_at: Optional[float] = None
-        self.strategy_mode: str = "balanced"
+        self.strategy_mode: str = self.fixed_strategy_mode or "balanced"
         self.cooldown_bars: int = DEFAULT_COOLDOWN_BARS
         self.cooldown_until_ts: Dict[str, float] = {}
         self.strategies: Dict[str, MAStrategy] = {}
@@ -166,6 +183,23 @@ class TradingBot:
         if hasattr(self.data_feed, "set_ws_streamer"):
             self.data_feed.set_ws_streamer(self.ws_streamer)
 
+    def _mode_display_label(self) -> str:
+        if self.is_paper:
+            short = STRATEGY_SHORT_NAMES.get(self.strategy_mode, self.strategy_mode)
+            return f"模拟·{short}"
+        return "实盘交易"
+
+    def _scope_paper_query(self, query, trade_cls):
+        """When running as a pinned strategy paper bot, isolate trades to its own strategy_mode."""
+        if not self.is_paper or not self.fixed_strategy_mode:
+            return query
+        from sqlalchemy import or_
+        if self.fixed_strategy_mode == "balanced":
+            return query.filter(
+                or_(trade_cls.strategy_mode == "balanced", trade_cls.strategy_mode.is_(None))
+            )
+        return query.filter(trade_cls.strategy_mode == self.fixed_strategy_mode)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -179,12 +213,16 @@ class TradingBot:
         self._started_at = time.time()
         self._load_global_strategy_settings()
         status_key = "paper_running" if self.is_paper else "live_running"
-        self.broadcast({"type": "bot_status", "running": True, status_key: True})
-        mode_names = {"balanced": "方案A(高胜率均衡)", "breakout": "方案B(单边爆发)", "classic": "经典多均线"}
+        status_msg = {"type": "bot_status", "running": True, status_key: True}
+        if self.is_paper and self.fixed_strategy_mode:
+            status_msg["paper_mode"] = self.fixed_strategy_mode
+            status_msg["paper_mode_running"] = True
+        self.broadcast(status_msg)
+        tag = self._mode_display_label()
         self.broadcast({
             "type": "log",
             "level": "info",
-            "message": f"Bot started · 当前策略模式: {mode_names.get(self.strategy_mode, self.strategy_mode)} (冷却 {self.cooldown_bars} 根K线)",
+            "message": f"[{tag}] Bot started · 策略: {STRATEGY_MODE_NAMES.get(self.strategy_mode, self.strategy_mode)} (冷却 {self.cooldown_bars} 根K线)",
         })
 
         symbol_configs = self._load_symbol_configs()
@@ -216,11 +254,11 @@ class TradingBot:
         try:
             from database import record_operation_log
             mode_str = "paper" if self.is_paper else "live"
-            mode_label = "模拟交易" if self.is_paper else "实盘交易"
+            mode_label = self._mode_display_label()
             syms_label = ", ".join(active_symbols) if active_symbols else "无"
             record_operation_log(
                 log_type="start",
-                title="系统启动",
+                title=f"系统启动 ({mode_label})",
                 message=f"交易系统已启动（{mode_label}），监控交易对：{syms_label}",
                 level="info",
                 mode=mode_str,
@@ -229,12 +267,13 @@ class TradingBot:
         except Exception:
             pass
 
-        # Restore open trades from DB into memory (strictly scoped by is_paper)
+        # Restore open trades from DB into memory (scoped by is_paper and fixed_strategy_mode)
         try:
             from database import Trade
             session = self.db_session_factory()
             try:
-                open_trades = session.query(Trade).filter_by(status="open", is_paper=self.is_paper).all()
+                open_q = session.query(Trade).filter_by(status="open", is_paper=self.is_paper)
+                open_trades = self._scope_paper_query(open_q, Trade).all()
                 for ot in open_trades:
                     saved_risk = getattr(ot, "initial_risk", None)
                     if not saved_risk or saved_risk <= 0:
@@ -293,9 +332,13 @@ class TradingBot:
 
                 # Restore remaining post-close cooldown across restarts (fixes V2-B3)
                 if self.cooldown_bars > 0 and self.strategy_mode != "classic":
+                    closed_q = session.query(Trade).filter(
+                        Trade.status == "closed",
+                        Trade.is_paper == self.is_paper,
+                        Trade.close_time.isnot(None),
+                    )
                     recent_closed = (
-                        session.query(Trade)
-                        .filter(Trade.status == "closed", Trade.is_paper == self.is_paper, Trade.close_time.isnot(None))
+                        self._scope_paper_query(closed_q, Trade)
                         .order_by(Trade.close_time.desc())
                         .limit(50)
                         .all()
@@ -342,30 +385,37 @@ class TradingBot:
                 pass
             self._exit_task = None
 
-        status_key = "paper_running" if self.is_paper else "live_running"
-        self.broadcast({"type": "bot_status", status_key: False})
-        self.broadcast({"type": "log", "level": "info", "message": "Bot stopped"})
+        tag = self._mode_display_label()
+        if self.is_paper and self.fixed_strategy_mode:
+            self.broadcast({
+                "type": "bot_status",
+                "paper_mode": self.fixed_strategy_mode,
+                "paper_mode_running": False,
+            })
+        else:
+            status_key = "paper_running" if self.is_paper else "live_running"
+            self.broadcast({"type": "bot_status", status_key: False})
+        self.broadcast({"type": "log", "level": "info", "message": f"[{tag}] Bot stopped"})
         try:
             from database import record_operation_log
             mode_str = "paper" if self.is_paper else "live"
-            mode_label = "模拟交易" if self.is_paper else "实盘交易"
             record_operation_log(
                 log_type="stop",
-                title="系统停止",
-                message=f"交易系统已停止（{mode_label}）",
+                title=f"系统停止 ({tag})",
+                message=f"交易系统已停止（{tag}）",
                 level="warning",
                 mode=mode_str,
             )
             self.broadcast({"type": "operation_log"})
         except Exception:
             pass
-        logger.info("TradingBot stopped (is_paper=%s)", self.is_paper)
+        logger.info("TradingBot stopped (is_paper=%s, mode=%s)", self.is_paper, self.strategy_mode)
 
     # ------------------------------------------------------------------
     # Symbol management
     # ------------------------------------------------------------------
     def _load_global_strategy_settings(self) -> None:
-        """Load strategy_mode and cooldown_bars from DB settings."""
+        """Load strategy_mode (unless pinned) and cooldown_bars from DB settings."""
         try:
             from database import SettingModel
             session = self.db_session_factory()
@@ -374,9 +424,12 @@ class TradingBot:
                     SettingModel.key.in_(["strategy_mode", "cooldown_bars"])
                 ).all()
                 kv = {r.key: (r.value or "").strip() for r in rows}
-                mode = kv.get("strategy_mode", "").lower()
-                if mode in VALID_STRATEGY_MODES:
-                    self.strategy_mode = mode
+                if self.fixed_strategy_mode:
+                    self.strategy_mode = self.fixed_strategy_mode
+                else:
+                    mode = kv.get("strategy_mode", "").lower()
+                    if mode in VALID_STRATEGY_MODES:
+                        self.strategy_mode = mode
                 raw_cd = kv.get("cooldown_bars", "")
                 if raw_cd != "":
                     self.cooldown_bars = max(0, min(500, int(float(raw_cd))))
@@ -386,10 +439,10 @@ class TradingBot:
             logger.debug("Using default strategy settings: %s", exc)
 
     def update_strategy_settings(self, strategy_mode: str, cooldown_bars) -> None:
-        """Hot-reload global strategy_mode and cooldown_bars without restarting the bot."""
+        """Hot-reload global strategy_mode (for unpinned/live bots) and cooldown_bars."""
         norm_mode = str(strategy_mode or "").strip().lower()
         mode_changed = False
-        if norm_mode in VALID_STRATEGY_MODES and norm_mode != self.strategy_mode:
+        if not self.fixed_strategy_mode and norm_mode in VALID_STRATEGY_MODES and norm_mode != self.strategy_mode:
             self.strategy_mode = norm_mode
             mode_changed = True
             for sym, st in self.strategies.items():
@@ -401,11 +454,10 @@ class TradingBot:
         except Exception:
             pass
         if mode_changed and self.running:
-            mode_names = {"balanced": "方案A(高胜率均衡)", "breakout": "方案B(单边爆发)", "classic": "经典多均线"}
             self.broadcast({
                 "type": "log",
                 "level": "info",
-                "message": f"⚙️ 已热切换全局策略模式为: {mode_names.get(self.strategy_mode, self.strategy_mode)} (平仓冷却 {self.cooldown_bars} 根K线)",
+                "message": f"⚙️ 已热切换策略模式为: {STRATEGY_MODE_NAMES.get(self.strategy_mode, self.strategy_mode)} (平仓冷却 {self.cooldown_bars} 根K线)",
             })
 
     def register_close_cooldown(
@@ -521,9 +573,6 @@ class TradingBot:
                     await asyncio.sleep(_sleep_until_next_poll(timeframe))
                     continue
 
-                if price is not None:
-                    self.broadcast({"type": "ticker", "symbol": symbol, "price": price})
-
                 df_1m_ma = strategy.calculate_ma(df_1m)
                 last = df_1m_ma.iloc[-1]
                 ma7 = round(float(last["ma7"]), 4)
@@ -537,20 +586,26 @@ class TradingBot:
                     else "short_aligned" if direction_str == "short"
                     else "neutral"
                 )
-                self.broadcast({
-                    "type": "ma_update",
-                    "symbol": symbol,
-                    "ma7": ma7,
-                    "ma25": ma25,
-                    "ma60": ma60,
-                    "close": close,
-                    "direction": direction_label,
-                })
+                ma_fp = (ma7, ma25, ma60, close, direction_label)
+                if _LAST_MA_BROADCAST.get(symbol) != ma_fp:
+                    _LAST_MA_BROADCAST[symbol] = ma_fp
+                    if price is not None:
+                        self.broadcast({"type": "ticker", "symbol": symbol, "price": price})
+                    self.broadcast({
+                        "type": "ma_update",
+                        "symbol": symbol,
+                        "ma7": ma7,
+                        "ma25": ma25,
+                        "ma60": ma60,
+                        "close": close,
+                        "direction": direction_label,
+                    })
 
                 # Evaluate strictly on newly closed bars (drop the forming last bar on BOTH LTF and HTF!)
                 closed_df = df_1m_ma.iloc[:-1].copy()
                 closed_htf = df_htf.iloc[:-1].copy() if (df_htf is not None and len(df_htf) >= 2) else df_htf
                 closed_candle_ts = closed_df.iloc[-1]["timestamp"]
+                sig_event_key = f"{'paper' if self.is_paper else 'live'}:{self.strategy_mode}:{symbol}"
 
                 if first_cycle:
                     last_closed_bar_ts = closed_candle_ts
@@ -564,7 +619,11 @@ class TradingBot:
                     if signal is None:
                         if self.confirm_counts.get(symbol, 0) != 0:
                             self.confirm_counts[symbol] = 0
-                            self.broadcast({"type": "signal_reset", "symbol": symbol})
+                            self.broadcast({
+                                "type": "signal_reset",
+                                "symbol": symbol,
+                                "strategy_mode": self.strategy_mode,
+                            })
                     elif signal.get("pending"):
                         self.confirm_counts[symbol] = signal["confirm"]
                         sig_fp = (
@@ -573,11 +632,13 @@ class TradingBot:
                             signal["confirm"],
                             bool(signal.get("blocked_by_wick")),
                         )
-                        if _RECENT_SIGNAL_EVENTS.get(symbol) != sig_fp:
-                            _RECENT_SIGNAL_EVENTS[symbol] = sig_fp
+                        if _RECENT_SIGNAL_EVENTS.get(sig_event_key) != sig_fp:
+                            _RECENT_SIGNAL_EVENTS[sig_event_key] = sig_fp
                             self.broadcast({
                                 "type": "signal",
                                 "symbol": symbol,
+                                "strategy_mode": self.strategy_mode,
+                                "is_paper": self.is_paper,
                                 "direction": signal["direction"],
                                 "confirm": signal["confirm"],
                                 "max_confirm": signal["max_confirm"],
@@ -596,11 +657,13 @@ class TradingBot:
                             bool(signal.get("blocked_by_wick")),
                             in_cd,
                         )
-                        if _RECENT_SIGNAL_EVENTS.get(symbol) != sig_fp:
-                            _RECENT_SIGNAL_EVENTS[symbol] = sig_fp
+                        if _RECENT_SIGNAL_EVENTS.get(sig_event_key) != sig_fp:
+                            _RECENT_SIGNAL_EVENTS[sig_event_key] = sig_fp
                             self.broadcast({
                                 "type": "signal",
                                 "symbol": symbol,
+                                "strategy_mode": self.strategy_mode,
+                                "is_paper": self.is_paper,
                                 "direction": signal["direction"],
                                 "confirm": signal["confirm"],
                                 "max_confirm": signal["max_confirm"],
@@ -641,15 +704,12 @@ class TradingBot:
                 max_pct *= 100.0
 
             today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-            closed_today = (
-                session.query(Trade)
-                .filter(
-                    Trade.status == "closed",
-                    Trade.is_paper == is_paper,
-                    Trade.close_time >= today_start,
-                )
-                .all()
+            closed_q = session.query(Trade).filter(
+                Trade.status == "closed",
+                Trade.is_paper == is_paper,
+                Trade.close_time >= today_start,
             )
+            closed_today = self._scope_paper_query(closed_q, Trade).all()
             today_pnl = sum(t.pnl or 0.0 for t in closed_today)
             max_loss_amount = base_balance * (max_pct / 100.0)
             if today_pnl <= -max_loss_amount:
@@ -720,7 +780,7 @@ class TradingBot:
 
         if is_paper:
             from database import get_paper_equity
-            balance = get_paper_equity()
+            balance = get_paper_equity(strategy_mode=self.fixed_strategy_mode)
         else:
             balance = await asyncio.to_thread(self.data_feed.get_account_balance)
             if balance is None or balance <= 0:
@@ -848,14 +908,16 @@ class TradingBot:
                     "take_profit": trade.take_profit,
                     "quantity": trade.quantity,
                     "is_paper": trade.is_paper,
+                    "strategy_mode": cur_mode,
                     "open_time": trade.open_time.isoformat(),
                 }
                 self.broadcast({"type": "trade_opened", "trade": trade_dict})
 
+                mode_tag_str = f"PAPER·{STRATEGY_SHORT_NAMES.get(cur_mode, cur_mode)}" if is_paper else "LIVE"
                 msg = (
                     f"🟢 {symbol} {'LONG' if direction == 'long' else 'SHORT'} opened\n"
                     f"Entry: {entry_price}  SL: {stop_loss:.4f}  TP: {take_profit:.4f}\n"
-                    f"Qty: {quantity}  {'[PAPER]' if is_paper else '[LIVE]'}"
+                    f"Qty: {quantity}  [{mode_tag_str}]"
                 )
                 try:
                     try:
@@ -863,9 +925,10 @@ class TradingBot:
                     except ImportError:
                         from database import record_operation_log
                     dir_label = "做多" if direction == "long" else "做空"
+                    strat_suffix = f" ({STRATEGY_SHORT_NAMES.get(cur_mode, cur_mode)})" if is_paper else ""
                     record_operation_log(
                         log_type="open",
-                        title=f"{symbol} {dir_label}开仓",
+                        title=f"{symbol} {dir_label}开仓{strat_suffix}",
                         message=f"入场价: {entry_price} | 止损: {stop_loss:.4f} | 止盈: {take_profit:.4f} | 数量: {quantity}",
                         level="info",
                         symbol=symbol,
@@ -1301,6 +1364,8 @@ class TradingBot:
                         "pnl": db_trade.pnl,
                         "pnl_pct": db_trade.pnl_pct,
                         "fee": db_trade.fee,
+                        "is_paper": db_trade.is_paper,
+                        "strategy_mode": db_trade.strategy_mode,
                         "close_reason": reason,
                         "close_time": db_trade.close_time.isoformat() if db_trade.close_time else None,
                     }
@@ -1317,7 +1382,9 @@ class TradingBot:
 
                 emoji = "✅" if pnl >= 0 else "❌"
                 pnl_sign = "+" if pnl >= 0 else ""
-                mode_tag = "PAPER" if is_paper else "LIVE"
+                closed_mode = (trade_dict.get("strategy_mode") if trade_dict else None) or self.strategy_mode
+                short_name = STRATEGY_SHORT_NAMES.get(closed_mode, closed_mode)
+                mode_tag = f"PAPER·{short_name}" if is_paper else "LIVE"
                 entry_p = trade_dict["entry_price"] if trade_dict else ""
                 msg = (
                     f"{emoji} {symbol} closed ({reason}) [{mode_tag}]\n"
@@ -1325,9 +1392,10 @@ class TradingBot:
                     f"PnL: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)"
                 )
                 try:
+                    strat_suffix = f" [{short_name}]" if is_paper else ""
                     record_operation_log(
                         log_type="close",
-                        title=f"{symbol} 平仓 ({reason})",
+                        title=f"{symbol} 平仓 ({reason}){strat_suffix}",
                         message=f"入场: {entry_p} | 出场: {exit_price} | 盈亏: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)",
                         level="success" if pnl >= 0 else "warning",
                         symbol=symbol,

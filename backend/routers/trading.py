@@ -85,12 +85,62 @@ def _get_cached_public_exchange(proxy: Optional[str]) -> Optional[object]:
 # Dependency helpers
 # ---------------------------------------------------------------------------
 
+PAPER_STRATEGY_MODES = ("balanced", "breakout", "classic")
+
+
+def _paper_slot_key(strategy_mode: str) -> str:
+    return f"paper:{MAStrategy.normalize_mode(strategy_mode)}"
+
+
 def _get_bots(request: Request) -> dict:
     bots = getattr(request.app.state, "bots", None)
     if bots is None:
-        bots = {"paper": None, "live": None}
+        bots = {
+            "paper:balanced": None,
+            "paper:breakout": None,
+            "paper:classic": None,
+            "live": None,
+        }
         request.app.state.bots = bots
+    else:
+        for sm in PAPER_STRATEGY_MODES:
+            bots.setdefault(f"paper:{sm}", None)
+        bots.setdefault("live", None)
     return bots
+
+
+def _iter_paper_bots(bots: dict):
+    """Yield (strategy_mode, bot) for all configured paper slots (plus legacy 'paper' if present)."""
+    for sm in PAPER_STRATEGY_MODES:
+        b = bots.get(f"paper:{sm}")
+        if b is not None:
+            yield sm, b
+    legacy = bots.get("paper")
+    if legacy is not None:
+        yield getattr(legacy, "strategy_mode", "balanced"), legacy
+
+
+def _get_shared_paper_feed(app, cfg: dict, shared_ws=None):
+    """Return or create the single shared DataFeed for all paper bots (saves ~30MB per extra bot)."""
+    from data_feed import DataFeed
+    feed = getattr(app.state, "shared_paper_feed", None)
+    proxy = cfg.get("http_proxy")
+    if feed is None:
+        feed = DataFeed(
+            api_key=None,
+            secret=None,
+            use_futures=True,
+            proxy=proxy,
+            ws_streamer=shared_ws,
+            allow_spot_fallback=True,
+        )
+        app.state.shared_paper_feed = feed
+    else:
+        if hasattr(feed, "update_proxy"):
+            feed.update_proxy(proxy)
+        if shared_ws is not None and hasattr(feed, "set_ws_streamer"):
+            feed.set_ws_streamer(shared_ws)
+    return feed
 
 
 def _get_bot_lock(request: Request) -> asyncio.Lock:
@@ -102,15 +152,23 @@ def _get_bot_lock(request: Request) -> asyncio.Lock:
 
 
 def _bot_status_payload(bots: dict) -> dict:
-    paper_bot = bots.get("paper")
+    paper_modes = {
+        sm: bool(bots.get(f"paper:{sm}") is not None and bots[f"paper:{sm}"].running)
+        for sm in PAPER_STRATEGY_MODES
+    }
+    legacy_paper = bots.get("paper")
+    if legacy_paper is not None and legacy_paper.running:
+        leg_mode = MAStrategy.normalize_mode(getattr(legacy_paper, "strategy_mode", "balanced"))
+        paper_modes[leg_mode] = True
+    paper_running = any(paper_modes.values())
     live_bot = bots.get("live")
-    paper_running = bool(paper_bot is not None and paper_bot.running)
     live_running = bool(live_bot is not None and live_bot.running)
     return {
         "type": "bot_status",
         "running": paper_running or live_running,
         "paper_running": paper_running,
         "live_running": live_running,
+        "paper_modes": paper_modes,
     }
 
 
@@ -162,9 +220,10 @@ def _normalize_httpx_proxy(proxy: Optional[str]) -> Optional[str]:
 async def start_trading(
     request: Request,
     mode: str = Query("paper", pattern="^(paper|live)$"),
+    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic|all)$"),
     db: Session = Depends(get_db),
 ):
-    """Start the TradingBot for the requested mode ('paper' or 'live'), sharing the WS market stream."""
+    """Start TradingBot(s): 'live' (single) or 'paper' (one strategy_mode or 'all', sharing DataFeed & WS)."""
     from trader import TradingBot
     from data_feed import DataFeed
     from database import SessionLocal
@@ -173,90 +232,171 @@ async def start_trading(
     async with lock:
         app = request.app
         bots = _get_bots(request)
-        existing = bots.get(mode)
-        if existing is not None and existing.running:
-            return {"status": "already_running", "mode": mode}
-
         cfg: dict = app.state.config.get_all(db)
         is_paper = (mode == "paper")
-        if not is_paper and (not (cfg.get("binance_key") or "").strip() or not (cfg.get("binance_secret") or "").strip()):
-            raise HTTPException(status_code=400, detail="实盘启动失败：请先在设置中配置 Binance API Key 和 Secret")
-
-        exchange = _build_exchange(cfg, require_auth=not is_paper)
-        if not is_paper and exchange is None:
-            raise HTTPException(status_code=400, detail="实盘启动失败：无法初始化 Binance 交易所实例")
-
-        notifier = TelegramNotifier(
-            token=cfg.get("telegram_token"),
-            chat_id=cfg.get("telegram_chat_id"),
-            proxy=cfg.get("http_proxy") or None,
-        )
-
         shared_ws = getattr(app.state, "ws_streamer", None)
-        data_feed = DataFeed(
-            api_key=cfg.get("binance_key") if not is_paper else None,
-            secret=cfg.get("binance_secret") if not is_paper else None,
-            use_futures=True,
-            proxy=cfg.get("http_proxy"),
-            ws_streamer=shared_ws,
-            allow_spot_fallback=is_paper,
-        )
-
-        executor = Executor(exchange=exchange, config=cfg, is_paper=is_paper)
         ws_manager = _get_ws_manager(request)
 
-        bot = TradingBot(
-            db_session_factory=SessionLocal,
-            data_feed=data_feed,
-            executor=executor,
-            notifier=notifier,
-            ws_streamer=shared_ws,
-            is_paper=is_paper,
-        )
-        bot.register_ws_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
-        bots[mode] = bot
+        if not is_paper:
+            existing = bots.get("live")
+            if existing is not None and existing.running:
+                payload = _bot_status_payload(bots)
+                return {"status": "already_running", "mode": "live", "paper_modes": payload["paper_modes"]}
 
-        await bot.start()
+            if not (cfg.get("binance_key") or "").strip() or not (cfg.get("binance_secret") or "").strip():
+                raise HTTPException(status_code=400, detail="实盘启动失败：请先在设置中配置 Binance API Key 和 Secret")
 
-        await ws_manager.broadcast(_bot_status_payload(bots))
-        await notifier.notify_bot_started()
+            exchange = _build_exchange(cfg, require_auth=True)
+            if exchange is None:
+                raise HTTPException(status_code=400, detail="实盘启动失败：无法初始化 Binance 交易所实例")
 
-        return {"status": "started", "mode": mode}
+            notifier = TelegramNotifier(
+                token=cfg.get("telegram_token"),
+                chat_id=cfg.get("telegram_chat_id"),
+                proxy=cfg.get("http_proxy") or None,
+            )
+            data_feed = DataFeed(
+                api_key=cfg.get("binance_key"),
+                secret=cfg.get("binance_secret"),
+                use_futures=True,
+                proxy=cfg.get("http_proxy"),
+                ws_streamer=shared_ws,
+                allow_spot_fallback=False,
+            )
+            executor = Executor(exchange=exchange, config=cfg, is_paper=False)
+            bot = TradingBot(
+                db_session_factory=SessionLocal,
+                data_feed=data_feed,
+                executor=executor,
+                notifier=notifier,
+                ws_streamer=shared_ws,
+                is_paper=False,
+            )
+            if ws_manager is not None:
+                bot.register_ws_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
+            bots["live"] = bot
+            await bot.start()
+            status_payload = _bot_status_payload(bots)
+            if ws_manager is not None:
+                await ws_manager.broadcast(status_payload)
+            await notifier.notify_bot_started()
+            return {"status": "started", "mode": "live", "paper_modes": status_payload["paper_modes"]}
+
+        # Paper mode: support starting a specific strategy_mode, 'all', or default global strategy_mode
+        if strategy_mode == "all":
+            target_modes = list(PAPER_STRATEGY_MODES)
+        elif strategy_mode in PAPER_STRATEGY_MODES:
+            target_modes = [strategy_mode]
+        else:
+            target_modes = [MAStrategy.normalize_mode(cfg.get("strategy_mode") or "balanced")]
+
+        shared_feed = _get_shared_paper_feed(app, cfg, shared_ws=shared_ws)
+        started_modes: list[str] = []
+        last_notifier = None
+
+        for sm in target_modes:
+            slot = _paper_slot_key(sm)
+            existing = bots.get(slot)
+            if existing is not None and existing.running:
+                continue
+
+            notifier = TelegramNotifier(
+                token=cfg.get("telegram_token"),
+                chat_id=cfg.get("telegram_chat_id"),
+                proxy=cfg.get("http_proxy") or None,
+            )
+            executor = Executor(exchange=None, config=cfg, is_paper=True)
+            bot = TradingBot(
+                db_session_factory=SessionLocal,
+                data_feed=shared_feed,
+                executor=executor,
+                notifier=notifier,
+                ws_streamer=shared_ws,
+                is_paper=True,
+                fixed_strategy_mode=sm,
+            )
+            if ws_manager is not None:
+                bot.register_ws_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
+            bots[slot] = bot
+            await bot.start()
+            started_modes.append(sm)
+            last_notifier = notifier
+
+        status_payload = _bot_status_payload(bots)
+        if not started_modes:
+            return {
+                "status": "already_running",
+                "mode": "paper",
+                "strategy_modes": target_modes,
+                "paper_modes": status_payload["paper_modes"],
+            }
+
+        if ws_manager is not None:
+            await ws_manager.broadcast(status_payload)
+        if last_notifier is not None:
+            await last_notifier.notify_bot_started()
+
+        return {
+            "status": "started",
+            "mode": "paper",
+            "strategy_modes": started_modes,
+            "paper_modes": status_payload["paper_modes"],
+        }
 
 
 @router.post("/trading/stop")
 async def stop_trading(
     request: Request,
     mode: Optional[str] = Query(None, pattern="^(paper|live)$"),
+    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic|all)$"),
     db: Session = Depends(get_db),
 ):
-    """Stop the TradingBot for the given mode ('paper' or 'live'), or all running bots if omitted."""
+    """Stop TradingBot(s): specific paper strategy_mode, all paper bots, live bot, or everything."""
     lock = _get_bot_lock(request)
     async with lock:
         bots = _get_bots(request)
         ws_manager = _get_ws_manager(request)
-        targets = [mode] if mode else ["paper", "live"]
+
+        slot_targets: list[str] = []
+        if mode == "live":
+            slot_targets = ["live"]
+        elif mode == "paper":
+            if strategy_mode in PAPER_STRATEGY_MODES:
+                slot_targets = [_paper_slot_key(strategy_mode)]
+            else:
+                slot_targets = [_paper_slot_key(sm) for sm in PAPER_STRATEGY_MODES] + ["paper"]
+        else:
+            slot_targets = [_paper_slot_key(sm) for sm in PAPER_STRATEGY_MODES] + ["paper", "live"]
 
         stopped_any = False
         live_stopped = False
-        for m in targets:
-            bot = bots.get(m)
+        stopped_paper_modes: list[str] = []
+        for slot in slot_targets:
+            bot = bots.get(slot)
             if bot is not None and bot.running:
                 await bot.stop()
                 stopped_any = True
-                if m == "live":
+                if slot == "live":
                     live_stopped = True
-
-        if not stopped_any:
-            return {"status": "not_running", "mode": mode}
+                elif slot.startswith("paper:"):
+                    stopped_paper_modes.append(slot.split(":", 1)[1])
 
         status_payload = _bot_status_payload(bots)
+        if not stopped_any:
+            return {
+                "status": "not_running",
+                "mode": mode,
+                "strategy_mode": strategy_mode,
+                "paper_modes": status_payload["paper_modes"],
+            }
+
         if not status_payload["running"]:
             shared_ws = getattr(request.app.state, "ws_streamer", None)
             if shared_ws is not None:
                 await shared_ws.stop()
 
-        await ws_manager.broadcast(status_payload)
+        if ws_manager is not None:
+            await ws_manager.broadcast(status_payload)
 
         open_live_count = (
             db.query(Trade).filter(Trade.status == "open", Trade.is_paper == False).count()  # noqa: E712
@@ -279,7 +419,12 @@ async def stop_trading(
         if warning_msg:
             await notifier.send(f"⚠️ {warning_msg}")
 
-        resp = {"status": "stopped", "mode": mode}
+        resp = {
+            "status": "stopped",
+            "mode": mode,
+            "stopped_paper_modes": stopped_paper_modes,
+            "paper_modes": status_payload["paper_modes"],
+        }
         if warning_msg:
             resp["warning"] = warning_msg
             resp["open_live_trades"] = open_live_count
@@ -288,13 +433,13 @@ async def stop_trading(
 
 @router.get("/trading/status", response_model=TradingStatus)
 async def get_trading_status(request: Request, db: Session = Depends(get_db)):
-    """Return bot running status (paper & live), active symbols, and today's realized PnL."""
+    """Return bot running status (per-strategy paper & live), active symbols, and today's realized PnL."""
     bots = _get_bots(request)
-    paper_bot = bots.get("paper")
-    live_bot = bots.get("live")
-    paper_running = bool(paper_bot is not None and paper_bot.running)
-    live_running = bool(live_bot is not None and live_bot.running)
-    running = paper_running or live_running
+    status_payload = _bot_status_payload(bots)
+    paper_running = status_payload["paper_running"]
+    live_running = status_payload["live_running"]
+    paper_modes = status_payload["paper_modes"]
+    running = status_payload["running"]
 
     cfg_mgr = _get_config(request)
     cfg = cfg_mgr.get_all(db) if cfg_mgr else {}
@@ -309,13 +454,17 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
 
     active_symbols_set = set()
     started_at_candidates = []
-    for bot in (paper_bot, live_bot):
-        if bot is not None and bot.running:
-            status_info = bot.get_status()
-            active_symbols_set.update(status_info.get("symbols", {}).keys())
-            started = getattr(bot, "_started_at", None)
-            if started:
-                started_at_candidates.append(started)
+    live_bot = bots.get("live")
+    running_bots = [b for _, b in _iter_paper_bots(bots) if b.running]
+    if live_bot is not None and live_bot.running:
+        running_bots.append(live_bot)
+
+    for bot in running_bots:
+        status_info = bot.get_status()
+        active_symbols_set.update(status_info.get("symbols", {}).keys())
+        started = getattr(bot, "_started_at", None)
+        if started:
+            started_at_candidates.append(started)
 
     open_trades_count = db.query(Trade).filter(Trade.status == "open").count()
 
@@ -335,6 +484,7 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
         running=running,
         paper_running=paper_running,
         live_running=live_running,
+        paper_modes=paper_modes,
         mode=mode,
         active_symbols=sorted(active_symbols_set),
         open_trades=open_trades_count,
@@ -354,6 +504,7 @@ def list_trades(
     symbol: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     is_paper: Optional[bool] = Query(None),
+    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic)$"),
     limit: int = Query(50, ge=1, le=500),
 ):
     """Query trade records with optional filters."""
@@ -364,6 +515,11 @@ def list_trades(
         q = q.filter(Trade.status == status)
     if is_paper is not None:
         q = q.filter(Trade.is_paper == is_paper)
+    if strategy_mode:
+        if strategy_mode == "balanced":
+            q = q.filter(or_(Trade.strategy_mode == "balanced", Trade.strategy_mode.is_(None)))
+        else:
+            q = q.filter(Trade.strategy_mode == strategy_mode)
     trades = q.order_by(Trade.open_time.desc()).limit(limit).all()
     return [TradeResponse.model_validate(t) for t in trades]
 
@@ -394,16 +550,25 @@ async def simulate_trade(
     direction = body.direction
     entry_price = body.entry_price
 
-    # Prevent duplicate open paper position on the same symbol
-    existing_open = (
-        db.query(Trade)
-        .filter(Trade.symbol == symbol, Trade.status == "open", Trade.is_paper == True)  # noqa: E712
-        .first()
+    config_mgr = getattr(request.app.state, "config", None)
+    cfg = config_mgr.get_all_cached() if (config_mgr is not None and hasattr(config_mgr, "get_all_cached")) else {}
+    strategy_mode = MAStrategy.normalize_mode(body.strategy_mode or cfg.get("strategy_mode") or "balanced")
+
+    # Prevent duplicate open paper position on the same symbol within the same strategy_mode
+    dup_q = db.query(Trade).filter(
+        Trade.symbol == symbol,
+        Trade.status == "open",
+        Trade.is_paper == True,  # noqa: E712
     )
+    if strategy_mode == "balanced":
+        dup_q = dup_q.filter(or_(Trade.strategy_mode == "balanced", Trade.strategy_mode.is_(None)))
+    else:
+        dup_q = dup_q.filter(Trade.strategy_mode == strategy_mode)
+    existing_open = dup_q.first()
     if existing_open:
         raise HTTPException(
             status_code=409,
-            detail=f"{symbol} 已有一笔持仓中的模拟订单 (#{existing_open.id})，请先平仓后再开新仓",
+            detail=f"{symbol} 在该策略({strategy_mode})下已有一笔持仓中的模拟订单 (#{existing_open.id})，请先平仓后再开新仓",
         )
 
     sym_cfg = db.query(SymbolConfig).filter(SymbolConfig.symbol == symbol).first()
@@ -428,9 +593,6 @@ async def simulate_trade(
         if sym_cfg and getattr(sym_cfg, "trailing_ma", None)
         else "ma25"
     )
-    config_mgr = getattr(request.app.state, "config", None)
-    cfg = config_mgr.get_all_cached() if (config_mgr is not None and hasattr(config_mgr, "get_all_cached")) else {}
-    strategy_mode = MAStrategy.normalize_mode(cfg.get("strategy_mode") or "balanced")
 
     sl_pct = 0.005
     if direction == "long":
@@ -441,7 +603,7 @@ async def simulate_trade(
         tp = entry_price - (sl - entry_price) * rr
 
     price_risk = abs(entry_price - sl)
-    balance = get_paper_equity(db)
+    balance = get_paper_equity(db, strategy_mode=strategy_mode)
     qty = MAStrategy.calc_position_size(
         capital=balance,
         risk_pct=risk_pct,
@@ -476,9 +638,9 @@ async def simulate_trade(
     db.commit()
     db.refresh(trade)
 
-    # Register with running paper bot so SL/TP/trailing monitoring covers manual paper trades too
+    # Register with the matching strategy paper bot so SL/TP/trailing monitoring covers manual paper trades too
     bots = _get_bots(request)
-    paper_bot = bots.get("paper")
+    paper_bot = bots.get(_paper_slot_key(strategy_mode)) or bots.get("paper")
     if paper_bot is not None and hasattr(paper_bot, "positions"):
         paper_bot.positions[symbol] = {
             "id": trade.id,
@@ -533,15 +695,25 @@ async def simulate_trade(
 
 
 async def _resolve_live_price(request: Request, symbol: str, cfg: dict, allow_spot: bool = True) -> Optional[float]:
-    """Fetch current market price from shared WS cache first, then DataFeed REST."""
+    """Fetch current market price from shared WS cache first, then shared/ephemeral DataFeed REST."""
     shared_ws = getattr(request.app.state, "ws_streamer", None)
     if shared_ws is not None:
-        cached = shared_ws.get_cached_price(symbol)
+        cached = shared_ws.get_cached_price(symbol, require_futures=not allow_spot)
         if cached and cached > 0:
             return float(cached)
-    from data_feed import DataFeed
-    feed = DataFeed(use_futures=True, proxy=cfg.get("http_proxy"), ws_streamer=shared_ws, allow_spot_fallback=allow_spot)
+    if allow_spot:
+        feed = _get_shared_paper_feed(request.app, cfg, shared_ws=shared_ws)
+    else:
+        from data_feed import DataFeed
+        feed = DataFeed(use_futures=True, proxy=cfg.get("http_proxy"), ws_streamer=shared_ws, allow_spot_fallback=False)
     return await asyncio.to_thread(feed.get_ticker, symbol)
+
+
+def _find_bot_for_trade(bots: dict, trade: Trade):
+    if not trade.is_paper:
+        return bots.get("live")
+    sm = MAStrategy.normalize_mode(getattr(trade, "strategy_mode", None) or "balanced")
+    return bots.get(_paper_slot_key(sm)) or bots.get("paper")
 
 
 @router.post("/trades/{trade_id}/close")
@@ -564,7 +736,7 @@ async def manual_close_trade(
     cfg_mgr = _get_config(request)
     cfg = cfg_mgr.get_all_cached() if cfg_mgr else {}
     bots = _get_bots(request)
-    target_bot = bots.get("paper" if trade.is_paper else "live")
+    target_bot = _find_bot_for_trade(bots, trade)
 
     requested_price = body.exit_price if body is not None else None
     exit_price: Optional[float] = requested_price
@@ -710,7 +882,7 @@ def delete_trade(trade_id: int, request: Request, db: Session = Depends(get_db))
 
     if trade.status == "open":
         bots = _get_bots(request)
-        target_bot = bots.get("paper")
+        target_bot = _find_bot_for_trade(bots, trade)
         if target_bot is not None and hasattr(target_bot, "positions"):
             pos = target_bot.positions.get(trade.symbol)
             pos_id = pos["id"] if isinstance(pos, dict) else getattr(pos, "id", None)

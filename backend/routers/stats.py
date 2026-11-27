@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import get_db, Trade
@@ -24,6 +25,8 @@ def get_stats(
     symbol: Optional[str] = Query(None),
     days: int = Query(30, ge=1, le=365),
     is_paper: Optional[bool] = Query(None),
+    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic)$"),
+    strategy_modes: Optional[str] = Query(None, description="Comma-separated strategy modes or 'none'"),
     initial_equity: float = Query(10_000.0, gt=0),
 ):
     """
@@ -33,8 +36,13 @@ def get_stats(
         symbol:         Filter by trading pair (optional).
         days:           Look-back window in calendar days (default 30).
         is_paper:       Filter by paper/live mode (optional).
+        strategy_mode:  Filter by single strategy mode (optional).
+        strategy_modes: Filter by comma-separated strategy modes, or 'none' for empty selection.
         initial_equity: Reference starting equity for return % & drawdown % (default 10,000).
     """
+    if strategy_modes is not None and strategy_modes.strip().lower() == "none":
+        return StatsResponse()
+
     since = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)
 
     q = db.query(Trade).filter(
@@ -45,6 +53,20 @@ def get_stats(
         q = q.filter(Trade.symbol == symbol.upper().strip())
     if is_paper is not None:
         q = q.filter(Trade.is_paper == is_paper)
+    if strategy_modes is not None and strategy_modes.strip():
+        valid_set = {"balanced", "breakout", "classic"}
+        modes = [m.strip().lower() for m in strategy_modes.split(",") if m.strip().lower() in valid_set]
+        if not modes:
+            return StatsResponse()
+        if "balanced" in modes:
+            q = q.filter(or_(Trade.strategy_mode.in_(modes), Trade.strategy_mode.is_(None)))
+        else:
+            q = q.filter(Trade.strategy_mode.in_(modes))
+    elif strategy_mode:
+        if strategy_mode == "balanced":
+            q = q.filter(or_(Trade.strategy_mode == "balanced", Trade.strategy_mode.is_(None)))
+        else:
+            q = q.filter(Trade.strategy_mode == strategy_mode)
 
     trades = q.order_by(Trade.close_time.asc()).all()
 

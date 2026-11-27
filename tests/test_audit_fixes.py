@@ -1031,6 +1031,109 @@ class TestThirdAuditFixes(unittest.TestCase):
         self.assertIn((t0 + 2 * step, t0 + 3 * step), missing)
         self.assertIn((t0 + 5 * step, last_closed), missing)
 
+    def test_multi_paper_bots_shared_feed_and_strategy_isolation(self):
+        # 1. DataFeed short TTL cache avoids duplicate OHLCV fetches across simultaneous paper bots
+        feed = DataFeed.__new__(DataFeed)
+        feed._ws_streamer = None
+        feed._use_futures = True
+        feed._allow_spot_fallback = True
+        feed._geo_blocked = False
+        feed._api_key = ""
+        feed._secret = ""
+        feed._authenticated = False
+        feed._proxy = ""
+        feed._call_lock = unittest.mock.MagicMock()
+        feed._call_lock.__enter__ = lambda s: None
+        feed._call_lock.__exit__ = lambda s, *a: False
+        feed._ohlcv_cache = {}
+        feed._ticker_cache = {}
+        feed._ohlcv_ttl = 2.5
+        feed._ticker_ttl = 1.5
+        mock_ex = unittest.mock.MagicMock()
+        mock_ex.fetch_ohlcv.return_value = [
+            [1700000000000, 50000, 50100, 49900, 50050, 10],
+            [1700000060000, 50050, 50200, 50000, 50150, 12],
+            [1700000120000, 50150, 50300, 50100, 50250, 15],
+        ]
+        feed._exchange = mock_ex
+        df1 = feed.get_ohlcv("BTCUSDT", "1m", 200)
+        df2 = feed.get_ohlcv("BTCUSDT", "1m", 200)
+        self.assertIsNotNone(df1)
+        self.assertIsNotNone(df2)
+        self.assertIsNot(df1, df2)
+        self.assertEqual(mock_ex.fetch_ohlcv.call_count, 1)
+
+        # 2. Independent start/stop of multiple paper bots via API + shared DataFeed + isolated simulate/stats
+        auth_mod._login_fails.clear()
+        with TestClient(main_mod.app) as client:
+            r_login = client.post("/api/auth/login", json={"username": "admin", "password": "StrongPass99"})
+            if r_login.status_code != 200:
+                r_init = client.post("/api/auth/login", json={"username": "admin", "password": "InitPass123"})
+                tok = r_init.json()["token"]
+                client.post(
+                    "/api/auth/change-password",
+                    headers={"Authorization": f"Bearer {tok}"},
+                    json={"old_password": "InitPass123", "new_password": "StrongPass99"},
+                )
+                r_login = client.post("/api/auth/login", json={"username": "admin", "password": "StrongPass99"})
+            headers = {"Authorization": f"Bearer {r_login.json()['token']}"}
+
+            with patch("trader.TradingBot._load_symbol_configs", return_value=[]):
+                r_s1 = client.post("/api/trading/start?mode=paper&strategy_mode=balanced", headers=headers)
+                r_s2 = client.post("/api/trading/start?mode=paper&strategy_mode=breakout", headers=headers)
+                self.assertEqual(r_s1.status_code, 200)
+                self.assertEqual(r_s2.status_code, 200)
+
+                bots = main_mod.app.state.bots
+                self.assertTrue(bots["paper:balanced"].running)
+                self.assertTrue(bots["paper:breakout"].running)
+                self.assertIs(bots["paper:balanced"].data_feed, bots["paper:breakout"].data_feed)
+
+                st = client.get("/api/trading/status", headers=headers).json()
+                self.assertTrue(st["paper_running"])
+                self.assertEqual(
+                    st["paper_modes"],
+                    {"balanced": True, "breakout": True, "classic": False},
+                )
+
+                # Stopping ONLY balanced keeps breakout running!
+                r_stop_a = client.post("/api/trading/stop?mode=paper&strategy_mode=balanced", headers=headers)
+                self.assertEqual(r_stop_a.status_code, 200)
+                st2 = client.get("/api/trading/status", headers=headers).json()
+                self.assertTrue(st2["paper_running"])
+                self.assertEqual(
+                    st2["paper_modes"],
+                    {"balanced": False, "breakout": True, "classic": False},
+                )
+
+                # Simultaneous open paper trades on BTCUSDT across different strategies succeed
+                r_ta = client.post(
+                    "/api/simulate",
+                    headers=headers,
+                    json={"symbol": "BTCUSDT", "direction": "long", "entry_price": 60000.0, "strategy_mode": "balanced"},
+                )
+                r_tb = client.post(
+                    "/api/simulate",
+                    headers=headers,
+                    json={"symbol": "BTCUSDT", "direction": "short", "entry_price": 60000.0, "strategy_mode": "breakout"},
+                )
+                self.assertEqual(r_ta.status_code, 200)
+                self.assertEqual(r_tb.status_code, 200)
+                self.assertEqual(r_ta.json()["strategy_mode"], "balanced")
+                self.assertEqual(r_tb.json()["strategy_mode"], "breakout")
+
+                # Filtering /api/trades and /api/stats by strategy_modes isolates selected strategies
+                tr_b = client.get("/api/trades?is_paper=true&strategy_mode=breakout", headers=headers).json()
+                self.assertTrue(all(t["strategy_mode"] == "breakout" for t in tr_b))
+                st_none = client.get("/api/stats?strategy_modes=none", headers=headers).json()
+                self.assertEqual(st_none["total_trades"], 0)
+                st_multi = client.get("/api/stats?strategy_modes=balanced,breakout", headers=headers).json()
+                self.assertIn("total_trades", st_multi)
+
+                # Clean up running bots & test trades
+                client.post("/api/trading/stop?mode=paper&strategy_mode=all", headers=headers)
+                client.post("/api/trades/clear", headers=headers)
+
 
 def tearDownModule():
     db_mod.engine.dispose()

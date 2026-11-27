@@ -86,7 +86,9 @@ html, body {
   background: var(--bg-card);
   border-bottom: 1px solid var(--border-light);
   box-shadow: var(--nav-shadow);
-  height: 54px;
+  min-height: 54px;
+  height: auto;
+  flex-wrap: nowrap;
   z-index: 100;
 }
 #topNav .navbar-brand {
@@ -362,8 +364,9 @@ html, body {
 }
 
 /* ─── Chart containers ─── */
-.chart-container { min-height: 0; border-radius: 8px; }
-.chart-volume    { height: 82px; border-radius: 8px; }
+.chart-main-col  { min-width: 0; min-height: 0; }
+.chart-container { width: 100%; min-height: 260px; border-radius: 8px; }
+.chart-volume    { width: 100%; height: 82px; border-radius: 8px; }
 
 /* ─── Info panel (right el-aside) ─── */
 .info-panel {
@@ -750,31 +753,60 @@ hr {
 
 @media (max-width: 575.98px) {
   #topNav {
-    padding-left: 10px !important;
-    padding-right: 10px !important;
-    gap: 6px !important;
+    min-height: 48px;
+    height: auto;
+    flex-wrap: wrap;
+    row-gap: 6px !important;
+    padding: 6px 8px !important;
+    gap: 4px !important;
+  }
+  #btnToggleSidebar {
+    padding: 3px 6px;
   }
   #topNav .navbar-brand {
-    font-size: 15px !important;
-    margin-right: 2px !important;
+    font-size: 14px !important;
+    margin-right: 0 !important;
+    white-space: nowrap;
+  }
+  #topNav .navbar-brand img {
+    width: 22px !important;
+    height: 22px !important;
+    margin-right: 0 !important;
   }
   #topNav .navbar-brand i {
-    width: 24px;
-    height: 24px;
+    width: 22px;
+    height: 22px;
     font-size: 12px;
+  }
+  #topNav > .d-flex {
+    gap: 4px !important;
+  }
+  #wsBadge {
+    font-size: 10px;
+    padding: 2px 5px;
+    margin-left: 0 !important;
   }
   .user-badge-btn, #btnThemeToggle {
-    padding: 4px 8px;
-  }
-  #btnBotToggle {
-    padding: 4px 10px;
+    padding: 3px 6px;
     font-size: 12px;
+  }
+  #btnPaperToggle, #btnLiveToggle {
+    padding: 3px 8px;
+    font-size: 12px;
+    white-space: nowrap;
   }
   .stat-value {
     font-size: 20px;
   }
   .card-dark .card-body {
     padding: 12px;
+  }
+}
+
+@media (max-width: 389.98px) {
+  #btnPaperToggle, #btnLiveToggle {
+    padding: 3px 6px;
+    font-size: 11.5px;
   }
 }
 

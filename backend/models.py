@@ -153,6 +153,7 @@ class TradeResponse(BaseModel):
     ma7_at_entry: Optional[float] = None
     ma25_at_entry: Optional[float] = None
     ma60_at_entry: Optional[float] = None
+    strategy_mode: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -165,6 +166,7 @@ class SimulateTradeRequest(BaseModel):
     symbol: str = Field(..., min_length=4, max_length=25)
     direction: Literal["long", "short"] = "long"
     entry_price: float = Field(..., gt=0)
+    strategy_mode: Optional[Literal["balanced", "breakout", "classic"]] = None
 
     @field_validator("symbol")
     @classmethod
@@ -260,6 +262,9 @@ class TradingStatus(BaseModel):
     running: bool
     paper_running: bool = False
     live_running: bool = False
+    paper_modes: Dict[str, bool] = Field(
+        default_factory=lambda: {"balanced": False, "breakout": False, "classic": False}
+    )
     mode: str                          # "paper" or "live" or "both"
     active_symbols: List[str] = Field(default_factory=list)
     open_trades: int = 0

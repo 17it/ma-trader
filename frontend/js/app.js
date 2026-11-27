@@ -14,6 +14,8 @@ const AppController = (() => {
     botRunning: false,
     paperRunning: false,
     liveRunning: false,
+    paperModes: { balanced: false, breakout: false, classic: false },
+    paperModalOpen: false,
     ws: null,
     wsPingInterval: null,
     wsReconnectTimeout: null,
@@ -22,6 +24,8 @@ const AppController = (() => {
     hasMoreHistory: true,
     tradingMode: 'paper',
     tradesMode: 'paper',
+    tradesStrategies: ['balanced', 'breakout', 'classic'],
+    statsStrategies: ['balanced', 'breakout', 'classic'],
     tradesPage: 1,
     tradesPageSize: 20,
     logs: [],
@@ -84,9 +88,13 @@ const AppController = (() => {
     try { await loadStats(); } catch (e) { console.warn(e); }
     try { await hydrateHomepageLogBox(); } catch (e) { console.warn(e); }
 
-    // Ensure chart is loaded
+    // Ensure chart is loaded and resized once initial flex layout settles
     if (!state.klinesData || state.klinesData.length === 0) {
       try { await loadKlines(); } catch (e) { console.warn(e); }
+    }
+    if (typeof ChartManager !== 'undefined' && ChartManager.resize) {
+      requestAnimationFrame(() => ChartManager.resize());
+      setTimeout(() => ChartManager.resize(), 120);
     }
 
     // 5. Connect local WebSocket for trade alerts and bot status
@@ -125,8 +133,21 @@ const AppController = (() => {
       const el = document.getElementById(id);
       if (el) el.addEventListener('change', loadStats);
     });
+    _bindStrategyToggleGroup('statsStrategyBtns', () => state.statsStrategies, (next) => {
+      state.statsStrategies = next;
+      loadStats();
+    });
 
     // Tab switch triggers
+    const tabChartLink = document.querySelector('a[href="#tabChart"]');
+    if (tabChartLink) {
+      tabChartLink.addEventListener('shown.bs.tab', () => {
+        if (typeof ChartManager !== 'undefined' && ChartManager.resize) {
+          ChartManager.resize();
+          setTimeout(() => ChartManager.resize(), 60);
+        }
+      });
+    }
     const tabStatsLink = document.querySelector('a[href="#tabStats"]');
     if (tabStatsLink) {
       tabStatsLink.addEventListener('shown.bs.tab', () => {
@@ -152,6 +173,11 @@ const AppController = (() => {
         renderTradesView();
       });
     }
+    _bindStrategyToggleGroup('tradesStrategyBtns', () => state.tradesStrategies, (next) => {
+      state.tradesStrategies = next;
+      state.tradesPage = 1;
+      renderTradesView();
+    });
     const tradesModeWrap = document.getElementById('tradesModeTabs');
     if (tradesModeWrap) {
       tradesModeWrap.querySelectorAll('button[data-mode]').forEach(btn => {
@@ -287,6 +313,31 @@ const AppController = (() => {
     if (btnClearTrades) btnClearTrades.addEventListener('click', clearAllTrades);
   }
 
+  function _bindStrategyToggleGroup(containerId, getSelected, onUpdate) {
+    const wrap = document.getElementById(containerId);
+    if (!wrap) return;
+    wrap.querySelectorAll('button[data-strategy]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.getAttribute('data-strategy');
+        const cur = new Set(getSelected() || []);
+        if (cur.has(key)) {
+          cur.delete(key);
+        } else {
+          cur.add(key);
+        }
+        const next = ['balanced', 'breakout', 'classic'].filter(k => cur.has(k));
+        wrap.querySelectorAll('button[data-strategy]').forEach(b => {
+          const bKey = b.getAttribute('data-strategy');
+          const active = cur.has(bKey);
+          b.className = active ? 'btn btn-sm btn-primary active' : 'btn btn-sm btn-outline-secondary';
+          const icon = b.querySelector('.strat-check-icon');
+          if (icon) icon.style.display = active ? 'inline-block' : 'none';
+        });
+        onUpdate(next);
+      });
+    });
+  }
+
   // ─── Sidebar Collapse / Expand ─────────────────────────────────────
   function setupSidebar() {
     const sidebar = document.getElementById('sidebar');
@@ -392,10 +443,11 @@ const AppController = (() => {
     resetSignalDisplay();
 
     // Reload Klines base chart (one-off initial load)
-    loadKlines();
+    const p = loadKlines();
 
     // Switch Binance real-time WebSocket stream
     connectBinanceStream(symbol, state.currentTimeframe);
+    return p;
   }
 
   function switchTimeframe(tf) {
@@ -452,68 +504,96 @@ const AppController = (() => {
       if (symbols.length > 0) {
         const found = symbols.find(s => s.symbol === state.currentSymbol);
         if (!found) {
-          switchSymbol(symbols[0].symbol);
+          await switchSymbol(symbols[0].symbol);
         } else {
-          switchSymbol(state.currentSymbol);
+          await switchSymbol(state.currentSymbol);
         }
       } else {
-        switchSymbol(state.currentSymbol || 'BTCUSDT');
+        await switchSymbol(state.currentSymbol || 'BTCUSDT');
       }
     } catch (err) {
       console.warn('[App] Load symbols error:', err);
     }
   }
 
-  async function loadKlines() {
+  let _klinesInFlight = null;
+
+  async function loadKlines(retryCount = 0) {
     if (!state.currentSymbol) return;
-    try {
-      const url = `/api/klines/${state.currentSymbol}?timeframe=${state.currentTimeframe}&limit=200`;
-      const res = await fetch(url);
-      if (!res.ok) return;
-      const body = await res.json();
-      state.klinesData = body.data || [];
+    const reqKey = `${state.currentSymbol}:${state.currentTimeframe}`;
+    if (_klinesInFlight && _klinesInFlight.key === reqKey && retryCount === 0) {
+      return _klinesInFlight.promise;
+    }
 
-      // Pass matching trades to chart
-      const symbolTrades = state.trades.filter(t => t.symbol === state.currentSymbol);
-      if (typeof ChartManager !== 'undefined') {
-        ChartManager.render(state.klinesData, symbolTrades);
-      }
+    const runner = (async () => {
+      try {
+        const url = `/api/klines/${state.currentSymbol}?timeframe=${state.currentTimeframe}&limit=200`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          if (retryCount < 1) {
+            await new Promise(r => setTimeout(r, 1200));
+            return loadKlines(retryCount + 1);
+          }
+          return;
+        }
+        const body = await res.json();
+        state.klinesData = body.data || [];
 
-      // Update current price & indicators from latest candle if available
-      if (state.klinesData.length > 0) {
-        const lastCandle = state.klinesData[state.klinesData.length - 1];
-        const lastClose = Array.isArray(lastCandle) ? lastCandle[4] : (lastCandle.close ?? lastCandle.c);
-        if (lastClose) {
-          updateCurrentPrice(Number(lastClose));
+        // Pass matching trades to chart
+        const symbolTrades = state.trades.filter(t => t.symbol === state.currentSymbol);
+        if (typeof ChartManager !== 'undefined') {
+          ChartManager.render(state.klinesData, symbolTrades);
         }
 
-        // Also update initial MA readings from candle
-        if (lastCandle && !Array.isArray(lastCandle)) {
-          const m7  = lastCandle.ma7;
-          const m25 = lastCandle.ma25;
-          const m60 = lastCandle.ma60;
-          if (m7 != null)  document.getElementById('ma7Val').textContent  = Number(m7).toFixed(1);
-          if (m25 != null) document.getElementById('ma25Val').textContent = Number(m25).toFixed(1);
-          if (m60 != null) document.getElementById('ma60Val').textContent = Number(m60).toFixed(1);
+        // Update current price & indicators from latest candle if available
+        if (state.klinesData.length > 0) {
+          const lastCandle = state.klinesData[state.klinesData.length - 1];
+          const lastClose = Array.isArray(lastCandle) ? lastCandle[4] : (lastCandle.close ?? lastCandle.c);
+          if (lastClose) {
+            updateCurrentPrice(Number(lastClose));
+          }
 
-          const dir = document.getElementById('maDirection');
-          if (dir && m7 != null && m25 != null && m60 != null) {
-            if (m7 > m25 && m25 > m60) {
-              dir.textContent = '▲ 多头排列';
-              dir.className = 'direction-badge long';
-            } else if (m7 < m25 && m25 < m60) {
-              dir.textContent = '▼ 空头排列';
-              dir.className = 'direction-badge short';
-            } else {
-              dir.textContent = '— 震荡/整理';
-              dir.className = 'direction-badge flat';
+          // Also update initial MA readings from candle
+          if (lastCandle && !Array.isArray(lastCandle)) {
+            const m7  = lastCandle.ma7;
+            const m25 = lastCandle.ma25;
+            const m60 = lastCandle.ma60;
+            if (m7 != null)  document.getElementById('ma7Val').textContent  = Number(m7).toFixed(1);
+            if (m25 != null) document.getElementById('ma25Val').textContent = Number(m25).toFixed(1);
+            if (m60 != null) document.getElementById('ma60Val').textContent = Number(m60).toFixed(1);
+
+            const dir = document.getElementById('maDirection');
+            if (dir && m7 != null && m25 != null && m60 != null) {
+              if (m7 > m25 && m25 > m60) {
+                dir.textContent = '▲ 多头排列';
+                dir.className = 'direction-badge long';
+              } else if (m7 < m25 && m25 < m60) {
+                dir.textContent = '▼ 空头排列';
+                dir.className = 'direction-badge short';
+              } else {
+                dir.textContent = '— 震荡/整理';
+                dir.className = 'direction-badge flat';
+              }
             }
           }
         }
+      } catch (err) {
+        console.warn('[App] Load klines error:', err);
+        if (retryCount < 1) {
+          await new Promise(r => setTimeout(r, 1200));
+          return loadKlines(retryCount + 1);
+        }
+      } finally {
+        if (_klinesInFlight && _klinesInFlight.key === reqKey) {
+          _klinesInFlight = null;
+        }
       }
-    } catch (err) {
-      console.warn('[App] Load klines error:', err);
+    })();
+
+    if (retryCount === 0) {
+      _klinesInFlight = { key: reqKey, promise: runner };
     }
+    return runner;
   }
 
   // ─── Lazy-load earlier history candles when user scrolls to leftmost edge ────
@@ -589,10 +669,16 @@ const AppController = (() => {
       const sym = document.getElementById('statsSymbol')?.value || '';
       const days = document.getElementById('statsDays')?.value || '30';
       const mode = document.getElementById('statsMode')?.value || '';
+      const selectedStrats = state.statsStrategies || [];
 
       let url = `/api/stats?days=${days}`;
       if (sym) url += `&symbol=${encodeURIComponent(sym)}`;
       if (mode) url += `&is_paper=${mode === 'paper'}`;
+      if (selectedStrats.length === 0) {
+        url += '&strategy_modes=none';
+      } else if (selectedStrats.length < 3) {
+        url += `&strategy_modes=${encodeURIComponent(selectedStrats.join(','))}`;
+      }
 
       const res = await fetch(url);
       if (!res.ok) return;
@@ -649,8 +735,109 @@ const AppController = (() => {
     }
   }
 
-  // ─── Bot Start / Stop Toggle & Modal Confirm ────────────────────────
+  // ─── Bot Start / Stop Toggle & Multi-Paper Control Modal ────────────
   let botConfirmModalInstance = null;
+
+  const PAPER_STRATEGY_META = [
+    { key: 'balanced', short: '方案A', name: '方案 A：高胜率均衡', desc: '双周期三线+斜率+MA200顺势 · 独立$10,000模拟账户' },
+    { key: 'breakout', short: '方案B', name: '方案 B：单边爆发',   desc: '大周期强发散+小周期突破 · 独立$10,000模拟账户' },
+    { key: 'classic',  short: '经典',  name: '经典多均线',         desc: '三线排列+自定义触发R追踪 · 独立$10,000模拟账户' },
+  ];
+
+  function _strategyShortLabel(mode) {
+    const m = String(mode || 'balanced').toLowerCase();
+    if (m === 'breakout') return '方案B';
+    if (m === 'classic') return '经典';
+    return '方案A';
+  }
+
+  function _renderPaperModalContent() {
+    const titleEl = document.getElementById('botModalTitle');
+    const bodyEl  = document.getElementById('botModalBody');
+    const footerEl = document.getElementById('botModalFooter');
+    if (!titleEl || !bodyEl || !footerEl) return;
+
+    const pm = state.paperModes || { balanced: false, breakout: false, classic: false };
+    const runningCount = PAPER_STRATEGY_META.filter(item => Boolean(pm[item.key])).length;
+
+    titleEl.innerHTML = `<i class="fa-solid fa-flask text-primary"></i><span>模拟盘独立启停控制 (${runningCount}/3 运行中)</span>`;
+
+    const rowsHtml = PAPER_STRATEGY_META.map(item => {
+      const running = Boolean(pm[item.key]);
+      const statusBadge = running
+        ? '<span class="badge bg-success-subtle text-success border border-success-subtle">运行中</span>'
+        : '<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">已停止</span>';
+      const btnCls = running ? 'btn-outline-danger' : 'btn-success';
+      const btnIcon = running ? 'fa-stop' : 'fa-play';
+      const btnText = running ? '停止' : '启动';
+      return `
+        <div class="d-flex align-items-center justify-content-between gap-2 p-2 rounded border border-secondary-subtle mb-2">
+          <div class="me-2">
+            <div class="d-flex align-items-center gap-2">
+              <span class="fw-semibold small">${item.name}</span>
+              ${statusBadge}
+            </div>
+            <div class="text-secondary" style="font-size:11px;margin-top:2px;">${item.desc}</div>
+          </div>
+          <button type="button" class="btn btn-sm ${btnCls} flex-shrink-0" data-paper-action="${running ? 'stop' : 'start'}" data-strategy-mode="${item.key}">
+            <i class="fa-solid ${btnIcon} me-1"></i>${btnText}
+          </button>
+        </div>
+      `;
+    }).join('');
+
+    bodyEl.innerHTML = `
+      <div class="small text-secondary mb-2">
+        三个模拟盘共享同一套实时行情与 K 线缓存（零重复内存与请求开销），各自独立持仓、独立风控与独立 $10,000 权益核算。
+      </div>
+      ${rowsHtml}
+    `;
+
+    bodyEl.querySelectorAll('button[data-paper-action]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const act = btn.getAttribute('data-paper-action');
+        const sm = btn.getAttribute('data-strategy-mode');
+        btn.disabled = true;
+        if (act === 'stop') {
+          await stopBot('paper', sm);
+        } else {
+          await startBot('paper', sm);
+        }
+        _renderPaperModalContent();
+      });
+    });
+
+    footerEl.innerHTML = `
+      <div class="d-flex w-100 justify-content-between align-items-center gap-2">
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-outline-success btn-sm" id="btnStartAllPaper" ${runningCount === 3 ? 'disabled' : ''}>
+            <i class="fa-solid fa-play me-1"></i>全部启动
+          </button>
+          <button type="button" class="btn btn-outline-danger btn-sm" id="btnStopAllPaper" ${runningCount === 0 ? 'disabled' : ''}>
+            <i class="fa-solid fa-stop me-1"></i>全部停止
+          </button>
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">关闭</button>
+      </div>
+    `;
+
+    const btnStartAll = document.getElementById('btnStartAllPaper');
+    const btnStopAll  = document.getElementById('btnStopAllPaper');
+    if (btnStartAll) {
+      btnStartAll.addEventListener('click', async () => {
+        btnStartAll.disabled = true;
+        await startBot('paper', 'all');
+        _renderPaperModalContent();
+      });
+    }
+    if (btnStopAll) {
+      btnStopAll.addEventListener('click', async () => {
+        btnStopAll.disabled = true;
+        await stopBot('paper', 'all');
+        _renderPaperModalContent();
+      });
+    }
+  }
 
   async function handleBotToggleClick(mode = 'paper') {
     const modalEl = document.getElementById('botConfirmModal');
@@ -658,55 +845,57 @@ const AppController = (() => {
 
     if (!botConfirmModalInstance) {
       botConfirmModalInstance = new bootstrap.Modal(modalEl);
+      modalEl.addEventListener('hidden.bs.modal', () => {
+        state.paperModalOpen = false;
+      });
     }
 
-    const titleEl = document.getElementById('botModalTitle');
-    const bodyEl  = document.getElementById('botModalBody');
-    const btnAction = document.getElementById('btnConfirmBotAction');
-
-    // Remove previous click handlers
-    const newBtnAction = btnAction.cloneNode(true);
-    btnAction.parentNode.replaceChild(newBtnAction, btnAction);
-
-    const isLive = (mode === 'live');
-    const modeName = isLive ? '实盘' : '模拟';
-    const isRunning = isLive ? state.liveRunning : state.paperRunning;
-
-    // 1. If this mode is currently RUNNING -> Confirm to STOP
-    if (isRunning) {
-      titleEl.innerHTML = `<i class="fa-solid fa-stop text-danger"></i><span>停止${modeName}自动交易监控</span>`;
-      bodyEl.innerHTML = `
-        <div class="text-center my-2">
-          <span class="badge ${isLive ? 'bg-danger' : 'bg-secondary'} fs-6 px-3 py-1 mb-2">${modeName}运行中</span>
-          <div class="text-secondary small mt-1">
-            停止后系统将立即暂停<b>${modeName}</b>后台监控与自动开仓（不影响另一模式），当前未平仓订单将保持现有止盈止损状态。
-          </div>
-        </div>
-        <div class="alert alert-warning py-2 px-3 small mb-0 mt-3 d-flex align-items-center">
-          <i class="fa-solid fa-triangle-exclamation text-warning me-2 fs-5"></i>
-          <div>确定要停止${modeName}自动交易吗？</div>
-        </div>
-      `;
-
-      newBtnAction.className = 'btn btn-danger btn-sm';
-      newBtnAction.innerHTML = `<i class="fa-solid fa-stop me-1"></i>确认停止${modeName}`;
-      newBtnAction.onclick = async () => {
-        botConfirmModalInstance.hide();
-        await stopBot(mode);
-      };
-
+    if (mode !== 'live') {
+      state.paperModalOpen = true;
+      _renderPaperModalContent();
       botConfirmModalInstance.show();
       return;
     }
 
-    // 2. If currently STOPPED -> Confirm to START
-    if (isLive) {
+    state.paperModalOpen = false;
+    const titleEl  = document.getElementById('botModalTitle');
+    const bodyEl   = document.getElementById('botModalBody');
+    const footerEl = document.getElementById('botModalFooter');
+    if (!titleEl || !bodyEl || !footerEl) return;
+
+    footerEl.innerHTML = `
+      <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+      <button type="button" class="btn btn-danger btn-sm" id="btnConfirmBotAction"></button>
+    `;
+    const newBtnAction = document.getElementById('btnConfirmBotAction');
+    const isRunning = state.liveRunning;
+
+    if (isRunning) {
+      titleEl.innerHTML = '<i class="fa-solid fa-stop text-danger"></i><span>停止实盘自动交易监控</span>';
+      bodyEl.innerHTML = `
+        <div class="text-center my-2">
+          <span class="badge bg-danger fs-6 px-3 py-1 mb-2">实盘运行中</span>
+          <div class="text-secondary small mt-1">
+            停止后系统将立即暂停<b>实盘</b>后台监控与自动开仓（不影响模拟盘），当前未平仓订单将保持现有止损保护状态。
+          </div>
+        </div>
+        <div class="alert alert-warning py-2 px-3 small mb-0 mt-3 d-flex align-items-center">
+          <i class="fa-solid fa-triangle-exclamation text-warning me-2 fs-5"></i>
+          <div>确定要停止实盘自动交易吗？</div>
+        </div>
+      `;
+      newBtnAction.innerHTML = '<i class="fa-solid fa-stop me-1"></i>确认停止实盘';
+      newBtnAction.onclick = async () => {
+        botConfirmModalInstance.hide();
+        await stopBot('live');
+      };
+    } else {
       titleEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation text-danger"></i><span>启动自动交易（实盘）</span>';
       bodyEl.innerHTML = `
         <div class="text-center my-2">
           <span class="badge bg-danger fs-6 px-3 py-1 mb-2">⚠️ 实盘模式 (LIVE)</span>
           <div class="text-secondary small mt-2">
-            开启后<b>实盘机器人</b>将按照策略信号通过 Binance API <b>使用真实资金下单交易</b>（可与模拟盘同时运行，共享行情流）。
+            开启后<b>实盘机器人</b>将按照全局设置的策略信号通过 Binance API <b>使用真实资金下单交易</b>（可与各模拟盘同时运行，共享行情流）。
           </div>
         </div>
         <div class="alert alert-danger py-2 px-3 small mb-0 mt-3 d-flex align-items-center">
@@ -714,38 +903,26 @@ const AppController = (() => {
           <div class="fw-bold">请确认已评估市场风险，确定启动实盘？</div>
         </div>
       `;
-      newBtnAction.className = 'btn btn-danger btn-sm';
       newBtnAction.innerHTML = '<i class="fa-solid fa-play me-1"></i>确认启动实盘';
-    } else {
-      titleEl.innerHTML = '<i class="fa-solid fa-play text-success"></i><span>启动自动交易（模拟）</span>';
-      bodyEl.innerHTML = `
-        <div class="text-center my-2">
-          <span class="badge bg-secondary fs-6 px-3 py-1 mb-2">模拟交易 (PAPER)</span>
-          <div class="text-secondary small mt-2">
-            开启后<b>模拟机器人</b>将在后台自动监控行情并记录虚拟订单，不涉及真实资产（可与实盘同时运行，共享行情流）。
-          </div>
-        </div>
-        <div class="alert alert-info py-2 px-3 small mb-0 mt-3 d-flex align-items-center">
-          <i class="fa-solid fa-circle-info text-info me-2 fs-5"></i>
-          <div>确定启动模拟自动交易监控吗？</div>
-        </div>
-      `;
-      newBtnAction.className = 'btn btn-success btn-sm';
-      newBtnAction.innerHTML = '<i class="fa-solid fa-play me-1"></i>确认启动模拟';
+      newBtnAction.onclick = async () => {
+        botConfirmModalInstance.hide();
+        await startBot('live');
+      };
     }
-
-    newBtnAction.onclick = async () => {
-      botConfirmModalInstance.hide();
-      await startBot(mode);
-    };
 
     botConfirmModalInstance.show();
   }
 
-  async function startBot(mode = 'paper') {
-    const label = mode === 'live' ? '实盘' : '模拟';
+  async function startBot(mode = 'paper', strategyMode = '') {
+    const label = mode === 'live'
+      ? '实盘'
+      : (strategyMode === 'all' ? '全部模拟盘' : `模拟(${_strategyShortLabel(strategyMode || 'balanced')})`);
+    let url = `/api/trading/start?mode=${encodeURIComponent(mode)}`;
+    if (mode === 'paper' && strategyMode) {
+      url += `&strategy_mode=${encodeURIComponent(strategyMode)}`;
+    }
     try {
-      const res = await fetch(`/api/trading/start?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
+      const res = await fetch(url, { method: 'POST' });
       if (res.ok) {
         await checkBotStatus();
         appendLog(`${label}交易监控已启动`, 'info');
@@ -758,10 +935,16 @@ const AppController = (() => {
     }
   }
 
-  async function stopBot(mode = 'paper') {
-    const label = mode === 'live' ? '实盘' : '模拟';
+  async function stopBot(mode = 'paper', strategyMode = '') {
+    const label = mode === 'live'
+      ? '实盘'
+      : (strategyMode && strategyMode !== 'all' ? `模拟(${_strategyShortLabel(strategyMode)})` : '全部模拟盘');
+    let url = `/api/trading/stop?mode=${encodeURIComponent(mode)}`;
+    if (mode === 'paper' && strategyMode) {
+      url += `&strategy_mode=${encodeURIComponent(strategyMode)}`;
+    }
     try {
-      const res = await fetch(`/api/trading/stop?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
+      const res = await fetch(url, { method: 'POST' });
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
         await checkBotStatus();
@@ -791,10 +974,14 @@ const AppController = (() => {
       return;
     }
 
+    const simModeEl = document.getElementById('simStrategyMode');
+    const simMode = simModeEl ? simModeEl.value : 'balanced';
+
     const payload = {
       symbol: state.currentSymbol,
       direction: direction,
-      entry_price: entryPrice
+      entry_price: entryPrice,
+      strategy_mode: simMode
     };
 
     try {
@@ -896,15 +1083,34 @@ const AppController = (() => {
   function updateBotUI(statusOrBool) {
     let paperRunning = state.paperRunning;
     let liveRunning = state.liveRunning;
+    const nextPaperModes = { ...(state.paperModes || { balanced: false, breakout: false, classic: false }) };
+
     if (typeof statusOrBool === 'object' && statusOrBool !== null) {
-      if ('paper_running' in statusOrBool) paperRunning = Boolean(statusOrBool.paper_running);
-      if ('live_running' in statusOrBool)  liveRunning  = Boolean(statusOrBool.live_running);
-      if (!('paper_running' in statusOrBool) && !('live_running' in statusOrBool)) {
+      if (statusOrBool.paper_modes && typeof statusOrBool.paper_modes === 'object') {
+        ['balanced', 'breakout', 'classic'].forEach(k => {
+          if (k in statusOrBool.paper_modes) nextPaperModes[k] = Boolean(statusOrBool.paper_modes[k]);
+        });
+        paperRunning = Object.values(nextPaperModes).some(Boolean);
+      } else if (statusOrBool.paper_mode) {
+        const pmKey = String(statusOrBool.paper_mode).toLowerCase();
+        if (pmKey in nextPaperModes) {
+          nextPaperModes[pmKey] = Boolean(statusOrBool.paper_mode_running);
+        }
+        paperRunning = Object.values(nextPaperModes).some(Boolean);
+      } else if ('paper_running' in statusOrBool) {
+        paperRunning = Boolean(statusOrBool.paper_running);
+      }
+      if ('live_running' in statusOrBool) liveRunning = Boolean(statusOrBool.live_running);
+      if (!('paper_running' in statusOrBool) && !('live_running' in statusOrBool) && !statusOrBool.paper_modes && !statusOrBool.paper_mode) {
         paperRunning = Boolean(statusOrBool.running);
       }
     } else {
       paperRunning = Boolean(statusOrBool);
     }
+
+    state.paperModes = nextPaperModes;
+    const activePaperList = PAPER_STRATEGY_META.filter(m => Boolean(nextPaperModes[m.key]));
+    const activeCount = activePaperList.length;
     const anyRunning = paperRunning || liveRunning;
     state.paperRunning = paperRunning;
     state.liveRunning = liveRunning;
@@ -917,21 +1123,25 @@ const AppController = (() => {
 
     if (dot) dot.className = 'status-dot ' + (anyRunning ? 'running' : 'stopped');
     if (label) {
-      if (paperRunning && liveRunning) label.textContent = '模拟+实盘运行中';
+      const paperDesc = activeCount > 0
+        ? `模拟(${activePaperList.map(m => m.short).join('/')})`
+        : '模拟';
+      if (paperRunning && liveRunning) label.textContent = `${paperDesc}+实盘运行中`;
       else if (liveRunning)            label.textContent = '实盘运行中';
-      else if (paperRunning)           label.textContent = '模拟运行中';
+      else if (paperRunning)           label.textContent = `${paperDesc}运行中`;
       else                             label.textContent = '已停止';
     }
 
     if (paperBtn) {
       if (paperRunning) {
-        paperBtn.className = 'btn btn-sm btn-danger d-inline-flex align-items-center';
-        paperBtn.innerHTML = '<i class="fa-solid fa-stop me-1"></i>模拟';
-        paperBtn.title = '模拟盘运行中，点击停止';
+        const cntSuffix = activeCount > 0 ? ` ${activeCount}/3` : '';
+        paperBtn.className = 'btn btn-sm btn-primary d-inline-flex align-items-center';
+        paperBtn.innerHTML = `<i class="fa-solid fa-flask me-1"></i>模拟${cntSuffix}`;
+        paperBtn.title = '模拟盘运行中，点击管理各策略启停';
       } else {
         paperBtn.className = 'btn btn-sm btn-success d-inline-flex align-items-center';
         paperBtn.innerHTML = '<i class="fa-solid fa-play me-1"></i>模拟';
-        paperBtn.title = '点击启动模拟自动交易';
+        paperBtn.title = '点击管理多策略模拟盘启停';
       }
     }
 
@@ -945,6 +1155,10 @@ const AppController = (() => {
         liveBtn.innerHTML = '<i class="fa-solid fa-play me-1"></i>实盘';
         liveBtn.title = '点击启动实盘自动交易';
       }
+    }
+
+    if (state.paperModalOpen) {
+      _renderPaperModalContent();
     }
   }
 
@@ -972,10 +1186,17 @@ const AppController = (() => {
     if (bar)  bar.style.width = '0%';
   }
 
+  function _matchTradeStrategy(trade, selectedList) {
+    if (!Array.isArray(selectedList) || selectedList.length === 0) return false;
+    const tm = String(trade.strategy_mode || 'balanced').toLowerCase();
+    return selectedList.includes(tm);
+  }
+
   function renderTradesView() {
     const allTrades = state.trades || [];
-    const paperTrades = allTrades.filter(t => Boolean(t.is_paper));
-    const liveTrades = allTrades.filter(t => !t.is_paper);
+    const selectedStrats = state.tradesStrategies || [];
+    const paperTrades = allTrades.filter(t => Boolean(t.is_paper) && _matchTradeStrategy(t, selectedStrats));
+    const liveTrades = allTrades.filter(t => !t.is_paper && _matchTradeStrategy(t, selectedStrats));
 
     const pBadge = document.getElementById('paperTradeBadge');
     const lBadge = document.getElementById('liveTradeBadge');
@@ -1393,9 +1614,10 @@ const AppController = (() => {
         pnlText = `<span class="${color} fw-bold">${sign}$${t.pnl.toFixed(2)}${pct}</span>`;
       }
 
+      const stratShort = _strategyShortLabel(t.strategy_mode);
       const typeBadge = t.is_paper
-        ? '<span class="badge el-tag-paper" title="Paper Trading">模拟</span>'
-        : '<span class="badge bg-danger-subtle text-danger border border-danger-subtle" title="Live Trading">实盘</span>';
+        ? `<span class="badge el-tag-paper" title="模拟策略: ${stratShort}">模拟·${stratShort}</span>`
+        : `<span class="badge bg-danger-subtle text-danger border border-danger-subtle" title="实盘策略: ${stratShort}">实盘·${stratShort}</span>`;
 
       const reasonMap = {
         stop_loss:        '<span class="badge bg-danger-subtle text-danger border border-danger-subtle">初始止损</span>',
@@ -1765,7 +1987,8 @@ const AppController = (() => {
         if (msg.cooldown_left_min && msg.cooldown_left_min > 0) {
           suffix += `（平仓冷却剩余 ${msg.cooldown_left_min}m，暂缓开仓）`;
         }
-        appendLog(`[信号] ${msg.symbol} ${msg.direction.toUpperCase()} 确认 ${msg.confirm}/${msg.max_confirm}${suffix}`, 'info');
+        const sigTag = msg.strategy_mode ? `·${_strategyShortLabel(msg.strategy_mode)}` : '';
+        appendLog(`[信号${sigTag}] ${msg.symbol} ${msg.direction.toUpperCase()} 确认 ${msg.confirm}/${msg.max_confirm}${suffix}`, 'info');
         break;
       }
 

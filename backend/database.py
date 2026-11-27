@@ -503,17 +503,27 @@ def get_db():
         db.close()
 
 
-def get_paper_equity(db=None, base_capital: float = 10_000.0) -> float:
-    """Compute current paper account equity = base_capital + realized net P&L of closed paper trades."""
-    from sqlalchemy import func
+def get_paper_equity(
+    db=None,
+    base_capital: float = 10_000.0,
+    strategy_mode: str | None = None,
+) -> float:
+    """Compute paper account equity = base_capital + realized net P&L (optionally scoped to one strategy_mode)."""
+    from sqlalchemy import func, or_
     own = db is None
     session = SessionLocal() if own else db
     try:
-        realized = (
-            session.query(func.coalesce(func.sum(Trade.pnl), 0.0))
-            .filter(Trade.status == "closed", Trade.is_paper == True)  # noqa: E712
-            .scalar()
+        q = session.query(func.coalesce(func.sum(Trade.pnl), 0.0)).filter(
+            Trade.status == "closed",
+            Trade.is_paper == True,  # noqa: E712
         )
+        if strategy_mode:
+            norm = str(strategy_mode).strip().lower()
+            if norm == "balanced":
+                q = q.filter(or_(Trade.strategy_mode == "balanced", Trade.strategy_mode.is_(None)))
+            else:
+                q = q.filter(Trade.strategy_mode == norm)
+        realized = q.scalar()
         return max(100.0, float(base_capital) + float(realized or 0.0))
     except Exception:
         return float(base_capital)

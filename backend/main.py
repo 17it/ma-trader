@@ -96,7 +96,13 @@ async def lifespan(app: FastAPI):
     shared_ws = BinanceWSStreamer(proxy=app.state.config.get("http_proxy"))
     shared_ws.register_callback(lambda msg: asyncio.create_task(ws_manager.broadcast(msg)))
     app.state.ws_streamer = shared_ws
-    app.state.bots = {"paper": None, "live": None}
+    app.state.bots = {
+        "paper:balanced": None,
+        "paper:breakout": None,
+        "paper:classic": None,
+        "live": None,
+    }
+    app.state.shared_paper_feed = None
     app.state.bot_lock = asyncio.Lock()
 
     logger.info("MA Trader ready.")
@@ -257,16 +263,7 @@ async def websocket_endpoint(websocket: WebSocket):
     ws_manager.register_accepted(websocket)
 
     bots = getattr(websocket.app.state, "bots", {}) or {}
-    paper_bot = bots.get("paper")
-    live_bot = bots.get("live")
-    paper_running = bool(paper_bot is not None and paper_bot.running)
-    live_running = bool(live_bot is not None and live_bot.running)
-    await ws_manager.send_personal(websocket, {
-        "type": "bot_status",
-        "running": paper_running or live_running,
-        "paper_running": paper_running,
-        "live_running": live_running,
-    })
+    await ws_manager.send_personal(websocket, trading_router._bot_status_payload(bots))
 
     try:
         while True:
