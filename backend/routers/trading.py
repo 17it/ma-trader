@@ -836,7 +836,9 @@ async def manual_close_trade(
             if pos_id == trade.id or pos_id is None:
                 target_bot.positions.pop(trade.symbol, None)
         if hasattr(target_bot, "register_close_cooldown"):
-            target_bot.register_close_cooldown(trade.symbol, trade.timeframe, close_dt=trade.close_time)
+            target_bot.register_close_cooldown(
+                trade.symbol, trade.timeframe, close_dt=trade.close_time, direction=trade.direction
+            )
 
     ws_manager = _get_ws_manager(request)
     if ws_manager is not None:

@@ -968,7 +968,7 @@
                     </div>
                     <div class="small text-secondary" style="line-height:1.65;">
                       <div class="mb-2">
-                        <strong class="text-body">核心含义：</strong>「小周期精准进场 + 大周期定趋势与止损追踪」。强制要求高级框架 <code>MA7/25/60</code> 同向排列、<code>MA25/60</code> 斜率共振且位于大周期 <code>MA200</code>（15m 下即 50 小时主趋势线）顺势侧，<strong>大周期均线纠缠时严格空仓</strong>；小周期三线顺排确认后进场；以 <code>max(2.0 × HTF_ATR14, 0.8%)</code> 设波段止损（抗 1m 插针并压低手续费占比）；浮盈达 <strong>1.0R</strong> 自动锁利 <strong>+0.35R（保底 ±0.2%）</strong>，随后沿<strong>大周期均线（如 15m MA25）</strong>收线追踪出场。
+                        <strong class="text-body">核心含义：</strong>「小周期精准进场 + 大周期定趋势与止损追踪 + 1m 极速崩盘/暴拉通道 + 动态阶梯锁盈」。常规要求高级框架 <code>MA7/25/60</code> 同向排列、斜率共振且位于 <code>MA200</code> 顺势侧；若遇 <strong>1m 爆量极速单边</strong>（5分钟波幅 <code>≥3.8×ATR</code> 且 <code>≥0.5%</code>、均量 <code>≥2.0x</code> 且破大周期 <code>MA60</code>）则自动豁免慢速均线滞后顺势切入；浮盈达 <strong>1.0R</strong> 锁 <strong>+0.35R</strong>、<strong>1.5R</strong> 锁 <strong>+0.85R</strong>、<strong>≥2.0R</strong> 动态紧跟 <strong>峰值R - 0.85R</strong> 并结合大周期均线追踪出场。
                       </div>
                       <div class="mb-2">
                         <strong class="text-body">适用场景：</strong><strong>全天候主力方案</strong>（兼顾震荡过渡期与趋势期），适合运行在短周期盯盘（<code>1m / 15m</code>）、追求 <strong>58%~65% 较高胜率</strong>与稳健净值曲线的日常交易。
@@ -993,7 +993,7 @@
                     </div>
                     <div class="small text-secondary" style="line-height:1.65;">
                       <div class="mb-2">
-                        <strong class="text-body">核心含义：</strong>「大周期强发散过滤 + 小周期顺势突破快进 + 结构宽止损博大浪」。在方案 A 大周期三线 + 斜率 + <code>MA200</code> 基础上，额外要求<strong>大周期均线显著发散</strong>（<code>|HTF_MA7 - HTF_MA60| &gt; 0.6 × HTF_ATR14</code>），彻底过滤窄幅盘整；小周期无需等三线完全发散，顺势站稳 <code>LTF_MA25</code>（<code>MA7 &gt; MA25</code> 且顺向实体 K 线）即提前上车；以大周期 <code>HTF_MA60</code> 结构位（结合 <code>1.8 × HTF_ATR14</code> 与 <code>0.8%</code> 保底）设止损，浮盈达 <strong>1.2R</strong> 锁利 <strong>+0.35R</strong> 后沿<strong>大周期均线</strong>跨周期追踪。
+                        <strong class="text-body">核心含义：</strong>「大周期强发散过滤 + 1m 灵敏放量极速突破 + 动态阶梯锁盈博大浪」。常规要求大周期三线强发散（<code>|HTF_MA7 - HTF_MA60| &gt; 0.6 × HTF_ATR14</code>）过滤窄幅盘整；同时内置更灵敏的 <strong>1m 极速单边通道</strong>（5分钟波幅 <code>≥2.8×ATR</code> 且 <code>≥0.4%</code>、均量 <code>≥1.7x</code> 且破大周期 <code>MA60</code>）第一时间捕捉 V 型暴跌/暴拉；浮盈达 <strong>1.2R</strong> 锁 <strong>+0.35R</strong>、<strong>1.5R</strong> 锁 <strong>+0.85R</strong>、<strong>≥2.0R</strong> 动态紧跟 <strong>峰值R - 0.85R</strong> 结合大周期均线追踪。
                       </div>
                       <div class="mb-2">
                         <strong class="text-body">适用场景：</strong><strong>破位单边大行情 / 宏观驱动主升主跌浪</strong>。出手次数比方案 A 更少、更克制，在流畅单边趋势中收益爆发力与夏普比最高。

@@ -163,6 +163,7 @@ class TradingBot:
         self.strategy_mode: str = self.fixed_strategy_mode or "balanced"
         self.cooldown_bars: int = DEFAULT_COOLDOWN_BARS
         self.cooldown_until_ts: Dict[str, float] = {}
+        self.cooldown_last_dir: Dict[str, str] = {}
         self.strategies: Dict[str, MAStrategy] = {}
         self.positions: Dict[str, dict] = {}
         self.confirm_counts: Dict[str, int] = {}
@@ -348,7 +349,9 @@ class TradingBot:
                         if ct.symbol in seen_syms:
                             continue
                         seen_syms.add(ct.symbol)
-                        self.register_close_cooldown(ct.symbol, ct.timeframe, close_dt=ct.close_time)
+                        self.register_close_cooldown(
+                            ct.symbol, ct.timeframe, close_dt=ct.close_time, direction=ct.direction
+                        )
             finally:
                 session.close()
         except Exception as exc:
@@ -465,8 +468,11 @@ class TradingBot:
         symbol: str,
         timeframe: Optional[str] = None,
         close_dt: Optional[datetime] = None,
+        direction: Optional[str] = None,
     ) -> None:
         """Record post-close cooldown expiry for *symbol* (shared by auto-close, manual-close, and restart)."""
+        if direction:
+            self.cooldown_last_dir[symbol] = str(direction).lower()
         if self.cooldown_bars <= 0 or self.strategy_mode == "classic":
             return
         base_ts = _to_utc_ts(close_dt) if close_dt is not None else time.time()
@@ -648,7 +654,12 @@ class TradingBot:
                         self.confirm_counts[symbol] = signal["confirm"]
                         if len(_RECENT_SIGNAL_EVENTS) > 200:
                             _RECENT_SIGNAL_EVENTS.clear()
-                        in_cd = (symbol not in self.positions) and (time.time() < self.cooldown_until_ts.get(symbol, 0.0))
+                        raw_in_cd = (symbol not in self.positions) and (time.time() < self.cooldown_until_ts.get(symbol, 0.0))
+                        last_cd_dir = self.cooldown_last_dir.get(symbol)
+                        exempt_rev_cd = bool(
+                            signal.get("fast_momentum") and last_cd_dir and signal["direction"] != last_cd_dir
+                        )
+                        in_cd = raw_in_cd and not exempt_rev_cd
                         rem_min = max(1, int((self.cooldown_until_ts[symbol] - time.time()) / 60)) if in_cd else 0
                         sig_fp = (
                             str(closed_candle_ts),
@@ -656,6 +667,7 @@ class TradingBot:
                             signal["confirm"],
                             bool(signal.get("blocked_by_wick")),
                             in_cd,
+                            bool(signal.get("fast_momentum")),
                         )
                         if _RECENT_SIGNAL_EVENTS.get(sig_event_key) != sig_fp:
                             _RECENT_SIGNAL_EVENTS[sig_event_key] = sig_fp
@@ -668,6 +680,7 @@ class TradingBot:
                                 "confirm": signal["confirm"],
                                 "max_confirm": signal["max_confirm"],
                                 "blocked_by_wick": bool(signal.get("blocked_by_wick")),
+                                "fast_momentum": bool(signal.get("fast_momentum")),
                                 "cooldown_left_min": rem_min,
                             })
                         if symbol not in self.positions:
@@ -772,6 +785,8 @@ class TradingBot:
             strategy_mode=cur_mode,
             htf_atr14=htf_atr14,
             htf_ma60=htf_ma60,
+            fast_momentum=bool(signal.get("fast_momentum")),
+            ltf_atr14=float(last["atr14"]) if "atr14" in last else math.nan,
         )
         if sl_distance <= 0:
             return
@@ -1121,6 +1136,24 @@ class TradingBot:
                 use_htf_rail = pos_mode != "classic"
                 trail_ma_label = f"{htf_timeframe} {pos_trail_ma.upper()}" if use_htf_rail else pos_trail_ma.upper()
 
+                # Track post-entry peak excursion from both live price and recent closed 1m wicks (prevents 15s missed-wick bug)
+                best_price = float(pos.get("best_price") or entry_price)
+                if price is not None and price > 0:
+                    best_price = max(best_price, price) if direction == "long" else min(best_price, price)
+                try:
+                    df_1m_chk = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, "1m", 5)
+                    if df_1m_chk is not None and len(df_1m_chk) >= 2 and "timestamp" in df_1m_chk.columns:
+                        open_ts_sec = _to_utc_ts(open_time)
+                        for _, r_bar in df_1m_chk.iloc[:-1].iterrows():
+                            if _to_utc_ts(r_bar["timestamp"]) >= open_ts_sec:
+                                if direction == "long":
+                                    best_price = max(best_price, float(r_bar["high"]))
+                                else:
+                                    best_price = min(best_price, float(r_bar["low"]))
+                except Exception:
+                    pass
+                pos["best_price"] = best_price
+
                 if price is not None and risk_r > 0:
                     pos_act_r = float(
                         pos["trailing_activate_r"]
@@ -1133,44 +1166,47 @@ class TradingBot:
                         if pos.get("breakeven_buffer") is not None
                         else BREAKEVEN_BUFFER
                     )
-                    if direction == "long":
-                        if price <= stop_loss:
-                            close_reason = "trailing_stop" if trailing_active else "stop_loss"
-                        elif not trailing_active and price >= entry_price + eff_act_r * risk_r:
-                            trailing_active = True
-                            act_now = datetime.now(timezone.utc)
-                            stop_loss = MAStrategy.compute_mode_trailing_lock_sl(
-                                "long", entry_price, risk_r, stop_loss,
-                                strategy_mode=pos_mode, activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
-                            )
-                            stop_loss = min(stop_loss, price * 0.9995)
-                            sl_updated = True
-                            pos["trailing_active"] = True
-                            pos["trailing_activated_at"] = act_now
-                            self.broadcast({
-                                "type": "log",
-                                "level": "info",
-                                "message": f"🔒 [{symbol}] 浮盈达 {eff_act_r:.2f}R，已锁定利润止损 ({stop_loss:.4f}) 并开启 {trail_ma_label} 移动止盈",
-                            })
-                    else:  # short
-                        if price >= stop_loss:
-                            close_reason = "trailing_stop" if trailing_active else "stop_loss"
-                        elif not trailing_active and price <= entry_price - eff_act_r * risk_r:
-                            trailing_active = True
-                            act_now = datetime.now(timezone.utc)
-                            stop_loss = MAStrategy.compute_mode_trailing_lock_sl(
-                                "short", entry_price, risk_r, stop_loss,
-                                strategy_mode=pos_mode, activate_r=pos_act_r, breakeven_buffer=pos_be_buf,
-                            )
-                            stop_loss = max(stop_loss, price * 1.0005)
-                            sl_updated = True
-                            pos["trailing_active"] = True
-                            pos["trailing_activated_at"] = act_now
-                            self.broadcast({
-                                "type": "log",
-                                "level": "info",
-                                "message": f"🔒 [{symbol}] 浮盈达 {eff_act_r:.2f}R，已锁定利润止损 ({stop_loss:.4f}) 并开启 {trail_ma_label} 移动止盈",
-                            })
+                    if direction == "long" and price <= stop_loss:
+                        close_reason = "trailing_stop" if trailing_active else "stop_loss"
+                    elif direction == "short" and price >= stop_loss:
+                        close_reason = "trailing_stop" if trailing_active else "stop_loss"
+                    else:
+                        new_ratchet_sl, activated = MAStrategy.compute_dynamic_ratchet_sl(
+                            direction,
+                            entry_price,
+                            risk_r,
+                            stop_loss,
+                            best_price,
+                            strategy_mode=pos_mode,
+                            activate_r=pos_act_r,
+                            breakeven_buffer=pos_be_buf,
+                            live_price=price,
+                        )
+                        if activated:
+                            if not trailing_active:
+                                trailing_active = True
+                                act_now = datetime.now(timezone.utc)
+                                stop_loss = new_ratchet_sl
+                                sl_updated = True
+                                pos["trailing_active"] = True
+                                pos["trailing_activated_at"] = act_now
+                                self.broadcast({
+                                    "type": "log",
+                                    "level": "info",
+                                    "message": f"🔒 [{symbol}] 浮盈达 {eff_act_r:.2f}R，已锁定利润止损 ({stop_loss:.4f}) 并开启 {trail_ma_label} + 动态阶梯锁盈",
+                                })
+                            elif (
+                                (direction == "long" and new_ratchet_sl > stop_loss * 1.0005)
+                                or (direction == "short" and new_ratchet_sl < stop_loss * 0.9995)
+                            ):
+                                stop_loss = new_ratchet_sl
+                                sl_updated = True
+                                peak_r_now = abs(best_price - entry_price) / risk_r
+                                self.broadcast({
+                                    "type": "log",
+                                    "level": "info",
+                                    "message": f"📈 [{symbol}] 浮盈峰值达 {peak_r_now:.2f}R，动态阶梯上移止损 -> {stop_loss:.4f}",
+                                })
 
                 if close_reason:
                     await self._close_trade(symbol, pos, close_reason, price)
@@ -1375,7 +1411,8 @@ class TradingBot:
 
                 self.positions.pop(symbol, None)
                 pos_tf = (pos.get("timeframe") if isinstance(pos, dict) else getattr(pos, "timeframe", None)) or "1m"
-                self.register_close_cooldown(symbol, pos_tf)
+                pos_dir = pos.get("direction") if isinstance(pos, dict) else getattr(pos, "direction", None)
+                self.register_close_cooldown(symbol, pos_tf, direction=pos_dir)
 
                 if trade_dict:
                     self.broadcast({"type": "trade_closed", "trade": trade_dict})

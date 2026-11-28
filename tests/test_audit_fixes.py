@@ -1134,6 +1134,63 @@ class TestThirdAuditFixes(unittest.TestCase):
                 client.post("/api/trading/stop?mode=paper&strategy_mode=all", headers=headers)
                 client.post("/api/trades/clear", headers=headers)
 
+    def test_fast_momentum_and_dynamic_ratchet_sl(self):
+        # 1. Dynamic R-ratchet escalates locked profit from +0.35R -> +0.85R -> (peak_r - 0.65R)
+        sl_1r, act1 = MAStrategy.compute_dynamic_ratchet_sl(
+            "short", 61000.0, 400.0, 61400.0, 60600.0, strategy_mode="balanced"
+        )
+        self.assertTrue(act1)
+        self.assertAlmostEqual(sl_1r, 61000.0 - 0.35 * 400.0, places=2)  # 60860 (+0.35R)
+
+        sl_1_6r, act2 = MAStrategy.compute_dynamic_ratchet_sl(
+            "short", 61000.0, 400.0, sl_1r, 60360.0, strategy_mode="balanced"
+        )
+        self.assertTrue(act2)
+        self.assertAlmostEqual(sl_1_6r, 61000.0 - 0.85 * 400.0, places=2)  # 60660 (+0.85R)
+
+        sl_5r, act3 = MAStrategy.compute_dynamic_ratchet_sl(
+            "short", 61000.0, 400.0, sl_1_6r, 59000.0, strategy_mode="balanced"
+        )
+        self.assertTrue(act3)
+        expected_gap = max(0.85 * 400.0, 61000.0 * 0.0085)
+        self.assertAlmostEqual(sl_5r, 59000.0 + expected_gap, places=2)
+
+        # 2. Fast 1m momentum triggers on high-volume waterfall below HTF MA60 even when HTF gate is None
+        fast_dir = MAStrategy.check_fast_momentum_scalars(
+            o=61135.0,
+            c=61035.0,
+            ma7_seq=(61319.0, 61274.0, 61231.0),
+            ma25_seq=(61386.0, 61371.0, 61355.0),
+            ma60=61408.0,
+            atr14=85.0,
+            htf_ma60=61412.0,
+            recent_opens=(61394.0, 61135.0, 61077.0, 61135.0),
+            recent_closes=(61135.0, 61077.0, 61035.0, 61035.0),
+            close_prev5=61394.0,
+            vol_recent5_avg=350.0,
+            vol_ma20=100.0,
+            strategy_mode="balanced",
+        )
+        self.assertEqual(fast_dir, "short")
+
+        # Low volume chop is strictly rejected
+        chop_dir = MAStrategy.check_fast_momentum_scalars(
+            o=61135.0,
+            c=61035.0,
+            ma7_seq=(61319.0, 61274.0, 61231.0),
+            ma25_seq=(61386.0, 61371.0, 61355.0),
+            ma60=61408.0,
+            atr14=85.0,
+            htf_ma60=61412.0,
+            recent_opens=(61394.0, 61135.0, 61077.0, 61135.0),
+            recent_closes=(61135.0, 61077.0, 61035.0, 61035.0),
+            close_prev5=61394.0,
+            vol_recent5_avg=90.0,
+            vol_ma20=100.0,
+            strategy_mode="balanced",
+        )
+        self.assertIsNone(chop_dir)
+
 
 def tearDownModule():
     db_mod.engine.dispose()

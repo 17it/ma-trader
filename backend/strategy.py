@@ -109,10 +109,13 @@ class MAStrategy:
         strategy_mode: str = STRATEGY_MODE_DEFAULT,
         htf_atr14: float = math.nan,
         htf_ma60: float = math.nan,
+        fast_momentum: bool = False,
+        ltf_atr14: float = math.nan,
     ) -> Tuple[float, float, float]:
         """
         Mode-aware initial stop-loss & reference take-profit:
           - classic : LTF MA60 or signal bar extreme, min 0.3%
+          - fast_momentum (Plan A/B 1m waterfall override): compact ATR/structure stop in [0.45%, 0.75%]
           - balanced: HTF wave volatility stop max(2.0 * HTF_ATR14, 0.8% of entry)
           - breakout: HTF structure stop max(|entry - HTF_MA60|, 1.8 * HTF_ATR14, 0.8% of entry)
         """
@@ -120,14 +123,27 @@ class MAStrategy:
         if mode == "classic":
             return cls.compute_sl_tp(direction, entry_price, ma60, candle_low, candle_high, rr_ratio=rr_ratio)
 
-        ha = 0.0 if (math.isnan(htf_atr14) or htf_atr14 <= 0) else float(htf_atr14)
-        if mode == "balanced":
-            sl_distance = max(2.0 * ha, entry_price * 0.008)
-        else:  # breakout
-            raw_d = 0.0
-            if not math.isnan(htf_ma60) and htf_ma60 > 0:
-                raw_d = (entry_price - htf_ma60) if direction == "long" else (htf_ma60 - entry_price)
-            sl_distance = max(raw_d, 1.8 * ha, entry_price * 0.008)
+        if fast_momentum:
+            la = 0.0 if (math.isnan(ltf_atr14) or ltf_atr14 <= 0) else float(ltf_atr14)
+            ma60_dist = 0.0
+            if not math.isnan(ma60) and ma60 > 0:
+                if direction == "long" and ma60 < entry_price:
+                    ma60_dist = entry_price - ma60
+                elif direction == "short" and ma60 > entry_price:
+                    ma60_dist = ma60 - entry_price
+            base_fast = max(2.2 * la, entry_price * 0.0045)
+            if 0 < ma60_dist <= entry_price * 0.0075:
+                base_fast = max(base_fast, ma60_dist * 1.02)
+            sl_distance = min(entry_price * 0.0075, base_fast)
+        else:
+            ha = 0.0 if (math.isnan(htf_atr14) or htf_atr14 <= 0) else float(htf_atr14)
+            if mode == "balanced":
+                sl_distance = max(2.0 * ha, entry_price * 0.008)
+            else:  # breakout
+                raw_d = 0.0
+                if not math.isnan(htf_ma60) and htf_ma60 > 0:
+                    raw_d = (entry_price - htf_ma60) if direction == "long" else (htf_ma60 - entry_price)
+                sl_distance = min(entry_price * 0.014, max(raw_d, 1.8 * ha, entry_price * 0.008))
 
         if direction == "long":
             stop_loss = entry_price - sl_distance
@@ -216,6 +232,148 @@ class MAStrategy:
         trigger_price = entry_price - eff_act_r * risk_r
         desired = min(entry_price - 0.35 * risk_r, entry_price * 0.998)
         return min(current_stop_loss, max(desired, trigger_price * 1.0005))
+
+    @classmethod
+    def compute_dynamic_ratchet_sl(
+        cls,
+        direction: str,
+        entry_price: float,
+        risk_r: float,
+        current_stop_loss: float,
+        best_price: float,
+        strategy_mode: str = STRATEGY_MODE_DEFAULT,
+        activate_r: float = TRAILING_ACTIVATE_R,
+        breakeven_buffer: float = BREAKEVEN_BUFFER,
+        live_price: Optional[float] = None,
+    ) -> Tuple[float, bool]:
+        """
+        Dynamic R-ratchet profit-lock stop-loss as floating profit expands (Plan A & B):
+          - peak_r >= eff_act_r (1.0R Plan A / 1.2R Plan B): locks +0.35R (floor ±0.2%)
+          - peak_r >= 1.5R: locks +0.85R
+          - peak_r >= 2.0R: continuously trails at max(0.85R, peak_r - 0.85R)
+        Returns (new_stop_loss, is_activated).
+        """
+        if risk_r <= 0 or math.isnan(best_price) or best_price <= 0:
+            return current_stop_loss, False
+
+        mode = cls.normalize_mode(strategy_mode)
+        eff_act_r = cls.effective_activate_r(mode, activate_r)
+        peak_r = (
+            (best_price - entry_price) / risk_r
+            if direction == "long"
+            else (entry_price - best_price) / risk_r
+        )
+        if peak_r < eff_act_r:
+            return current_stop_loss, False
+
+        if mode == "classic":
+            sl = cls.compute_trailing_lock_sl(
+                direction, entry_price, risk_r, current_stop_loss,
+                activate_r=activate_r, breakeven_buffer=breakeven_buffer,
+            )
+            if live_price is not None and live_price > 0:
+                sl = min(sl, live_price * 0.9995) if direction == "long" else max(sl, live_price * 1.0005)
+                sl = max(current_stop_loss, sl) if direction == "long" else min(current_stop_loss, sl)
+            return sl, True
+
+        if peak_r >= 2.0:
+            cushion_pct = 0.010 if mode == "breakout" else 0.0085
+            trail_gap = max(0.85 * risk_r, entry_price * cushion_pct)
+            locked_dist = max(0.85 * risk_r, abs(best_price - entry_price) - trail_gap)
+        elif peak_r >= 1.5:
+            locked_dist = 0.85 * risk_r
+        else:
+            locked_dist = 0.35 * risk_r
+
+        if direction == "long":
+            desired = max(entry_price + locked_dist, entry_price * 1.002)
+            desired = min(desired, best_price * 0.9995)
+            if live_price is not None and live_price > 0:
+                desired = min(desired, live_price * 0.9995)
+            return max(current_stop_loss, desired), True
+
+        desired = min(entry_price - locked_dist, entry_price * 0.998)
+        desired = max(desired, best_price * 1.0005)
+        if live_price is not None and live_price > 0:
+            desired = max(desired, live_price * 1.0005)
+        return min(current_stop_loss, desired), True
+
+    @staticmethod
+    def check_fast_momentum_scalars(
+        o: float,
+        c: float,
+        ma7_seq: Tuple[float, float, float],
+        ma25_seq: Tuple[float, float, float],
+        ma60: float,
+        atr14: float,
+        htf_ma60: float,
+        recent_opens: Tuple[float, ...],
+        recent_closes: Tuple[float, ...],
+        close_prev5: float,
+        vol_recent5_avg: float,
+        vol_ma20: float,
+        strategy_mode: str = "balanced",
+        htf_ma200: float = math.nan,
+    ) -> Optional[str]:
+        """
+        1m Fast One-Way Momentum Override (captures sudden high-volume waterfalls/breakouts
+        when slow 15m MAs haven't finished crossing yet, while still respecting HTF MA60 & MA200 price side):
+          - Plan A (balanced): >=3.8*ATR & >=0.5% 5-bar move, >=2.0x 20-bar volume, 3-line LTF alignment
+          - Plan B (breakout): >=2.8*ATR & >=0.4% 5-bar move, >=1.7x 20-bar volume, LTF MA7/MA25 alignment
+          - Both require: >=3/4 directional 1m candles, current candle directional, and price beyond HTF MA60 (& MA200 if available).
+        """
+        m7_0, m7_1, m7_2 = ma7_seq
+        m25_0, _m25_1, m25_2 = ma25_seq
+        if any(
+            math.isnan(v)
+            for v in (o, c, m7_0, m7_1, m7_2, m25_0, m25_2, ma60, atr14, htf_ma60, close_prev5, vol_recent5_avg, vol_ma20)
+        ):
+            return None
+        if atr14 <= 0 or vol_ma20 <= 0 or len(recent_opens) < 4 or len(recent_closes) < 4:
+            return None
+
+        mode = MAStrategy.normalize_mode(strategy_mode)
+        if mode == "balanced":
+            min_atr_mult = 3.8
+            min_pct = 0.005
+            min_vol_mult = 2.0
+            max_bias_mult = 5.3
+        elif mode == "breakout":
+            min_atr_mult = 2.8
+            min_pct = 0.004
+            min_vol_mult = 1.7
+            max_bias_mult = 4.5
+        else:
+            return None
+
+        if vol_recent5_avg < min_vol_mult * vol_ma20:
+            return None
+        if abs(c - m25_2) > max_bias_mult * atr14:
+            return None
+
+        bull_bars = sum(1 for ro, rc in zip(recent_opens[-4:], recent_closes[-4:]) if rc > ro)
+        bear_bars = sum(1 for ro, rc in zip(recent_opens[-4:], recent_closes[-4:]) if rc < ro)
+        req_move = max(min_atr_mult * atr14, c * min_pct)
+
+        # Fast LONG check (price broke above HTF MA60 lifeline with high-volume 1m burst)
+        if c > o and bull_bars >= 3 and (c - close_prev5) >= req_move and c > htf_ma60:
+            if mode == "balanced":
+                if c > m7_2 > m25_2 > ma60 and m7_0 < m7_1 < m7_2 and m25_2 > m25_0:
+                    return "long"
+            else:
+                if c > m7_2 > m25_2 and c > ma60 and m7_2 > m7_0 and m25_2 > m25_0:
+                    return "long"
+
+        # Fast SHORT check (price broke below HTF MA60 lifeline with high-volume 1m burst)
+        if c < o and bear_bars >= 3 and (close_prev5 - c) >= req_move and c < htf_ma60:
+            if mode == "balanced":
+                if c < m7_2 < m25_2 < ma60 and m7_0 > m7_1 > m7_2 and m25_2 < m25_0:
+                    return "short"
+            else:
+                if c < m7_2 < m25_2 and c < ma60 and m7_2 < m7_0 and m25_2 < m25_0:
+                    return "short"
+
+        return None
 
     # ------------------------------------------------------------------
     # Indicator calculation (MA7 / MA25 / MA60 + ATR14 + optional MA200)
@@ -416,16 +574,18 @@ class MAStrategy:
         strategy_mode: Optional[str] = None,
         htf_ma25: float = math.nan,
         htf_atr14: float = math.nan,
+        fast_dir: Optional[str] = None,
     ) -> Optional[dict]:
         """
         Single-bar entry signal state machine (identical for live and backtest):
           - classic : 3-line alignment + 3-bar MA7/MA25 slope, non-opposing HTF, ATR14 bias, adverse wick
-          - balanced: STRICT HTF trend required + LTF 3-line alignment & MA7 2-bar slope + ATR14 bias + adverse wick
-          - breakout: STRICT HTF strong-spread trend + LTF close & MA7 above/below MA25 + directional body + HTF bias + adverse wick
+          - balanced: STRICT HTF trend required (or fast_dir 1m burst override) + LTF 3-line alignment
+          - breakout: STRICT HTF strong-spread trend (or fast_dir 1m burst override) + LTF breakout
         """
         mode = self.normalize_mode(strategy_mode or self.strategy_mode)
         m7_0, _m7_1, m7_2 = ma7_seq
         _m25_0, _m25_1, m25_2 = ma25_seq
+        used_fast_override = False
 
         if mode == "classic":
             direction = self.check_alignment_scalars(c, ma7_seq, ma25_seq, ma60)
@@ -439,30 +599,32 @@ class MAStrategy:
                 self.reset()
                 return None
         else:
-            # Both Plan A (balanced) and Plan B (breakout) STRICTLY require confirmed HTF trend (no chop entries!)
-            if htf_dir not in ("long", "short"):
-                self.reset()
-                return None
             if any(math.isnan(v) for v in (o, h, l, c, m7_0, m7_2, m25_2, ma60)):
                 self.reset()
                 return None
 
             direction = None
-            if mode == "balanced":
-                if htf_dir == "long" and (c > m7_2 > m25_2 > ma60) and (m7_2 > m7_0) and not self.check_overextended_scalars(c, m25_2, atr14):
-                    direction = "long"
-                elif htf_dir == "short" and (c < m7_2 < m25_2 < ma60) and (m7_2 < m7_0) and not self.check_overextended_scalars(c, m25_2, atr14):
-                    direction = "short"
-            else:  # breakout (Plan B)
-                htf_bias_ok = (
-                    True
-                    if (math.isnan(htf_ma25) or math.isnan(htf_atr14) or htf_atr14 <= 0)
-                    else (abs(c - htf_ma25) <= 1.8 * htf_atr14)
-                )
-                if htf_dir == "long" and (c > m25_2) and (m7_2 > m25_2) and (c > o) and htf_bias_ok:
-                    direction = "long"
-                elif htf_dir == "short" and (c < m25_2) and (m7_2 < m25_2) and (c < o) and htf_bias_ok:
-                    direction = "short"
+            if htf_dir in ("long", "short"):
+                if mode == "balanced":
+                    if htf_dir == "long" and (c > m7_2 > m25_2 > ma60) and (m7_2 > m7_0) and not self.check_overextended_scalars(c, m25_2, atr14):
+                        direction = "long"
+                    elif htf_dir == "short" and (c < m7_2 < m25_2 < ma60) and (m7_2 < m7_0) and not self.check_overextended_scalars(c, m25_2, atr14):
+                        direction = "short"
+                else:  # breakout (Plan B)
+                    htf_bias_ok = (
+                        True
+                        if (math.isnan(htf_ma25) or math.isnan(htf_atr14) or htf_atr14 <= 0)
+                        else (abs(c - htf_ma25) <= 1.8 * htf_atr14)
+                    )
+                    if htf_dir == "long" and (c > m25_2) and (m7_2 > m25_2) and (c > o) and htf_bias_ok:
+                        direction = "long"
+                    elif htf_dir == "short" and (c < m25_2) and (m7_2 < m25_2) and (c < o) and htf_bias_ok:
+                        direction = "short"
+
+            # Fast 1m one-way momentum override when slow 15m MAs haven't crossed yet
+            if direction is None and fast_dir in ("long", "short"):
+                direction = fast_dir
+                used_fast_override = True
 
             if direction is None:
                 self.reset()
@@ -472,14 +634,18 @@ class MAStrategy:
             self.confirm_count = 0
             self._last_direction = direction
 
+        eff_confirm = min(confirm_candles, 2) if used_fast_override else confirm_candles
         self.confirm_count = min(self.confirm_count + 1, confirm_candles)
 
         signal_info = {
             "direction": direction,
             "confirm": self.confirm_count,
-            "max_confirm": confirm_candles,
+            "max_confirm": eff_confirm,
         }
-        if self.confirm_count < confirm_candles:
+        if used_fast_override:
+            signal_info["fast_momentum"] = True
+
+        if self.confirm_count < eff_confirm:
             return {**signal_info, "pending": True}
 
         # Entry-bar-only adverse-wick check: blocks entry on THIS bar without resetting confirm_count
@@ -577,15 +743,19 @@ class MAStrategy:
 
         htf_dir = None
         htf_ma25 = math.nan
+        htf_ma60 = math.nan
+        htf_ma200 = math.nan
         htf_atr14 = math.nan
         if df_htf is not None and len(df_htf) >= 60:
             df_htf_calc = self.calculate_ma(df_htf, include_ma200=(mode != "classic"))
             htf_last = df_htf_calc.iloc[-1]
             htf_ma25 = float(htf_last["ma25"])
+            htf_ma60 = float(htf_last["ma60"])
+            htf_ma200 = float(htf_last["ma200"]) if "ma200" in df_htf_calc.columns else math.nan
             htf_atr14 = float(htf_last["atr14"])
             if mode == "classic":
                 htf_dir = self.check_htf_scalars(
-                    float(htf_last["close"]), float(htf_last["ma7"]), htf_ma25, float(htf_last["ma60"])
+                    float(htf_last["close"]), float(htf_last["ma7"]), htf_ma25, htf_ma60
                 )
             elif len(df_htf_calc) >= 62:
                 prev2 = df_htf_calc.iloc[-3]
@@ -595,22 +765,45 @@ class MAStrategy:
                     htf_ma7=float(htf_last["ma7"]),
                     htf_ma25=htf_ma25,
                     htf_ma25_prev2=float(prev2["ma25"]),
-                    htf_ma60=float(htf_last["ma60"]),
+                    htf_ma60=htf_ma60,
                     htf_ma60_prev2=float(prev2["ma60"]),
-                    htf_ma200=float(htf_last["ma200"]) if "ma200" in df_htf_calc.columns else math.nan,
+                    htf_ma200=htf_ma200,
                     htf_atr14=htf_atr14,
                     strategy_mode=mode,
                 )
 
         ma7_s = df_1m["ma7"].iloc[-3:]
         ma25_s = df_1m["ma25"].iloc[-3:]
+        ma7_tup = (float(ma7_s.iloc[0]), float(ma7_s.iloc[1]), float(ma7_s.iloc[2]))
+        ma25_tup = (float(ma25_s.iloc[0]), float(ma25_s.iloc[1]), float(ma25_s.iloc[2]))
+
+        fast_dir = None
+        if mode in ("balanced", "breakout") and len(df_1m) >= 25 and "volume" in df_1m.columns:
+            vol_s = df_1m["volume"]
+            fast_dir = self.check_fast_momentum_scalars(
+                o=float(last["open"]),
+                c=ltf_close,
+                ma7_seq=ma7_tup,
+                ma25_seq=ma25_tup,
+                ma60=float(last["ma60"]),
+                atr14=float(last["atr14"]),
+                htf_ma60=htf_ma60,
+                recent_opens=tuple(float(x) for x in df_1m["open"].iloc[-4:]),
+                recent_closes=tuple(float(x) for x in df_1m["close"].iloc[-4:]),
+                close_prev5=float(df_1m["close"].iloc[-6]),
+                vol_recent5_avg=float(vol_s.iloc[-5:].mean()),
+                vol_ma20=float(vol_s.iloc[-25:-5].mean()),
+                strategy_mode=mode,
+                htf_ma200=htf_ma200,
+            )
+
         return self.evaluate_bar(
             o=float(last["open"]),
             h=float(last["high"]),
             l=float(last["low"]),
             c=ltf_close,
-            ma7_seq=(float(ma7_s.iloc[0]), float(ma7_s.iloc[1]), float(ma7_s.iloc[2])),
-            ma25_seq=(float(ma25_s.iloc[0]), float(ma25_s.iloc[1]), float(ma25_s.iloc[2])),
+            ma7_seq=ma7_tup,
+            ma25_seq=ma25_tup,
             ma60=float(last["ma60"]),
             atr14=float(last["atr14"]),
             htf_dir=htf_dir,
@@ -618,6 +811,7 @@ class MAStrategy:
             strategy_mode=mode,
             htf_ma25=htf_ma25,
             htf_atr14=htf_atr14,
+            fast_dir=fast_dir,
         )
 
     def check_exit(self, df: pd.DataFrame, position: dict, is_htf_rail: bool = False) -> Optional[str]:

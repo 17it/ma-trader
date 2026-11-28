@@ -256,6 +256,9 @@ class Backtester:
         ltf_high = df_ltf["high"].to_numpy(dtype=float)
         ltf_low = df_ltf["low"].to_numpy(dtype=float)
         ltf_close = df_ltf["close"].to_numpy(dtype=float)
+        ltf_vol = df_ltf["volume"].to_numpy(dtype=float) if "volume" in df_ltf.columns else np.ones(len(df_ltf), dtype=float)
+        ltf_vol_ma5 = pd.Series(ltf_vol).rolling(window=5, min_periods=5).mean().to_numpy(dtype=float)
+        ltf_vol_prior20 = pd.Series(ltf_vol).shift(5).rolling(window=20, min_periods=20).mean().to_numpy(dtype=float)
         ltf_ma7 = df_ltf["ma7"].to_numpy(dtype=float)
         ltf_ma25 = df_ltf["ma25"].to_numpy(dtype=float)
         ltf_ma60 = df_ltf["ma60"].to_numpy(dtype=float)
@@ -278,13 +281,15 @@ class Backtester:
         trade_qty: float = 0.0
         trade_entry_time: int = 0
         trade_entry_fee: float = 0.0
+        trade_best_price: float = 0.0
         trailing_active: bool = False
         cooldown_until_idx: int = -1
+        last_closed_dir: Optional[str] = None
         last_seen_htf_idx: int = -1
         eff_act_r: float = MAStrategy.effective_activate_r(mode, trailing_activate_r)
 
         def record_close(exit_raw_price: float, ts_ms: int, close_reason: str):
-            nonlocal capital, total_fees_paid, in_trade, trailing_active
+            nonlocal capital, total_fees_paid, in_trade, trailing_active, last_closed_dir
             if trade_direction == "long":
                 exit_fill = exit_raw_price * (1.0 - slippage_rate)
                 gross_pnl = (exit_fill - trade_entry) * trade_qty
@@ -312,6 +317,7 @@ class Backtester:
                 "close_reason": close_reason,
                 "result": "win" if net_pnl > 0 else "loss",
             })
+            last_closed_dir = trade_direction
             in_trade = False
             trailing_active = False
 
@@ -346,12 +352,15 @@ class Backtester:
                         if eff_cooldown > 0:
                             cooldown_until_idx = i + eff_cooldown
                     else:
-                        if not trailing_active and trade_risk_r > 0 and h >= trade_entry + eff_act_r * trade_risk_r:
-                            trade_sl = MAStrategy.compute_mode_trailing_lock_sl(
-                                "long", trade_entry, trade_risk_r, trade_sl,
+                        trade_best_price = max(trade_best_price, h)
+                        if trade_risk_r > 0:
+                            new_ratchet_sl, activated = MAStrategy.compute_dynamic_ratchet_sl(
+                                "long", trade_entry, trade_risk_r, trade_sl, trade_best_price,
                                 strategy_mode=mode, activate_r=trailing_activate_r, breakeven_buffer=breakeven_buffer,
                             )
-                            trailing_active = True
+                            if activated:
+                                trade_sl = new_ratchet_sl
+                                trailing_active = True
                         if trailing_active:
                             if mode == "classic":
                                 exit_sig = MAStrategy.evaluate_exit_bar("long", c, trail_ma_val, True, trailing_ma=trailing_ma_key)
@@ -379,12 +388,15 @@ class Backtester:
                         if eff_cooldown > 0:
                             cooldown_until_idx = i + eff_cooldown
                     else:
-                        if not trailing_active and trade_risk_r > 0 and l <= trade_entry - eff_act_r * trade_risk_r:
-                            trade_sl = MAStrategy.compute_mode_trailing_lock_sl(
-                                "short", trade_entry, trade_risk_r, trade_sl,
+                        trade_best_price = min(trade_best_price, l)
+                        if trade_risk_r > 0:
+                            new_ratchet_sl, activated = MAStrategy.compute_dynamic_ratchet_sl(
+                                "short", trade_entry, trade_risk_r, trade_sl, trade_best_price,
                                 strategy_mode=mode, activate_r=trailing_activate_r, breakeven_buffer=breakeven_buffer,
                             )
-                            trailing_active = True
+                            if activated:
+                                trade_sl = new_ratchet_sl
+                                trailing_active = True
                         if trailing_active:
                             if mode == "classic":
                                 exit_sig = MAStrategy.evaluate_exit_bar("short", c, trail_ma_val, True, trailing_ma=trailing_ma_key)
@@ -413,14 +425,37 @@ class Backtester:
             htf_dir = get_closed_htf_direction(htf_idx, c)
             h_ma25 = htf_ma25_arr[htf_idx] if htf_idx >= 0 else math.nan
             h_ma60 = htf_ma60_arr[htf_idx] if htf_idx >= 0 else math.nan
+            h_ma200 = htf_ma200_arr[htf_idx] if (htf_idx >= 0 and htf_ma200_arr is not None) else math.nan
             h_atr = htf_atr14_arr[htf_idx] if htf_idx >= 0 else math.nan
+            ma7_tup = (ltf_ma7[i - 2], ltf_ma7[i - 1], ma7)
+            ma25_tup = (ltf_ma25[i - 2], ltf_ma25[i - 1], ma25)
+
+            fast_dir = None
+            if mode in ("balanced", "breakout") and i >= 25:
+                fast_dir = MAStrategy.check_fast_momentum_scalars(
+                    o=o,
+                    c=c,
+                    ma7_seq=ma7_tup,
+                    ma25_seq=ma25_tup,
+                    ma60=ma60,
+                    atr14=ltf_atr14[i],
+                    htf_ma60=h_ma60,
+                    recent_opens=(ltf_open[i - 3], ltf_open[i - 2], ltf_open[i - 1], o),
+                    recent_closes=(ltf_close[i - 3], ltf_close[i - 2], ltf_close[i - 1], c),
+                    close_prev5=ltf_close[i - 5],
+                    vol_recent5_avg=ltf_vol_ma5[i],
+                    vol_ma20=ltf_vol_prior20[i],
+                    strategy_mode=mode,
+                    htf_ma200=h_ma200,
+                )
+
             sig = strategy.evaluate_bar(
                 o=o,
                 h=h,
                 l=l,
                 c=c,
-                ma7_seq=(ltf_ma7[i - 2], ltf_ma7[i - 1], ma7),
-                ma25_seq=(ltf_ma25[i - 2], ltf_ma25[i - 1], ma25),
+                ma7_seq=ma7_tup,
+                ma25_seq=ma25_tup,
                 ma60=ma60,
                 atr14=ltf_atr14[i],
                 htf_dir=htf_dir,
@@ -428,10 +463,15 @@ class Backtester:
                 strategy_mode=mode,
                 htf_ma25=h_ma25,
                 htf_atr14=h_atr,
+                fast_dir=fast_dir,
             )
 
-            if not in_trade and i >= cooldown_until_idx and sig is not None and not sig.get("pending") and capital > 0:
+            cooldown_ok = (i >= cooldown_until_idx) or bool(
+                sig is not None and sig.get("fast_momentum") and last_closed_dir and sig.get("direction") != last_closed_dir
+            )
+            if not in_trade and cooldown_ok and sig is not None and not sig.get("pending") and capital > 0:
                 direction = sig["direction"]
+                is_fast = bool(sig.get("fast_momentum"))
                 entry_fill = c * (1.0 + slippage_rate) if direction == "long" else c * (1.0 - slippage_rate)
                 sl, tp, risk_r = MAStrategy.compute_mode_sl_tp(
                     direction=direction,
@@ -443,6 +483,8 @@ class Backtester:
                     strategy_mode=mode,
                     htf_atr14=h_atr,
                     htf_ma60=h_ma60,
+                    fast_momentum=is_fast,
+                    ltf_atr14=ltf_atr14[i],
                 )
                 if risk_r > 0:
                     qty = MAStrategy.calc_position_size(
@@ -459,6 +501,7 @@ class Backtester:
                         trailing_active = False
                         trade_direction = direction
                         trade_entry = entry_fill
+                        trade_best_price = entry_fill
                         trade_sl = sl
                         trade_tp = tp
                         trade_risk_r = risk_r
