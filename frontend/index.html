@@ -196,9 +196,12 @@
               </div>
             </div>
             <!-- main kline chart -->
-            <div id="klineChart" class="flex-fill chart-container"></div>
-            <!-- volume chart -->
-            <div id="volumeChart" class="chart-volume mt-1"></div>
+            <div class="position-relative flex-fill d-flex flex-column overflow-hidden">
+              <div id="klineChartHud" class="position-absolute top-0 start-0 px-2 py-1 small" style="z-index:5;pointer-events:none;font-size:11px;line-height:1.45;"></div>
+              <div id="klineChart" class="flex-fill chart-container" style="overscroll-behavior:none;touch-action:none;"></div>
+            </div>
+            <!-- legacy volume container kept hidden (volume is rendered synced inside Lightweight Charts) -->
+            <div id="volumeChart" class="d-none"></div>
           </div>
 
           <!-- right info panel -->
@@ -1531,8 +1534,9 @@
         <!-- Chart Canvas Area -->
         <div class="position-relative border border-secondary-subtle rounded overflow-hidden">
           <div id="klineModalLoading" class="position-absolute top-0 start-0 w-100 h-100 d-none align-items-center justify-content-center" style="z-index:10;background:rgba(13,17,23,0.72);"></div>
-          <div id="klineModalMainChart" style="width:100%;height:430px;"></div>
-          <div id="klineModalVolChart" style="width:100%;height:92px;border-top:1px solid rgba(128,128,128,0.18);"></div>
+          <div id="klineModalHud" class="position-absolute top-0 start-0 px-2 py-1 small" style="z-index:6;pointer-events:none;font-size:11px;line-height:1.45;max-width:75%;"></div>
+          <div id="klineModalMainChart" style="width:100%;height:520px;overscroll-behavior:none;touch-action:none;"></div>
+          <div id="klineModalVolChart" class="d-none"></div>
         </div>
       </div>
     </div>
@@ -1542,10 +1546,11 @@
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/auth.js?v=20261128_2"></script>
-<script src="js/chart.js?v=20261128_2"></script>
-<script src="js/settings.js?v=20261128_2"></script>
-<script src="js/backtest.js?v=20261128_2"></script>
-<script src="js/app.js?v=20261128_2"></script>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
+<script src="js/auth.js?v=20261128_3"></script>
+<script src="js/chart.js?v=20261128_3"></script>
+<script src="js/settings.js?v=20261128_3"></script>
+<script src="js/backtest.js?v=20261128_3"></script>
+<script src="js/app.js?v=20261128_3"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 /**
- * chart.js — ECharts K线图 + MA均线 + 成交量 + 交易标注 (支持日间/夜间模式)
+ * chart.js — TradingView Lightweight Charts (K线图 + MA均线 + 成交量 + B/S买卖标注) & ECharts (统计/权益图)
  */
 
 function getThemeConfig() {
@@ -19,20 +19,184 @@ function getThemeConfig() {
     sliderHandle: isLight ? '#0969da' : '#58a6ff',
     bullish: isLight ? '#1a7f37' : '#3fb950',
     bearish: isLight ? '#cf222e' : '#f85149',
+    buyPin: '#16c784',
+    sellPin: '#f6465d',
     equityAreaStart: isLight ? 'rgba(9,105,218,0.25)' : 'rgba(88,166,255,0.3)',
     equityAreaEnd: isLight ? 'rgba(9,105,218,0.02)' : 'rgba(88,166,255,0.02)',
     equityLine: isLight ? '#0969da' : '#58a6ff'
   };
 }
 
+function _fmtLwcLocalTime(unixSec) {
+  if (unixSec == null || isNaN(unixSec)) return '';
+  const d = new Date(Number(unixSec) * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function _createLwcBundle(containerEl, cfg) {
+  if (!containerEl || typeof LightweightCharts === 'undefined') return null;
+  const chart = LightweightCharts.createChart(containerEl, {
+    width: Math.max(containerEl.clientWidth || 0, 300),
+    height: Math.max(containerEl.clientHeight || 0, 320),
+    layout: {
+      background: { type: 'solid', color: cfg.bg },
+      textColor: cfg.axisLabel,
+      fontSize: 11,
+    },
+    grid: {
+      vertLines: { color: cfg.splitLine },
+      horzLines: { color: cfg.splitLine },
+    },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: { color: cfg.axisLabel, width: 1, style: 2, labelBackgroundColor: cfg.tooltipBorder },
+      horzLine: { color: cfg.axisLabel, width: 1, style: 2, labelBackgroundColor: cfg.tooltipBorder },
+    },
+    localization: {
+      timeFormatter: _fmtLwcLocalTime,
+    },
+    rightPriceScale: {
+      borderColor: cfg.axisLine,
+      scaleMargins: { top: 0.08, bottom: 0.22 },
+    },
+    timeScale: {
+      borderColor: cfg.axisLine,
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 6,
+      barSpacing: 7,
+      minBarSpacing: 1.5,
+      tickMarkFormatter: (t) => _fmtLwcLocalTime(t),
+    },
+    handleScroll: {
+      mouseWheel: true,
+      pressedMouseMove: true,
+      horzTouchDrag: true,
+      vertTouchDrag: false,
+    },
+    handleScale: {
+      mouseWheel: true,
+      pinch: true,
+      axisPressedMouseMove: { price: true, time: true },
+      axisDoubleClickReset: { price: true, time: true },
+    },
+  });
+
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: cfg.bg,
+    downColor: cfg.sellPin,
+    borderUpColor: cfg.buyPin,
+    borderDownColor: cfg.sellPin,
+    wickUpColor: cfg.buyPin,
+    wickDownColor: cfg.sellPin,
+    priceLineVisible: true,
+  });
+
+  const volSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' },
+    priceScaleId: '',
+  });
+  volSeries.priceScale().applyOptions({
+    scaleMargins: { top: 0.80, bottom: 0 },
+  });
+
+  const ma7Series = chart.addLineSeries({
+    color: '#f0b90b',
+    lineWidth: 1.4,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  });
+  const ma25Series = chart.addLineSeries({
+    color: '#ec4899',
+    lineWidth: 1.4,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  });
+  const ma60Series = chart.addLineSeries({
+    color: '#9b6dd6',
+    lineWidth: 1.2,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  });
+
+  return { chart, candleSeries, volSeries, ma7Series, ma25Series, ma60Series };
+}
+
+function _normBarsForLwc(klines) {
+  const map = new Map();
+  (klines || []).forEach((k) => {
+    const rawT = Array.isArray(k) ? k[0] : (k.time ?? k.t ?? k.timestamp ?? 0);
+    const ms = typeof rawT === 'string' ? new Date(rawT).getTime() : Number(rawT);
+    if (!ms || isNaN(ms)) return;
+    const sec = Math.floor(ms / 1000);
+    const o = +(Array.isArray(k) ? k[1] : (k.open ?? k.o ?? 0));
+    const h = +(Array.isArray(k) ? k[2] : (k.high ?? k.h ?? 0));
+    const l = +(Array.isArray(k) ? k[3] : (k.low ?? k.l ?? 0));
+    const c = +(Array.isArray(k) ? k[4] : (k.close ?? k.c ?? 0));
+    const v = +(Array.isArray(k) ? k[5] : (k.volume ?? k.v ?? 0));
+    const ma7 = Array.isArray(k) ? k[6] : k.ma7;
+    const ma25 = Array.isArray(k) ? k[7] : k.ma25;
+    const ma60 = Array.isArray(k) ? k[8] : k.ma60;
+    map.set(sec, { time: sec, open: o, high: h, low: l, close: c, volume: v, ma7, ma25, ma60 });
+  });
+  return Array.from(map.values()).sort((a, b) => a.time - b.time);
+}
+
+function _computeMaLineData(bars, period, precomputedKey) {
+  const out = [];
+  let sum = 0;
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i];
+    sum += b.close;
+    if (i >= period) sum -= bars[i - period].close;
+    const pre = precomputedKey ? b[precomputedKey] : null;
+    if (pre != null && pre !== '-' && !isNaN(Number(pre))) {
+      out.push({ time: b.time, value: +Number(pre).toFixed(4) });
+    } else if (i >= period - 1) {
+      out.push({ time: b.time, value: +(sum / period).toFixed(4) });
+    }
+  }
+  return out;
+}
+
+function _snapTimeToBarSec(secArr, targetMs, stepSec = 60) {
+  if (!secArr.length || isNaN(targetMs)) return null;
+  const targetSec = Math.floor(targetMs / 1000);
+  let lo = 0, hi = secArr.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (secArr[mid] <= targetSec) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (ans < 0) return Math.abs(secArr[0] - targetSec) <= stepSec * 2 ? secArr[0] : null;
+  if (targetSec - secArr[ans] > stepSec * 3 && ans + 1 < secArr.length && Math.abs(secArr[ans + 1] - targetSec) < Math.abs(secArr[ans] - targetSec)) {
+    return secArr[ans + 1];
+  }
+  if (Math.abs(targetSec - secArr[ans]) > stepSec * 6 && ans === secArr.length - 1 && targetSec > secArr[ans]) {
+    return null;
+  }
+  return secArr[ans];
+}
+
+// ─── Homepage Realtime K-line Chart Manager ────────────────────────────
 const ChartManager = (() => {
-  let klineChart = null;
-  let volumeChart = null;
+  let bundle = null;
   let currentData = { klines: [], trades: [] };
-  let currentZoom = null;
+  let lwcBars = [];
+  let barMap = new Map();
+  let maMap = new Map();
   let onReachStartCallback = null;
   let chartResizeObserver = null;
   let resizeRafId = null;
+  let initialZoomApplied = false;
 
   function setOnReachStart(callback) {
     onReachStartCallback = callback;
@@ -40,12 +204,8 @@ const ChartManager = (() => {
 
   function resize() {
     const klineEl = document.getElementById('klineChart');
-    const volEl   = document.getElementById('volumeChart');
-    if (klineEl && klineEl.clientWidth > 0 && klineEl.clientHeight > 0) {
-      klineChart?.resize();
-    }
-    if (volEl && volEl.clientWidth > 0 && volEl.clientHeight > 0) {
-      volumeChart?.resize();
+    if (klineEl && bundle?.chart && klineEl.clientWidth > 0 && klineEl.clientHeight > 0) {
+      bundle.chart.applyOptions({ width: klineEl.clientWidth, height: klineEl.clientHeight });
     }
   }
 
@@ -57,290 +217,181 @@ const ChartManager = (() => {
     });
   }
 
-  // ─── Init ───────────────────────────────────────────────────────────
+  function _updateHud(bar, maVals) {
+    const hud = document.getElementById('klineChartHud');
+    if (!hud || !bar) return;
+    const cfg = getThemeConfig();
+    const diff = bar.close - bar.open;
+    const pct = bar.open ? (diff / bar.open * 100) : 0;
+    const cColor = diff >= 0 ? cfg.buyPin : cfg.sellPin;
+    const sign = diff >= 0 ? '+' : '';
+    const m = maVals || {};
+    const hudBg = cfg.isLight ? 'rgba(255,255,255,0.85)' : 'rgba(13,17,23,0.72)';
+    const hudBorder = cfg.isLight ? 'rgba(208,215,222,0.75)' : 'rgba(48,54,61,0.75)';
+    hud.innerHTML = `
+      <div style="background:${hudBg};backdrop-filter:blur(4px);padding:3px 8px;border-radius:4px;color:${cfg.tooltipText};border:1px solid ${hudBorder};">
+        <span style="color:${cfg.axisLabel}">${_fmtLwcLocalTime(bar.time)}</span>
+        <span class="ms-2">开 <b>${bar.open}</b></span>
+        <span class="ms-2">高 <b>${bar.high}</b></span>
+        <span class="ms-2">低 <b>${bar.low}</b></span>
+        <span class="ms-2">收 <b style="color:${cColor}">${bar.close}</b> (${sign}${pct.toFixed(2)}%)</span>
+        <span class="ms-2">量 <b>${bar.volume.toFixed(2)}</b></span>
+        <span class="ms-2" style="color:#f0b90b">MA7:${m.ma7 ?? '—'}</span>
+        <span class="ms-2" style="color:#ec4899">MA25:${m.ma25 ?? '—'}</span>
+        <span class="ms-2" style="color:#9b6dd6">MA60:${m.ma60 ?? '—'}</span>
+      </div>
+    `;
+  }
+
   function init() {
-    const klineEl  = document.getElementById('klineChart');
-    const volEl    = document.getElementById('volumeChart');
-    if (!klineEl || !volEl) return;
+    const klineEl = document.getElementById('klineChart');
+    if (!klineEl) return;
+
+    if (bundle?.chart) {
+      try { bundle.chart.remove(); } catch {}
+      bundle = null;
+    }
 
     const cfg = getThemeConfig();
-    if (klineChart) {
-      try { echarts.dispose(klineChart); } catch {}
-      klineChart = null;
-    }
-    if (volumeChart) {
-      try { echarts.dispose(volumeChart); } catch {}
-      volumeChart = null;
-    }
+    bundle = _createLwcBundle(klineEl, cfg);
+    if (!bundle) return;
 
-    klineChart  = echarts.init(klineEl,  cfg.echartsTheme, { renderer: 'canvas' });
-    volumeChart = echarts.init(volEl,    cfg.echartsTheme, { renderer: 'canvas' });
-
-    // Link zoom between charts and remember user's current zoom window
-    klineChart.on('datazoom', (evt) => {
-      let start = 0;
-      let end = 100;
-      if (evt.batch && evt.batch.length > 0) {
-        currentZoom = { start: evt.batch[0].start, end: evt.batch[0].end };
-        start = evt.batch[0].start ?? 0;
-        end = evt.batch[0].end ?? 100;
-      } else if (evt.start !== undefined && evt.end !== undefined) {
-        currentZoom = { start: evt.start, end: evt.end };
-        start = evt.start;
-        end = evt.end;
-      }
-      volumeChart?.dispatchAction({ type: 'dataZoom', ...evt });
-
-      // When user drags / scrolls to the leftmost edge (history start), trigger load more
-      if (start <= 0.8 && onReachStartCallback) {
+    bundle.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (range && range.from < 8 && lwcBars.length > 0 && onReachStartCallback) {
         onReachStartCallback();
       }
     });
 
-    if (!chartResizeObserver && typeof ResizeObserver !== 'undefined') {
-      chartResizeObserver = new ResizeObserver(() => {
-        _scheduleResize();
-      });
-      chartResizeObserver.observe(klineEl);
-      if (klineEl.parentElement) {
-        chartResizeObserver.observe(klineEl.parentElement);
-      }
-    }
+    bundle.chart.subscribeCrosshairMove((param) => {
+      if (!lwcBars.length) return;
+      const t = param?.time;
+      const bar = (t != null && barMap.has(t)) ? barMap.get(t) : lwcBars[lwcBars.length - 1];
+      _updateHud(bar, maMap.get(bar.time));
+    });
 
+    if (!chartResizeObserver && typeof ResizeObserver !== 'undefined') {
+      chartResizeObserver = new ResizeObserver(() => _scheduleResize());
+      chartResizeObserver.observe(klineEl);
+      if (klineEl.parentElement) chartResizeObserver.observe(klineEl.parentElement);
+    }
     window.addEventListener('resize', _scheduleResize);
   }
 
-  // ─── Helper: compute MA ─────────────────────────────────────────────
-  function calcMA(data, period) {
-    return data.map((_, i) => {
-      if (i < period - 1) return '-';
-      const slice = data.slice(i - period + 1, i + 1);
-      return +(slice.reduce((s, c) => s + c[1], 0) / period).toFixed(4);
+  function _applyMarkers(trades) {
+    if (!bundle?.candleSeries || !lwcBars.length) return;
+    const secArr = lwcBars.map(b => b.time);
+    const markers = [];
+    (trades || []).forEach((tr) => {
+      const openMs = new Date(tr.open_time).getTime();
+      const eSec = _snapTimeToBarSec(secArr, openMs, 60);
+      if (eSec != null) {
+        const isLong = String(tr.direction || '').toLowerCase() === 'long';
+        markers.push({
+          time: eSec,
+          position: isLong ? 'belowBar' : 'aboveBar',
+          color: isLong ? '#16c784' : '#f6465d',
+          shape: isLong ? 'arrowUp' : 'arrowDown',
+          text: `${isLong ? 'B' : 'S'} #${tr.id}`,
+        });
+      }
+      if (tr.close_time) {
+        const closeMs = new Date(tr.close_time).getTime();
+        const xSec = _snapTimeToBarSec(secArr, closeMs, 60);
+        if (xSec != null) {
+          const isLong = String(tr.direction || '').toLowerCase() === 'long';
+          markers.push({
+            time: xSec,
+            position: isLong ? 'aboveBar' : 'belowBar',
+            color: isLong ? '#f6465d' : '#16c784',
+            shape: isLong ? 'arrowDown' : 'arrowUp',
+            text: `${isLong ? 'S' : 'B'} 平#${tr.id}`,
+          });
+        }
+      }
     });
+    markers.sort((a, b) => a.time - b.time);
+    bundle.candleSeries.setMarkers(markers);
   }
 
-  // ─── Render klines ──────────────────────────────────────────────────
-  function render(klines, trades = []) {
-    if (!klineChart) init();
-    currentData = { klines: klines || [], trades: trades || [] };
+  function _syncAllSeries(preserveRange = false) {
+    if (!bundle) return;
+    const cfg = getThemeConfig();
+    const prevRange = preserveRange ? bundle.chart.timeScale().getVisibleLogicalRange() : null;
 
+    lwcBars = _normBarsForLwc(currentData.klines);
+    barMap = new Map(lwcBars.map(b => [b.time, b]));
+
+    const ma7Data  = _computeMaLineData(lwcBars, 7, 'ma7');
+    const ma25Data = _computeMaLineData(lwcBars, 25, 'ma25');
+    const ma60Data = _computeMaLineData(lwcBars, 60, 'ma60');
+    maMap = new Map();
+    ma7Data.forEach(d  => { const x = maMap.get(d.time) || {}; x.ma7 = d.value; maMap.set(d.time, x); });
+    ma25Data.forEach(d => { const x = maMap.get(d.time) || {}; x.ma25 = d.value; maMap.set(d.time, x); });
+    ma60Data.forEach(d => { const x = maMap.get(d.time) || {}; x.ma60 = d.value; maMap.set(d.time, x); });
+
+    bundle.candleSeries.setData(lwcBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
+    bundle.volSeries.setData(lwcBars.map(b => ({
+      time: b.time,
+      value: b.volume,
+      color: b.close >= b.open ? 'rgba(22, 199, 132, 0.55)' : 'rgba(246, 70, 93, 0.55)',
+    })));
+    bundle.ma7Series.setData(ma7Data);
+    bundle.ma25Series.setData(ma25Data);
+    bundle.ma60Series.setData(ma60Data);
+
+    _applyMarkers(currentData.trades);
+
+    if (lwcBars.length > 0) {
+      const lastBar = lwcBars[lwcBars.length - 1];
+      _updateHud(lastBar, maMap.get(lastBar.time));
+      if (!preserveRange && !initialZoomApplied) {
+        const total = lwcBars.length;
+        bundle.chart.timeScale().setVisibleLogicalRange({
+          from: Math.max(0, total - 120),
+          to: total + 4,
+        });
+        initialZoomApplied = true;
+      } else if (prevRange) {
+        bundle.chart.timeScale().setVisibleLogicalRange(prevRange);
+      }
+    }
+    _scheduleResize();
+  }
+
+  function render(klines, trades = []) {
+    if (!bundle) init();
+    const isFreshLoad = !currentData.klines.length && (klines || []).length > 0;
+    currentData = { klines: klines || [], trades: trades || [] };
     if (!klines || !klines.length) {
-      if (klineChart) klineChart.clear();
-      if (volumeChart) volumeChart.clear();
+      bundle?.candleSeries.setData([]);
+      bundle?.volSeries.setData([]);
+      bundle?.ma7Series.setData([]);
+      bundle?.ma25Series.setData([]);
+      bundle?.ma60Series.setData([]);
       return;
     }
-
-    // Support all candle formats: [t,o,h,l,c,v] or {time,open,high,low,close,volume} or {t,o,h,l,c,v}
-    const norm = klines.map(k => {
-      if (Array.isArray(k)) return k;
-      const t = k.time ?? k.t ?? k.timestamp ?? 0;
-      const o = k.open ?? k.o ?? 0;
-      const h = k.high ?? k.h ?? 0;
-      const l = k.low ?? k.l ?? 0;
-      const c = k.close ?? k.c ?? 0;
-      const v = k.volume ?? k.v ?? 0;
-      return [t, o, h, l, c, v];
-    });
-
-    const times  = norm.map(k => {
-      const d = new Date(k[0]);
-      return isNaN(d.getTime()) ? String(k[0]) : d.toLocaleString('zh-CN', { hour12: false });
-    });
-    const ohlc   = norm.map(k => [+k[1], +k[4], +k[3], +k[2]]);  // ECharts: [o,c,l,h]
-    const vols   = norm.map(k => +k[5]);
-    const closes = norm.map(k => +k[4]);
-
-    const ma7  = calcMA(norm.map(k => [0, +k[4]]), 7);
-    const ma25 = calcMA(norm.map(k => [0, +k[4]]), 25);
-    const ma60 = calcMA(norm.map(k => [0, +k[4]]), 60);
-
-    // ── Trade markers ─────────────────────────────────────────────────
-    const markPoints = { data: [] };
-    if (trades && trades.length) {
-      trades.forEach(tr => {
-        const entryTime = new Date(tr.open_time).getTime();
-        const idx = norm.findIndex(k => Math.abs(k[0] - entryTime) < 90000);
-        if (idx < 0) return;
-
-        if (tr.direction === 'long') {
-          markPoints.data.push({
-            coord: [idx, +norm[idx][3] * 0.9995],
-            name: `▲ 开多 #${tr.id}`,
-            symbol: 'triangle',
-            symbolSize: 12,
-            itemStyle: { color: '#3fb950' },
-            label: { show: false }
-          });
-        } else if (tr.direction === 'short') {
-          markPoints.data.push({
-            coord: [idx, +norm[idx][2] * 1.0005],
-            name: `▼ 开空 #${tr.id}`,
-            symbol: 'triangle',
-            symbolSize: 12,
-            symbolRotate: 180,
-            itemStyle: { color: '#f85149' },
-            label: { show: false }
-          });
-        }
-
-        // close marker
-        if (tr.close_time) {
-          const closeTime = new Date(tr.close_time).getTime();
-          const ci = norm.findIndex(k => Math.abs(k[0] - closeTime) < 90000);
-          if (ci >= 0) {
-            markPoints.data.push({
-              coord: [ci, +norm[ci][4]],
-              name: `× 平仓 #${tr.id}`,
-              symbol: 'circle',
-              symbolSize: 8,
-              itemStyle: { color: '#58a6ff' },
-              label: { show: false }
-            });
-          }
-        }
-      });
-    }
-
-    // ── Tooltip formatter ─────────────────────────────────────────────
-    const cfg = getThemeConfig();
-    const tooltip = {
-      trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      backgroundColor: cfg.tooltipBg,
-      borderColor: cfg.tooltipBorder,
-      textStyle: { color: cfg.tooltipText, fontSize: 12 },
-      formatter(params) {
-        const i = params[0]?.dataIndex;
-        if (i === undefined) return '';
-        const k = norm[i];
-        const o = +k[1], h = +k[2], l = +k[3], c = +k[4], v = +k[5];
-        const pnl = c >= o ? `<span style="color:${cfg.bullish}">+${(c-o).toFixed(2)}</span>` : `<span style="color:${cfg.bearish}">${(c-o).toFixed(2)}</span>`;
-        return `<div>
-          <div style="color:${cfg.axisLabel};margin-bottom:4px">${times[i]}</div>
-          <div>开 <b>${o}</b>  高 <b>${h}</b>  低 <b>${l}</b>  收 <b>${c}</b> ${pnl}</div>
-          <div>量 <b>${v.toFixed(2)}</b></div>
-          <div style="margin-top:4px">
-            <span style="color:#f0c040">MA7: ${ma7[i] !== '-' ? ma7[i] : '—'}</span> &nbsp;
-            <span style="color:#e77ab4">MA25: ${ma25[i] !== '-' ? ma25[i] : '—'}</span> &nbsp;
-            <span style="color:#9b6dd6">MA60: ${ma60[i] !== '-' ? ma60[i] : '—'}</span>
-          </div>
-        </div>`;
-      }
-    };
-
-    // ── Kline chart option ────────────────────────────────────────────
-    klineChart.setOption({
-      backgroundColor: cfg.bg,
-      animation: false,
-      tooltip,
-      grid: { left: 60, right: 10, top: 10, bottom: 60 },
-      xAxis: {
-        type: 'category',
-        data: times,
-        axisLine: { lineStyle: { color: cfg.axisLine } },
-        axisLabel: { color: cfg.axisLabel, fontSize: 10, interval: Math.floor(norm.length / 8) },
-        splitLine: { show: false }
-      },
-      yAxis: {
-        type: 'value',
-        scale: true,
-        axisLine: { lineStyle: { color: cfg.axisLine } },
-        axisLabel: { color: cfg.axisLabel, fontSize: 10 },
-        splitLine: { lineStyle: { color: cfg.splitLine } }
-      },
-      dataZoom: [
-        {
-          type: 'inside',
-          start: currentZoom?.start ?? Math.max(0, 100 - 10000 / norm.length),
-          end: currentZoom?.end ?? 100
-        },
-        {
-          type: 'slider',
-          height: 20,
-          bottom: 0,
-          start: currentZoom?.start ?? Math.max(0, 100 - 10000 / norm.length),
-          end: currentZoom?.end ?? 100,
-          borderColor: cfg.sliderBorder,
-          fillerColor: cfg.sliderFiller,
-          handleStyle: { color: cfg.sliderHandle },
-          textStyle: { color: cfg.axisLabel, fontSize: 10 },
-          labelFormatter: () => ''
-        }
-      ],
-      series: [
-        {
-          name: 'K线',
-          type: 'candlestick',
-          data: ohlc,
-          itemStyle: {
-            color: cfg.bullish,       // bullish
-            color0: cfg.bearish,      // bearish
-            borderColor: cfg.bullish,
-            borderColor0: cfg.bearish
-          },
-          markPoint: markPoints
-        },
-        {
-          name: 'MA7', type: 'line', data: ma7,
-          smooth: true, symbol: 'none', lineStyle: { color: '#f0c040', width: 1.2 }
-        },
-        {
-          name: 'MA25', type: 'line', data: ma25,
-          smooth: true, symbol: 'none', lineStyle: { color: '#e77ab4', width: 1.2 }
-        },
-        {
-          name: 'MA60', type: 'line', data: ma60,
-          smooth: true, symbol: 'none', lineStyle: { color: '#9b6dd6', width: 1.2 }
-        }
-      ]
-    }, true);
-
-    // ── Volume chart ──────────────────────────────────────────────────
-    const volColors = norm.map(k => +k[4] >= +k[1] ? cfg.bullish : cfg.bearish);
-    volumeChart.setOption({
-      backgroundColor: cfg.bg,
-      animation: false,
-      tooltip: { trigger: 'axis', backgroundColor: cfg.tooltipBg, borderColor: cfg.tooltipBorder, textStyle: { color: cfg.tooltipText, fontSize: 12 } },
-      grid: { left: 60, right: 10, top: 4, bottom: 4 },
-      xAxis: { type: 'category', data: times, show: false },
-      yAxis: { type: 'value', show: false, scale: false },
-      dataZoom: [{ type: 'inside', start: Math.max(0, 100 - 10000 / norm.length), end: 100 }],
-      series: [{
-        type: 'bar',
-        data: vols,
-        itemStyle: { color: (p) => volColors[p.dataIndex] },
-        barMaxWidth: 6
-      }]
-    }, true);
-
-    // Ensure ECharts canvas matches actual flex container dimensions even if init ran before layout settled
-    const klineEl = document.getElementById('klineChart');
-    if (klineEl && klineChart && (klineChart.getWidth() !== klineEl.clientWidth || klineChart.getHeight() !== klineEl.clientHeight)) {
-      _scheduleResize();
-    }
+    if (isFreshLoad) initialZoomApplied = false;
+    _syncAllSeries(!isFreshLoad && initialZoomApplied);
   }
 
-  // ─── Highlight a trade's candle ─────────────────────────────────────
   function highlightTrade(tradeOrId) {
-    if (!klineChart) return;
-    const { klines, trades } = currentData;
+    if (!bundle?.chart || !lwcBars.length) return;
     let trade = tradeOrId;
     if (typeof tradeOrId === 'number' || typeof tradeOrId === 'string') {
-      trade = (trades || []).find(t => t.id == tradeOrId);
+      trade = (currentData.trades || []).find(t => t.id == tradeOrId);
     }
     if (!trade || !trade.open_time) return;
-
-    const norm = klines.map(k => {
-      if (Array.isArray(k)) return k;
-      return [k.time ?? k.t ?? 0, k.open ?? k.o ?? 0, k.high ?? k.h ?? 0, k.low ?? k.l ?? 0, k.close ?? k.c ?? 0, k.volume ?? k.v ?? 0];
-    });
-    const entryTime = new Date(trade.open_time).getTime();
-    const idx = norm.findIndex(k => Math.abs(k[0] - entryTime) < 90000);
+    const secArr = lwcBars.map(b => b.time);
+    const eSec = _snapTimeToBarSec(secArr, new Date(trade.open_time).getTime(), 60);
+    if (eSec == null) return;
+    const idx = secArr.indexOf(eSec);
     if (idx < 0) return;
-    klineChart.dispatchAction({ type: 'dataZoom', startValue: Math.max(0, idx - 20), endValue: Math.min(norm.length - 1, idx + 20) });
+    bundle.chart.timeScale().setVisibleLogicalRange({
+      from: Math.max(0, idx - 40),
+      to: Math.min(lwcBars.length + 3, idx + 40),
+    });
   }
 
-  // ─── Append a new live candle / update last from WebSocket ─────────
   function appendCandle(candle) {
     if (!candle) return;
     if (!currentData.klines || !currentData.klines.length) {
@@ -361,7 +412,6 @@ const ChartManager = (() => {
     const rawLastTime = Array.isArray(last) ? last[0] : (last.time ?? last.t);
     const lastTime = typeof rawLastTime === 'string' ? new Date(rawLastTime).getTime() : Number(rawLastTime);
 
-    // If candle belongs to same period/timestamp, update it in-place
     if (lastTime && Math.abs(candleTime - lastTime) < 30000) {
       if (Array.isArray(last)) {
         last[1] = o;
@@ -376,69 +426,83 @@ const ChartManager = (() => {
         last.volume = v;
       }
     } else if (candleTime > lastTime) {
-      // New candle opened, append and keep window size (allow up to 2000 candles for smooth history navigation)
       klines.push([candleTime, o, h, l, c, v]);
       if (klines.length > 2000) klines.shift();
     }
 
-    render(klines, currentData.trades);
+    if (!bundle) {
+      render(klines, currentData.trades);
+      return;
+    }
+    lwcBars = _normBarsForLwc(klines);
+    if (!lwcBars.length) return;
+    const tail = lwcBars[lwcBars.length - 1];
+    barMap.set(tail.time, tail);
+    bundle.candleSeries.update({ time: tail.time, open: tail.open, high: tail.high, low: tail.low, close: tail.close });
+    bundle.volSeries.update({
+      time: tail.time,
+      value: tail.volume,
+      color: tail.close >= tail.open ? 'rgba(22, 199, 132, 0.55)' : 'rgba(246, 70, 93, 0.55)',
+    });
+    const updMa = (period, series, key) => {
+      if (lwcBars.length < period) return null;
+      let s = 0;
+      for (let j = lwcBars.length - period; j < lwcBars.length; j++) s += lwcBars[j].close;
+      const val = +(s / period).toFixed(4);
+      series.update({ time: tail.time, value: val });
+      const cur = maMap.get(tail.time) || {};
+      cur[key] = val;
+      maMap.set(tail.time, cur);
+      return val;
+    };
+    updMa(7, bundle.ma7Series, 'ma7');
+    updMa(25, bundle.ma25Series, 'ma25');
+    updMa(60, bundle.ma60Series, 'ma60');
+    _updateHud(tail, maMap.get(tail.time));
   }
 
-  // ─── Prepend older history candles (Lazy-loading on scroll to start) 
   function prependHistory(olderBars) {
     if (!olderBars || !olderBars.length) return false;
     if (!currentData.klines || !currentData.klines.length) {
       render(olderBars, currentData.trades);
       return true;
     }
-
     const firstCandle = currentData.klines[0];
     const firstTime = Array.isArray(firstCandle) ? firstCandle[0] : (firstCandle.time ?? firstCandle.t ?? 0);
     const firstTimeMs = typeof firstTime === 'string' ? new Date(firstTime).getTime() : Number(firstTime);
 
-    // Only keep bars older than our earliest candle
     const validOlder = olderBars.filter(bar => {
       const t = Array.isArray(bar) ? bar[0] : (bar.time ?? bar.t ?? 0);
       const ms = typeof t === 'string' ? new Date(t).getTime() : Number(t);
       return ms < firstTimeMs;
     });
-
     if (!validOlder.length) return false;
 
-    const oldLen = currentData.klines.length;
-    const addLen = validOlder.length;
-    const newLen = oldLen + addLen;
-
-    // Prepend older candles
+    const oldRange = bundle?.chart.timeScale().getVisibleLogicalRange();
+    const prevLen = lwcBars.length;
     currentData.klines = [...validOlder, ...currentData.klines];
-
-    // Maintain current visible window position smoothly without jump
-    const oldStart = currentZoom?.start ?? 0;
-    const oldEnd = currentZoom?.end ?? 100;
-    const idxStart = (oldStart / 100) * oldLen + addLen;
-    const idxEnd = (oldEnd / 100) * oldLen + addLen;
-
-    currentZoom = {
-      start: Math.max(0, Math.min(100, (idxStart / newLen) * 100)),
-      end: Math.max(0, Math.min(100, (idxEnd / newLen) * 100))
-    };
-
-    render(currentData.klines, currentData.trades);
+    _syncAllSeries(false);
+    const added = lwcBars.length - prevLen;
+    if (oldRange && added > 0 && bundle?.chart) {
+      bundle.chart.timeScale().setVisibleLogicalRange({
+        from: oldRange.from + added,
+        to: oldRange.to + added,
+      });
+    }
     return true;
   }
 
-  // ─── Update theme ──────────────────────────────────────────────────
   function updateTheme() {
     init();
     if (currentData.klines && currentData.klines.length) {
-      render(currentData.klines, currentData.trades);
+      _syncAllSeries(true);
     }
   }
 
   return { init, render, resize, highlightTrade, appendCandle, prependHistory, setOnReachStart, updateTheme };
 })();
 
-// ─── Stats charts ─────────────────────────────────────────────────────
+// ─── Stats charts (ECharts) ────────────────────────────────────────────
 const StatsCharts = (() => {
   let dailyChart = null;
   let symbolChart = null;
@@ -515,7 +579,7 @@ const StatsCharts = (() => {
   return { renderDaily, renderSymbol, updateTheme, resize };
 })();
 
-// ─── Backtest equity chart ─────────────────────────────────────────────
+// ─── Backtest equity chart (ECharts) ───────────────────────────────────
 const BacktestChart = (() => {
   let chart = null;
   let lastData = null;
@@ -546,7 +610,6 @@ const BacktestChart = (() => {
       }]
     });
 
-    // Ensure chart takes full available container dimensions after render / tab switch
     requestAnimationFrame(() => chart?.resize());
     setTimeout(() => chart?.resize(), 50);
     setTimeout(() => chart?.resize(), 250);
@@ -572,11 +635,124 @@ const BacktestChart = (() => {
   return { render, updateTheme, resize };
 })();
 
-// ─── Trade & Backtest K-line Modal (Binance-style B/S Badges + Trade Jumper) ──
+// ─── Trades Equity Curve Chart (ECharts) ───────────────────────────────
+const TradesEquityChart = (() => {
+  let chart = null;
+  let lastData = null;
+
+  function render(dates, equity, pnls = []) {
+    lastData = { dates, equity, pnls };
+    const el = document.getElementById('tradesEquityChart');
+    if (!el) return;
+    const cfg = getThemeConfig();
+
+    if (!chart) {
+      chart = echarts.init(el, cfg.echartsTheme);
+    } else {
+      chart.resize();
+    }
+
+    if (!dates || dates.length === 0) {
+      chart.clear();
+      chart.setOption({
+        backgroundColor: 'transparent',
+        title: {
+          text: '暂无已平仓交易记录',
+          left: 'center',
+          top: 'middle',
+          textStyle: { color: cfg.axisLabel, fontSize: 13, fontWeight: 'normal' }
+        }
+      });
+      return;
+    }
+
+    chart.setOption({
+      backgroundColor: 'transparent',
+      animation: false,
+      title: { show: false },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: cfg.tooltipBg,
+        borderColor: cfg.tooltipBorder,
+        textStyle: { color: cfg.tooltipText, fontSize: 12 },
+        formatter: (params) => {
+          const p = params && params[0];
+          if (!p) return '';
+          const idx = p.dataIndex;
+          const eqVal = Number(p.value).toFixed(2);
+          const tradePnl = pnls[idx];
+          let html = `<div style="font-weight:600;margin-bottom:4px;">${p.axisValue}</div>`;
+          html += `<div>累计权益: <b>$${eqVal}</b></div>`;
+          if (tradePnl !== null && tradePnl !== undefined) {
+            const sign = tradePnl >= 0 ? '+' : '';
+            const color = tradePnl >= 0 ? cfg.bullish : cfg.bearish;
+            html += `<div>当笔盈亏: <span style="color:${color};font-weight:600;">${sign}$${Number(tradePnl).toFixed(2)}</span></div>`;
+          }
+          return html;
+        }
+      },
+      grid: { left: 65, right: 18, top: 16, bottom: 42 },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        axisLabel: { color: cfg.axisLabel, fontSize: 10, rotate: 25 },
+        axisLine: { lineStyle: { color: cfg.axisLine } }
+      },
+      yAxis: {
+        type: 'value',
+        scale: true,
+        axisLabel: { color: cfg.axisLabel, fontSize: 10, formatter: '${value}' },
+        splitLine: { lineStyle: { color: cfg.splitLine } }
+      },
+      series: [{
+        name: '权益',
+        type: 'line',
+        data: equity,
+        smooth: true,
+        symbol: 'circle',
+        symbolSize: 5,
+        lineStyle: { color: cfg.equityLine, width: 2 },
+        itemStyle: { color: cfg.equityLine },
+        areaStyle: {
+          color: {
+            type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [
+              { offset: 0, color: cfg.equityAreaStart },
+              { offset: 1, color: cfg.equityAreaEnd }
+            ]
+          }
+        }
+      }]
+    }, true);
+
+    requestAnimationFrame(() => chart?.resize());
+    setTimeout(() => chart?.resize(), 60);
+  }
+
+  function resize() {
+    if (chart) {
+      chart.resize();
+    } else if (lastData) {
+      render(lastData.dates, lastData.equity, lastData.pnls);
+    }
+  }
+
+  function updateTheme() {
+    if (chart) {
+      try { echarts.dispose(chart); } catch {}
+      chart = null;
+    }
+    if (lastData) render(lastData.dates, lastData.equity, lastData.pnls);
+  }
+
+  window.addEventListener('resize', () => chart?.resize());
+  return { render, updateTheme, resize };
+})();
+
+// ─── Trade & Backtest K-line Modal (Lightweight Charts + Clean B/S Markers) ─
 const TradeKlineModal = (() => {
   let modalInstance = null;
-  let mainChart = null;
-  let volChart = null;
+  let bundle = null;
   let resizeObs = null;
 
   const TF_MS = {
@@ -590,10 +766,6 @@ const TradeKlineModal = (() => {
     '4h': 14_400_000,
     '1d': 86_400_000,
   };
-
-  // Speech-bubble SVG paths matching Binance B (bottom-up pointer) & S (top-down pointer)
-  const PIN_BUY_SVG  = 'path://M0,-10 L3.6,-5 L6,-5 Q10,-5 10,-1 L10,9 Q10,13 6,13 L-6,13 Q-10,13 -10,9 L-10,-1 Q-10,-5 -6,-5 L-3.6,-5 Z';
-  const PIN_SELL_SVG = 'path://M-6,-13 L6,-13 Q10,-13 10,-9 L10,1 Q10,5 6,5 L3.6,5 L0,10 L-3.6,5 L-6,5 Q-10,5 -10,1 L-10,-9 Q-10,-13 -6,-13 Z';
 
   const REASON_LABELS = {
     stop_loss: '初始止损',
@@ -620,12 +792,16 @@ const TradeKlineModal = (() => {
     timeframe: '1m',
     baseRangeStartMs: null,
     baseRangeEndMs: null,
-    bars: [],           // [[ts, o, h, l, c, v, ma7, ma25, ma60], ...]
+    bars: [],
+    lwcBars: [],
+    barMap: new Map(),
+    maMap: new Map(),
+    eventsBySec: new Map(),
     hasMoreLeft: false,
     requestedStartMs: 0,
     loadingMore: false,
     selectedTradeIdx: -1,
-    zoomRange: null,    // { startValue, endValue } or null
+    preserveLogicalRange: null,
   };
 
   function _esc(s) {
@@ -683,28 +859,64 @@ const TradeKlineModal = (() => {
     return st.allTrades.filter(t => t.symbol === st.symbol);
   }
 
+  function _updateHud(bar) {
+    const hud = document.getElementById('klineModalHud');
+    if (!hud || !bar) return;
+    const cfg = getThemeConfig();
+    const diff = bar.close - bar.open;
+    const pct = bar.open ? (diff / bar.open * 100) : 0;
+    const cColor = diff >= 0 ? cfg.buyPin : cfg.sellPin;
+    const sign = diff >= 0 ? '+' : '';
+    const m = st.maMap.get(bar.time) || {};
+    const evs = st.eventsBySec.get(bar.time) || [];
+    const evHtml = evs.length
+      ? `<div style="margin-top:3px;padding-top:3px;border-top:1px solid rgba(128,128,128,0.22);">${evs.join(' &nbsp;|&nbsp; ')}</div>`
+      : '';
+    const hudBg = cfg.isLight ? 'rgba(255,255,255,0.88)' : 'rgba(13,17,23,0.72)';
+    const hudBorder = cfg.isLight ? 'rgba(208,215,222,0.75)' : 'rgba(48,54,61,0.75)';
+    hud.innerHTML = `
+      <div style="background:${hudBg};backdrop-filter:blur(4px);padding:4px 8px;border-radius:4px;color:${cfg.tooltipText};border:1px solid ${hudBorder};">
+        <div>
+          <span style="color:${cfg.axisLabel}">${_fmtLwcLocalTime(bar.time)}</span>
+          <span class="ms-2">开 <b>${bar.open}</b></span>
+          <span class="ms-2">高 <b>${bar.high}</b></span>
+          <span class="ms-2">低 <b>${bar.low}</b></span>
+          <span class="ms-2">收 <b style="color:${cColor}">${bar.close}</b> (${sign}${pct.toFixed(2)}%)</span>
+          <span class="ms-2">量 <b>${bar.volume.toFixed(2)}</b></span>
+          <span class="ms-2" style="color:#f0b90b">MA7:${m.ma7 ?? '—'}</span>
+          <span class="ms-2" style="color:#ec4899">MA25:${m.ma25 ?? '—'}</span>
+          <span class="ms-2" style="color:#9b6dd6">MA60:${m.ma60 ?? '—'}</span>
+        </div>
+        ${evHtml}
+      </div>
+    `;
+  }
+
   function _ensureCharts() {
     const mainEl = document.getElementById('klineModalMainChart');
-    const volEl  = document.getElementById('klineModalVolChart');
-    if (!mainEl || !volEl) return;
-    const cfg = getThemeConfig();
+    if (!mainEl) return;
+    if (!bundle) {
+      bundle = _createLwcBundle(mainEl, getThemeConfig());
+      if (!bundle) return;
 
-    if (!mainChart) {
-      mainChart = echarts.init(mainEl, cfg.echartsTheme, { renderer: 'canvas' });
-      volChart  = echarts.init(volEl, cfg.echartsTheme, { renderer: 'canvas' });
-
-      mainChart.on('datazoom', (evt) => {
-        volChart?.dispatchAction({ type: 'dataZoom', ...evt });
-        let startPct = evt.batch?.[0]?.start ?? evt.start;
-        if (startPct !== undefined && startPct <= 1.5 && st.hasMoreLeft && !st.loadingMore) {
+      bundle.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+        if (range && range.from < 10 && st.hasMoreLeft && !st.loadingMore) {
           _loadOlderHistory();
         }
       });
 
+      bundle.chart.subscribeCrosshairMove((param) => {
+        if (!st.lwcBars.length) return;
+        const t = param?.time;
+        const bar = (t != null && st.barMap.has(t)) ? st.barMap.get(t) : st.lwcBars[st.lwcBars.length - 1];
+        _updateHud(bar);
+      });
+
       if (!resizeObs && typeof ResizeObserver !== 'undefined') {
         resizeObs = new ResizeObserver(() => {
-          if (mainEl.clientWidth > 0 && mainEl.clientHeight > 0) mainChart?.resize();
-          if (volEl.clientWidth > 0 && volEl.clientHeight > 0) volChart?.resize();
+          if (mainEl.clientWidth > 0 && mainEl.clientHeight > 0 && bundle?.chart) {
+            bundle.chart.applyOptions({ width: mainEl.clientWidth, height: mainEl.clientHeight });
+          }
         });
         resizeObs.observe(mainEl);
       }
@@ -712,8 +924,10 @@ const TradeKlineModal = (() => {
   }
 
   function _disposeCharts() {
-    if (mainChart) { try { echarts.dispose(mainChart); } catch {} mainChart = null; }
-    if (volChart)  { try { echarts.dispose(volChart); } catch {} volChart = null; }
+    if (bundle?.chart) {
+      try { bundle.chart.remove(); } catch {}
+      bundle = null;
+    }
   }
 
   function _bindDomOnce() {
@@ -723,8 +937,10 @@ const TradeKlineModal = (() => {
 
     modalEl.addEventListener('shown.bs.modal', () => {
       _ensureCharts();
-      mainChart?.resize();
-      volChart?.resize();
+      const mainEl = document.getElementById('klineModalMainChart');
+      if (mainEl && bundle?.chart && mainEl.clientWidth > 0) {
+        bundle.chart.applyOptions({ width: mainEl.clientWidth, height: mainEl.clientHeight });
+      }
       if (st.bars.length > 0) _renderChart();
     });
 
@@ -733,7 +949,7 @@ const TradeKlineModal = (() => {
       symSel.addEventListener('change', (e) => {
         st.symbol = e.target.value;
         st.selectedTradeIdx = -1;
-        st.zoomRange = null;
+        st.preserveLogicalRange = null;
         _populateTradeSelector();
         _loadWindowForSymbol();
       });
@@ -744,7 +960,7 @@ const TradeKlineModal = (() => {
         const tf = btn.getAttribute('data-km-tf');
         if (!tf || tf === st.timeframe) return;
         st.timeframe = tf;
-        st.zoomRange = null;
+        st.preserveLogicalRange = null;
         _syncTfButtons();
         _loadWindowForSymbol();
       });
@@ -903,16 +1119,15 @@ const TradeKlineModal = (() => {
         const body = await res.json();
         const older = (body.bars || []).filter(b => b[0] < earliestLoaded);
         if (older.length > 0) {
-          const oldOpt = mainChart?.getOption();
-          const dz = oldOpt?.dataZoom?.[0];
-          const oldStartIdx = dz ? Math.round((dz.start / 100) * st.bars.length) : 0;
-          const oldEndIdx   = dz ? Math.round((dz.end / 100) * st.bars.length) : st.bars.length - 1;
+          const prevRange = bundle?.chart.timeScale().getVisibleLogicalRange();
+          const prevLen = st.lwcBars.length;
           st.bars = [...older, ...st.bars];
           st.hasMoreLeft = st.bars[0][0] > st.requestedStartMs + stepMs;
-          st.zoomRange = {
-            startValue: oldStartIdx + older.length,
-            endValue: oldEndIdx + older.length,
-          };
+          const nextLwc = _normBarsForLwc(st.bars);
+          const added = nextLwc.length - prevLen;
+          st.preserveLogicalRange = prevRange
+            ? { from: prevRange.from + Math.max(0, added), to: prevRange.to + Math.max(0, added) }
+            : null;
           _renderChart();
         } else {
           st.hasMoreLeft = false;
@@ -925,30 +1140,6 @@ const TradeKlineModal = (() => {
     }
   }
 
-  function _findBarIdx(tsArr, targetMs, stepMs) {
-    if (!tsArr.length || isNaN(targetMs)) return -1;
-    let lo = 0, hi = tsArr.length - 1, ans = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (tsArr[mid] <= targetMs) {
-        ans = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    if (ans < 0) {
-      return Math.abs(tsArr[0] - targetMs) <= stepMs * 2 ? 0 : -1;
-    }
-    if (targetMs - tsArr[ans] > stepMs * 3 && ans + 1 < tsArr.length && Math.abs(tsArr[ans + 1] - targetMs) < Math.abs(tsArr[ans] - targetMs)) {
-      return ans + 1;
-    }
-    if (Math.abs(targetMs - tsArr[ans]) > stepMs * 6 && ans === tsArr.length - 1 && targetMs > tsArr[ans]) {
-      return -1;
-    }
-    return ans;
-  }
-
   async function jumpToTradeIndex(idx) {
     const list = _filteredTrades();
     if (idx < 0 || idx >= list.length) return;
@@ -958,320 +1149,155 @@ const TradeKlineModal = (() => {
 
     const tr = list[idx];
     const stepMs = TF_MS[st.timeframe] || 60_000;
+    const stepSec = Math.max(60, Math.floor(stepMs / 1000));
     const firstLoaded = st.bars.length ? st.bars[0][0] : Infinity;
     const lastLoaded  = st.bars.length ? st.bars[st.bars.length - 1][0] : -Infinity;
     const endRef = (!isNaN(tr.exitMs) && tr.exitMs > 0) ? tr.exitMs : tr.entryMs;
 
-    // If trade lies outside currently loaded window (e.g. multi-month 1m backtest), load centered window!
     if (tr.entryMs < firstLoaded || tr.entryMs > lastLoaded + stepMs * 2) {
       const winStart = Math.max(0, tr.entryMs - 1200 * stepMs);
       const winEnd   = Math.max(endRef + 1200 * stepMs, tr.entryMs + 2000 * stepMs);
-      st.zoomRange = null;
+      st.preserveLogicalRange = null;
       await _loadWindowForSymbol(winStart, winEnd);
     }
 
-    const tsArr = st.bars.map(b => b[0]);
-    const eIdx = _findBarIdx(tsArr, tr.entryMs, stepMs);
-    const xIdx = (!isNaN(tr.exitMs) && tr.exitMs > 0) ? _findBarIdx(tsArr, tr.exitMs, stepMs) : eIdx;
-    if (eIdx >= 0 && mainChart) {
+    const secArr = st.lwcBars.map(b => b.time);
+    const eSec = _snapTimeToBarSec(secArr, tr.entryMs, stepSec);
+    const xSec = (!isNaN(tr.exitMs) && tr.exitMs > 0) ? _snapTimeToBarSec(secArr, tr.exitMs, stepSec) : eSec;
+    if (eSec != null && bundle?.chart) {
+      const eIdx = secArr.indexOf(eSec);
+      const xIdx = xSec != null ? secArr.indexOf(xSec) : eIdx;
       const loIdx = Math.max(0, Math.min(eIdx, xIdx >= 0 ? xIdx : eIdx) - 35);
-      const hiIdx = Math.min(st.bars.length - 1, Math.max(eIdx, xIdx >= 0 ? xIdx : eIdx) + 35);
-      mainChart.dispatchAction({ type: 'dataZoom', startValue: loIdx, endValue: hiIdx });
-      volChart?.dispatchAction({ type: 'dataZoom', startValue: loIdx, endValue: hiIdx });
+      const hiIdx = Math.min(st.lwcBars.length + 4, Math.max(eIdx, xIdx >= 0 ? xIdx : eIdx) + 35);
+      bundle.chart.timeScale().setVisibleLogicalRange({ from: loIdx, to: hiIdx });
     }
   }
 
   function _resetGlobalZoom() {
-    if (!mainChart || !st.bars.length) return;
-    const total = st.bars.length;
-    const startVal = total > 220 ? total - 180 : 0;
-    mainChart.dispatchAction({ type: 'dataZoom', startValue: startVal, endValue: total - 1 });
-    volChart?.dispatchAction({ type: 'dataZoom', startValue: startVal, endValue: total - 1 });
+    if (!bundle?.chart || !st.lwcBars.length) return;
+    const total = st.lwcBars.length;
+    bundle.chart.timeScale().setVisibleLogicalRange({
+      from: Math.max(0, total - 160),
+      to: total + 4,
+    });
   }
 
   function _renderChart() {
-    if (!mainChart || !volChart || !st.bars.length) return;
-    const cfg = getThemeConfig();
-    const bars = st.bars;
+    if (!bundle || !st.bars.length) return;
     const stepMs = TF_MS[st.timeframe] || 60_000;
-    const tsArr = bars.map(b => b[0]);
-    const times = bars.map(b => _fmtTime(b[0]));
-    const ohlc  = bars.map(b => [b[1], b[4], b[3], b[2]]); // [open, close, low, high]
-    const vols  = bars.map(b => b[5]);
-    const ma7   = bars.map(b => b[6] != null ? b[6] : '-');
-    const ma25  = bars.map(b => b[7] != null ? b[7] : '-');
-    const ma60  = bars.map(b => b[8] != null ? b[8] : '-');
+    const stepSec = Math.max(60, Math.floor(stepMs / 1000));
 
-    const buyColor  = '#16c784';
-    const sellColor = '#f6465d';
+    st.lwcBars = _normBarsForLwc(st.bars);
+    st.barMap = new Map(st.lwcBars.map(b => [b.time, b]));
+    const secArr = st.lwcBars.map(b => b.time);
 
-    // Build B/S markPoints, entry->exit dashed lines, and per-bar tooltip map
-    const eventsByBar = new Map();
-    const bottomStack = new Map();
-    const topStack    = new Map();
-    const markPoints  = [
-      {
-        name: '最高',
-        type: 'max',
-        valueDim: 'highest',
-        symbol: 'circle',
-        symbolSize: 4,
-        itemStyle: { color: cfg.axisLabel },
-        label: {
-          show: true,
-          position: 'left',
-          distance: 6,
-          color: cfg.tooltipText,
-          fontSize: 11,
-          formatter: (p) => `${Number(p.value).toLocaleString(undefined, { maximumFractionDigits: 2 })} —`,
-        },
-      },
-      {
-        name: '最低',
-        type: 'min',
-        valueDim: 'lowest',
-        symbol: 'circle',
-        symbolSize: 4,
-        itemStyle: { color: cfg.axisLabel },
-        label: {
-          show: true,
-          position: 'left',
-          distance: 6,
-          color: cfg.tooltipText,
-          fontSize: 11,
-          formatter: (p) => `${Number(p.value).toLocaleString(undefined, { maximumFractionDigits: 2 })} —`,
-        },
-      },
-    ];
-    const markLines = [];
+    const ma7Data  = _computeMaLineData(st.lwcBars, 7, 'ma7');
+    const ma25Data = _computeMaLineData(st.lwcBars, 25, 'ma25');
+    const ma60Data = _computeMaLineData(st.lwcBars, 60, 'ma60');
+    st.maMap = new Map();
+    ma7Data.forEach(d  => { const x = st.maMap.get(d.time) || {}; x.ma7 = d.value; st.maMap.set(d.time, x); });
+    ma25Data.forEach(d => { const x = st.maMap.get(d.time) || {}; x.ma25 = d.value; st.maMap.set(d.time, x); });
+    ma60Data.forEach(d => { const x = st.maMap.get(d.time) || {}; x.ma60 = d.value; st.maMap.set(d.time, x); });
 
-    const trades = _filteredTrades();
+    bundle.candleSeries.setData(st.lwcBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
+    bundle.volSeries.setData(st.lwcBars.map(b => ({
+      time: b.time,
+      value: b.volume,
+      color: b.close >= b.open ? 'rgba(22, 199, 132, 0.55)' : 'rgba(246, 70, 93, 0.55)',
+    })));
+    bundle.ma7Series.setData(ma7Data);
+    bundle.ma25Series.setData(ma25Data);
+    bundle.ma60Series.setData(ma60Data);
+
+    // Build clean Binance-style B/S markers (no dashed lines!)
+    st.eventsBySec = new Map();
+    const markers = [];
     let matchedMarkers = 0;
-
-    const pushEvent = (barIdx, info) => {
-      if (!eventsByBar.has(barIdx)) eventsByBar.set(barIdx, []);
-      eventsByBar.get(barIdx).push(info);
+    const pushEv = (sec, html) => {
+      if (!st.eventsBySec.has(sec)) st.eventsBySec.set(sec, []);
+      st.eventsBySec.get(sec).push(html);
     };
 
+    const trades = _filteredTrades();
     trades.forEach((tr) => {
-      const eIdx = _findBarIdx(tsArr, tr.entryMs, stepMs);
-      const xIdx = (!isNaN(tr.exitMs) && tr.exitMs > 0) ? _findBarIdx(tsArr, tr.exitMs, stepMs) : -1;
+      const eSec = _snapTimeToBarSec(secArr, tr.entryMs, stepSec);
+      const xSec = (!isNaN(tr.exitMs) && tr.exitMs > 0) ? _snapTimeToBarSec(secArr, tr.exitMs, stepSec) : null;
 
-      // Entry action: Long -> Buy (B below low), Short -> Sell (S above high)
-      if (eIdx >= 0) {
+      if (eSec != null) {
         matchedMarkers++;
         const isBuy = tr.direction === 'long';
         const actionLabel = isBuy ? '买入开多' : '卖出开空';
         const stratSuffix = tr.strategyMode ? ` [${tr.strategyMode}]` : '';
-        const detailHtml = `<span style="color:${isBuy ? buyColor : sellColor};font-weight:700">${isBuy ? 'B' : 'S'} ${actionLabel}</span> <b>${_esc(tr.displayId)}</b> @ <b>${tr.entryPrice.toFixed(2)}</b>${_esc(stratSuffix)}`;
-        pushEvent(eIdx, detailHtml);
-
-        if (isBuy) {
-          const stk = bottomStack.get(eIdx) || 0;
-          bottomStack.set(eIdx, stk + 1);
-          markPoints.push({
-            coord: [eIdx, bars[eIdx][3]],
-            symbol: PIN_BUY_SVG,
-            symbolSize: [20, 23],
-            symbolOffset: [0, 15 + stk * 25],
-            itemStyle: { color: buyColor },
-            label: { show: true, formatter: 'B', color: '#fff', fontWeight: 'bold', fontSize: 11, offset: [0, 2] },
-            tooltip: { formatter: () => `${_fmtTime(tr.entryMs)}<br/>${detailHtml}` },
-          });
-        } else {
-          const stk = topStack.get(eIdx) || 0;
-          topStack.set(eIdx, stk + 1);
-          markPoints.push({
-            coord: [eIdx, bars[eIdx][2]],
-            symbol: PIN_SELL_SVG,
-            symbolSize: [20, 23],
-            symbolOffset: [0, -15 - stk * 25],
-            itemStyle: { color: sellColor },
-            label: { show: true, formatter: 'S', color: '#fff', fontWeight: 'bold', fontSize: 11, offset: [0, -2] },
-            tooltip: { formatter: () => `${_fmtTime(tr.entryMs)}<br/>${detailHtml}` },
-          });
-        }
+        pushEv(
+          eSec,
+          `<span style="color:${isBuy ? '#16c784' : '#f6465d'};font-weight:700">${isBuy ? 'B' : 'S'} ${actionLabel}</span> <b>${_esc(tr.displayId)}</b>@${tr.entryPrice.toFixed(2)}${_esc(stratSuffix)}`
+        );
+        markers.push({
+          time: eSec,
+          position: isBuy ? 'belowBar' : 'aboveBar',
+          color: isBuy ? '#16c784' : '#f6465d',
+          shape: isBuy ? 'arrowUp' : 'arrowDown',
+          text: `${isBuy ? 'B' : 'S'}`,
+        });
       }
 
-      // Exit action: Long -> Sell (S above high), Short -> Buy (B below low)
-      if (xIdx >= 0 && tr.exitPrice != null) {
+      if (xSec != null && tr.exitPrice != null) {
         matchedMarkers++;
-        const isBuy = tr.direction === 'short'; // closing a short = Buy!
+        const isBuy = tr.direction === 'short'; // closing short = Buy
         const actionLabel = isBuy ? '买入平空' : '卖出平多';
         const pnlSign = (tr.pnl || 0) >= 0 ? '+' : '';
-        const pnlColor = (tr.pnl || 0) >= 0 ? buyColor : sellColor;
-        const pnlStr = tr.pnl != null ? ` · <span style="color:${pnlColor};font-weight:700">${pnlSign}$${tr.pnl.toFixed(2)}</span>` : '';
+        const pnlColor = (tr.pnl || 0) >= 0 ? '#16c784' : '#f6465d';
+        const pnlStr = tr.pnl != null ? ` <span style="color:${pnlColor};font-weight:700">${pnlSign}$${tr.pnl.toFixed(2)}</span>` : '';
         const rsnStr = tr.closeReason ? ` (${REASON_LABELS[tr.closeReason] || tr.closeReason})` : '';
-        const detailHtml = `<span style="color:${isBuy ? buyColor : sellColor};font-weight:700">${isBuy ? 'B' : 'S'} ${actionLabel}</span> <b>${_esc(tr.displayId)}</b> @ <b>${tr.exitPrice.toFixed(2)}</b>${pnlStr}${_esc(rsnStr)}`;
-        pushEvent(xIdx, detailHtml);
-
-        if (isBuy) {
-          const stk = bottomStack.get(xIdx) || 0;
-          bottomStack.set(xIdx, stk + 1);
-          markPoints.push({
-            coord: [xIdx, bars[xIdx][3]],
-            symbol: PIN_BUY_SVG,
-            symbolSize: [20, 23],
-            symbolOffset: [0, 15 + stk * 25],
-            itemStyle: { color: buyColor },
-            label: { show: true, formatter: 'B', color: '#fff', fontWeight: 'bold', fontSize: 11, offset: [0, 2] },
-            tooltip: { formatter: () => `${_fmtTime(tr.exitMs)}<br/>${detailHtml}` },
-          });
-        } else {
-          const stk = topStack.get(xIdx) || 0;
-          topStack.set(xIdx, stk + 1);
-          markPoints.push({
-            coord: [xIdx, bars[xIdx][2]],
-            symbol: PIN_SELL_SVG,
-            symbolSize: [20, 23],
-            symbolOffset: [0, -15 - stk * 25],
-            itemStyle: { color: sellColor },
-            label: { show: true, formatter: 'S', color: '#fff', fontWeight: 'bold', fontSize: 11, offset: [0, -2] },
-            tooltip: { formatter: () => `${_fmtTime(tr.exitMs)}<br/>${detailHtml}` },
-          });
-        }
-
-        if (eIdx >= 0) {
-          const winLineColor = (tr.pnl || 0) >= 0 ? 'rgba(22, 199, 132, 0.55)' : 'rgba(246, 70, 93, 0.55)';
-          markLines.push([
-            { coord: [eIdx, tr.entryPrice], lineStyle: { color: winLineColor, width: 1.4, type: 'dashed' } },
-            { coord: [xIdx, tr.exitPrice] },
-          ]);
-        }
+        pushEv(
+          xSec,
+          `<span style="color:${isBuy ? '#16c784' : '#f6465d'};font-weight:700">${isBuy ? 'B' : 'S'} ${actionLabel}</span> <b>${_esc(tr.displayId)}</b>@${tr.exitPrice.toFixed(2)}${pnlStr}${_esc(rsnStr)}`
+        );
+        markers.push({
+          time: xSec,
+          position: isBuy ? 'belowBar' : 'aboveBar',
+          color: isBuy ? '#16c784' : '#f6465d',
+          shape: isBuy ? 'arrowUp' : 'arrowDown',
+          text: `${isBuy ? 'B' : 'S'}`,
+        });
       }
     });
+
+    markers.sort((a, b) => a.time - b.time);
+    bundle.candleSeries.setMarkers(markers);
 
     const statsEl = document.getElementById('klineModalStatsHint');
     if (statsEl) {
       const moreHint = st.hasMoreLeft ? ' · 向左拖动自动加载更早K线' : '';
-      statsEl.textContent = `已加载 ${bars.length} 根 ${st.timeframe} K线 · 买卖标记 ${matchedMarkers} 处${moreHint}`;
+      statsEl.textContent = `已加载 ${st.lwcBars.length} 根 ${st.timeframe} K线 · 买卖标记 ${matchedMarkers} 处${moreHint}`;
     }
 
-    // Default initial zoom: show crisp ~160 candles around latest trade/end
-    let dzStartVal = 0;
-    let dzEndVal = bars.length - 1;
-    if (st.zoomRange) {
-      dzStartVal = st.zoomRange.startValue;
-      dzEndVal   = st.zoomRange.endValue;
-      st.zoomRange = null;
-    } else if (bars.length > 200) {
-      const lastTr = trades.length ? trades[trades.length - 1] : null;
-      const anchorMs = lastTr ? ((!isNaN(lastTr.exitMs) && lastTr.exitMs > 0) ? lastTr.exitMs : lastTr.entryMs) : bars[bars.length - 1][0];
-      const anchorIdx = _findBarIdx(tsArr, anchorMs, stepMs);
-      if (anchorIdx >= 0) {
-        dzEndVal   = Math.min(bars.length - 1, anchorIdx + 30);
-        dzStartVal = Math.max(0, dzEndVal - 160);
+    if (st.lwcBars.length > 0) {
+      _updateHud(st.lwcBars[st.lwcBars.length - 1]);
+      if (st.preserveLogicalRange) {
+        bundle.chart.timeScale().setVisibleLogicalRange(st.preserveLogicalRange);
+        st.preserveLogicalRange = null;
       } else {
-        dzStartVal = bars.length - 160;
+        let anchorIdx = st.lwcBars.length - 1;
+        if (trades.length) {
+          const lastTr = trades[trades.length - 1];
+          const anchorMs = (!isNaN(lastTr.exitMs) && lastTr.exitMs > 0) ? lastTr.exitMs : lastTr.entryMs;
+          const aSec = _snapTimeToBarSec(secArr, anchorMs, stepSec);
+          if (aSec != null) {
+            const idx = secArr.indexOf(aSec);
+            if (idx >= 0) anchorIdx = idx;
+          }
+        }
+        const hi = Math.min(st.lwcBars.length + 4, anchorIdx + 30);
+        const lo = Math.max(0, hi - 150);
+        bundle.chart.timeScale().setVisibleLogicalRange({ from: lo, to: hi });
       }
     }
 
-    mainChart.setOption({
-      backgroundColor: cfg.bg,
-      animation: false,
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'cross' },
-        backgroundColor: cfg.tooltipBg,
-        borderColor: cfg.tooltipBorder,
-        textStyle: { color: cfg.tooltipText, fontSize: 12 },
-        formatter(params) {
-          const p0 = Array.isArray(params) ? params[0] : params;
-          const idx = p0?.dataIndex;
-          if (idx === undefined || !bars[idx]) return '';
-          const b = bars[idx];
-          const o = b[1], h = b[2], l = b[3], c = b[4], v = b[5];
-          const diff = c - o;
-          const diffHtml = `<span style="color:${diff >= 0 ? buyColor : sellColor}">${diff >= 0 ? '+' : ''}${diff.toFixed(2)}</span>`;
-          const evs = eventsByBar.get(idx) || [];
-          const evHtml = evs.length
-            ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid ${cfg.tooltipBorder}">${evs.map(x => `<div style="margin-bottom:2px">${x}</div>`).join('')}</div>`
-            : '';
-          return `<div>
-            <div style="color:${cfg.axisLabel};margin-bottom:3px">${times[idx]} (${st.symbol} · ${st.timeframe})</div>
-            <div>开 <b>${o}</b> &nbsp;高 <b>${h}</b> &nbsp;低 <b>${l}</b> &nbsp;收 <b>${c}</b> ${diffHtml}</div>
-            <div>成交量 <b>${v}</b></div>
-            <div style="margin-top:3px">
-              <span style="color:#f0b90b">MA7: ${ma7[idx]}</span> &nbsp;
-              <span style="color:#ec4899">MA25: ${ma25[idx]}</span> &nbsp;
-              <span style="color:#9b6dd6">MA60: ${ma60[idx]}</span>
-            </div>
-            ${evHtml}
-          </div>`;
-        },
-      },
-      grid: { left: 68, right: 18, top: 28, bottom: 52 },
-      xAxis: {
-        type: 'category',
-        data: times,
-        axisLine: { lineStyle: { color: cfg.axisLine } },
-        axisLabel: { color: cfg.axisLabel, fontSize: 10 },
-        splitLine: { show: true, lineStyle: { color: cfg.splitLine, width: 0.6 } },
-      },
-      yAxis: {
-        type: 'value',
-        scale: true,
-        axisLine: { lineStyle: { color: cfg.axisLine } },
-        axisLabel: { color: cfg.axisLabel, fontSize: 10 },
-        splitLine: { lineStyle: { color: cfg.splitLine } },
-      },
-      dataZoom: [
-        { type: 'inside', startValue: dzStartVal, endValue: dzEndVal },
-        {
-          type: 'slider',
-          height: 20,
-          bottom: 4,
-          startValue: dzStartVal,
-          endValue: dzEndVal,
-          borderColor: cfg.sliderBorder,
-          fillerColor: cfg.sliderFiller,
-          handleStyle: { color: cfg.sliderHandle },
-          textStyle: { color: cfg.axisLabel, fontSize: 10 },
-          labelFormatter: () => '',
-        },
-      ],
-      series: [
-        {
-          name: 'K线',
-          type: 'candlestick',
-          data: ohlc,
-          itemStyle: {
-            color: cfg.bg,            // hollow up candle (matches Image 1!)
-            color0: sellColor,        // solid red down candle
-            borderColor: buyColor,
-            borderColor0: sellColor,
-            borderWidth: 1.3,
-          },
-          markPoint: { data: markPoints, animation: false },
-          markLine: { symbol: ['none', 'none'], silent: true, animation: false, data: markLines },
-        },
-        { name: 'MA7',  type: 'line', data: ma7,  smooth: true, symbol: 'none', lineStyle: { color: '#f0b90b', width: 1.3 } },
-        { name: 'MA25', type: 'line', data: ma25, smooth: true, symbol: 'none', lineStyle: { color: '#ec4899', width: 1.3 } },
-        { name: 'MA60', type: 'line', data: ma60, smooth: true, symbol: 'none', lineStyle: { color: '#9b6dd6', width: 1.2 } },
-      ],
-    }, true);
-
-    const volColors = bars.map(b => b[4] >= b[1] ? buyColor : sellColor);
-    volChart.setOption({
-      backgroundColor: cfg.bg,
-      animation: false,
-      tooltip: { trigger: 'axis', backgroundColor: cfg.tooltipBg, borderColor: cfg.tooltipBorder, textStyle: { color: cfg.tooltipText, fontSize: 11 } },
-      grid: { left: 68, right: 18, top: 4, bottom: 6 },
-      xAxis: { type: 'category', data: times, show: false },
-      yAxis: { type: 'value', show: false },
-      dataZoom: [{ type: 'inside', startValue: dzStartVal, endValue: dzEndVal }],
-      series: [{
-        type: 'bar',
-        data: vols,
-        itemStyle: { color: (p) => volColors[p.dataIndex], opacity: 0.8 },
-        barMaxWidth: 8,
-      }],
-    }, true);
-
-    requestAnimationFrame(() => {
-      mainChart?.resize();
-      volChart?.resize();
-    });
+    const mainEl = document.getElementById('klineModalMainChart');
+    if (mainEl && mainEl.clientWidth > 0) {
+      bundle.chart.applyOptions({ width: mainEl.clientWidth, height: mainEl.clientHeight });
+    }
   }
 
   function open({ title, symbol, timeframe = '1m', trades = [], rangeStartMs = null, rangeEndMs = null }) {
@@ -1293,7 +1319,7 @@ const TradeKlineModal = (() => {
     st.baseRangeStartMs = rangeStartMs;
     st.baseRangeEndMs = rangeEndMs;
     st.selectedTradeIdx = -1;
-    st.zoomRange = null;
+    st.preserveLogicalRange = null;
 
     const titleEl = document.getElementById('klineModalTitle');
     if (titleEl) titleEl.textContent = st.title;
@@ -1310,7 +1336,7 @@ const TradeKlineModal = (() => {
   }
 
   function updateTheme() {
-    if (mainChart || volChart) {
+    if (bundle) {
       _disposeCharts();
       const modalEl = document.getElementById('tradeKlineModal');
       if (modalEl && modalEl.classList.contains('show') && st.bars.length) {
@@ -1321,118 +1347,4 @@ const TradeKlineModal = (() => {
   }
 
   return { open, updateTheme, jumpToTradeIndex };
-})();
-
-// ─── Trades Equity Curve Chart ─────────────────────────────────────────
-const TradesEquityChart = (() => {
-  let chart = null;
-  let lastData = null;
-
-  function render(dates, equity, pnls = []) {
-    lastData = { dates, equity, pnls };
-    const el = document.getElementById('tradesEquityChart');
-    if (!el) return;
-    const cfg = getThemeConfig();
-
-    if (!chart) {
-      chart = echarts.init(el, cfg.echartsTheme);
-    } else {
-      chart.resize();
-    }
-
-    if (!dates || dates.length === 0) {
-      chart.clear();
-      chart.setOption({
-        backgroundColor: 'transparent',
-        title: {
-          text: '暂无已平仓交易记录',
-          left: 'center',
-          top: 'middle',
-          textStyle: { color: cfg.axisLabel, fontSize: 13, fontWeight: 'normal' }
-        }
-      });
-      return;
-    }
-
-    chart.setOption({
-      backgroundColor: 'transparent',
-      animation: false,
-      title: { show: false },
-      tooltip: {
-        trigger: 'axis',
-        backgroundColor: cfg.tooltipBg,
-        borderColor: cfg.tooltipBorder,
-        textStyle: { color: cfg.tooltipText, fontSize: 12 },
-        formatter: (params) => {
-          const p = params && params[0];
-          if (!p) return '';
-          const idx = p.dataIndex;
-          const eqVal = Number(p.value).toFixed(2);
-          const tradePnl = pnls[idx];
-          let html = `<div style="font-weight:600;margin-bottom:4px;">${p.axisValue}</div>`;
-          html += `<div>累计权益: <b>$${eqVal}</b></div>`;
-          if (tradePnl !== null && tradePnl !== undefined) {
-            const sign = tradePnl >= 0 ? '+' : '';
-            const color = tradePnl >= 0 ? cfg.bullish : cfg.bearish;
-            html += `<div>当笔盈亏: <span style="color:${color};font-weight:600;">${sign}$${Number(tradePnl).toFixed(2)}</span></div>`;
-          }
-          return html;
-        }
-      },
-      grid: { left: 65, right: 18, top: 16, bottom: 42 },
-      xAxis: {
-        type: 'category',
-        data: dates,
-        axisLabel: { color: cfg.axisLabel, fontSize: 10, rotate: 25 },
-        axisLine: { lineStyle: { color: cfg.axisLine } }
-      },
-      yAxis: {
-        type: 'value',
-        scale: true,
-        axisLabel: { color: cfg.axisLabel, fontSize: 10, formatter: '${value}' },
-        splitLine: { lineStyle: { color: cfg.splitLine } }
-      },
-      series: [{
-        name: '权益',
-        type: 'line',
-        data: equity,
-        smooth: true,
-        symbol: 'circle',
-        symbolSize: 5,
-        lineStyle: { color: cfg.equityLine, width: 2 },
-        itemStyle: { color: cfg.equityLine },
-        areaStyle: {
-          color: {
-            type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
-            colorStops: [
-              { offset: 0, color: cfg.equityAreaStart },
-              { offset: 1, color: cfg.equityAreaEnd }
-            ]
-          }
-        }
-      }]
-    }, true);
-
-    requestAnimationFrame(() => chart?.resize());
-    setTimeout(() => chart?.resize(), 60);
-  }
-
-  function resize() {
-    if (chart) {
-      chart.resize();
-    } else if (lastData) {
-      render(lastData.dates, lastData.equity, lastData.pnls);
-    }
-  }
-
-  function updateTheme() {
-    if (chart) {
-      try { echarts.dispose(chart); } catch {}
-      chart = null;
-    }
-    if (lastData) render(lastData.dates, lastData.equity, lastData.pnls);
-  }
-
-  window.addEventListener('resize', () => chart?.resize());
-  return { render, updateTheme, resize };
 })();
