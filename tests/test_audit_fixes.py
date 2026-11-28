@@ -1322,6 +1322,18 @@ class TestThirdAuditFixes(unittest.TestCase):
                 del_res = client.delete(f"/api/trades/archives/{arc['id']}", headers=headers)
                 self.assertEqual(del_res.status_code, 200)
 
+                # Verify /api/klines-range/{symbol} returns cached OHLCV + MA7/MA25/MA60 arrays cleanly
+                with patch("backtest_cache.load_ohlcv_with_cache", return_value=fake_klines):
+                    kr_res = client.get(
+                        f"/api/klines-range/BTCUSDT?timeframe=1m&start_ms={fake_klines[10][0]}&end_ms={fake_klines[-1][0]}",
+                        headers=headers,
+                    )
+                    self.assertEqual(kr_res.status_code, 200, kr_res.text)
+                    kr_body = kr_res.json()
+                    self.assertEqual(kr_body["symbol"], "BTCUSDT")
+                    self.assertGreater(len(kr_body["bars"]), 50)
+                    self.assertEqual(len(kr_body["bars"][-1]), 9)  # [ts, o, h, l, c, v, ma7, ma25, ma60]
+
 
 def tearDownModule():
     db_mod.engine.dispose()

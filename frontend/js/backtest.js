@@ -393,8 +393,9 @@ const BacktestManager = (() => {
         <td>${wrStr}</td>
         <td>${ddStr}</td>
         <td>${feesStr}</td>
-        <td class="text-end pe-3">
+        <td class="text-end pe-3 text-nowrap">
           <div class="d-inline-flex gap-1">
+            <button class="btn btn-xs btn-outline-info" onclick="BacktestManager.openRunKline(event, ${runIdNum})" ${run.status !== 'done' ? 'disabled' : ''} title="弹窗查看回测K线与买卖点">K线</button>
             <button class="btn btn-xs btn-outline-primary" onclick="BacktestManager.viewRun(${runIdNum})">查看</button>
             <button class="btn btn-xs btn-outline-danger" onclick="BacktestManager.deleteRun(event, ${runIdNum})" title="删除此记录">
               <i class="fa-solid fa-trash-can"></i>
@@ -553,5 +554,49 @@ const BacktestManager = (() => {
     }
   }
 
-  return { init, loadHistory, viewRun, deleteRun, clearAllHistory, syncSymbolParams };
+  async function openRunKline(event, id) {
+    if (event) event.stopPropagation();
+    if (typeof TradeKlineModal === 'undefined') return;
+    try {
+      const res = await fetch(`/api/backtest/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const run = await res.json();
+      let results = {};
+      let params = {};
+      try { results = run.results ? JSON.parse(run.results) : {}; } catch {}
+      try { params = run.params ? (typeof run.params === 'string' ? JSON.parse(run.params) : run.params) : {}; } catch {}
+
+      const trades = (results.trades || []).map((t, idx) => ({
+        ...t,
+        id: idx + 1,
+        symbol: run.symbol,
+        strategy_mode: params.strategy_mode || '',
+      }));
+
+      const parseBound = (val, isEnd) => {
+        if (!val) return null;
+        const s = String(val).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+          return new Date(isEnd ? `${s}T23:59:59Z` : `${s}T00:00:00Z`).getTime();
+        }
+        const ms = new Date(s).getTime();
+        return isNaN(ms) ? null : ms;
+      };
+
+      const labelTitle = run.title ? `#${run.id} ${run.title}` : `回测 #${run.id}`;
+      TradeKlineModal.open({
+        title: `${labelTitle} · ${run.symbol} (${run.timeframe})`,
+        symbol: run.symbol,
+        timeframe: run.timeframe || '1m',
+        trades,
+        rangeStartMs: parseBound(run.start_date, false),
+        rangeEndMs: parseBound(run.end_date, true),
+      });
+    } catch (err) {
+      console.error('打开回测K线失败', err);
+      alert('加载回测K线失败: ' + err.message);
+    }
+  }
+
+  return { init, loadHistory, viewRun, openRunKline, deleteRun, clearAllHistory, syncSymbolParams };
 })();

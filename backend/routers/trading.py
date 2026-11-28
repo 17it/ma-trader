@@ -37,6 +37,7 @@ from models import (
     TradeArchiveResponse,
     TradeResponse,
     TradingStatus,
+    TIMEFRAME_MS,
     VALID_TIMEFRAMES,
     validate_symbol_str,
 )
@@ -1228,6 +1229,126 @@ async def get_klines(
     ]
 
     return {"symbol": symbol, "timeframe": timeframe, "data": data if endTime else data[-limit:]}
+
+
+@router.get("/klines-range/{symbol}")
+async def get_klines_range(
+    symbol: str,
+    request: Request,
+    timeframe: str = Query("1m"),
+    start_ms: int = Query(..., description="起始毫秒时间戳"),
+    end_ms: int = Query(..., description="结束毫秒时间戳"),
+    max_bars: int = Query(6000, ge=200, le=12000),
+):
+    """
+    Return historical OHLCV + MA7/MA25/MA60 over [start_ms, end_ms] backed by SQLite
+    cached_klines (instant for already-backtested ranges) + incremental Binance fetch.
+    When the requested span exceeds *max_bars*, returns the latest *max_bars* ending at *end_ms*
+    with has_more_left=True so the frontend K-line modal can lazy-load older chunks or jump to any trade.
+    """
+    from backtest_cache import load_ohlcv_with_cache
+
+    try:
+        symbol = validate_symbol_str(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if timeframe not in VALID_TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"不支持的时间框架: {timeframe}")
+
+    step_ms = TIMEFRAME_MS.get(timeframe, 60_000)
+    now_ms = int(time.time() * 1000)
+    eff_end_ms = min(max(int(end_ms), int(start_ms) + step_ms), now_ms + step_ms)
+    req_start_ms = max(0, int(start_ms))
+
+    total_est_bars = max(1, (eff_end_ms - req_start_ms) // step_ms)
+    if total_est_bars > max_bars:
+        eff_start_ms = eff_end_ms - max_bars * step_ms
+        has_more_left = True
+    else:
+        eff_start_ms = req_start_ms
+        has_more_left = False
+
+    warmup_start_ms = max(0, eff_start_ms - 65 * step_ms)
+    config_mgr = getattr(request.app.state, "config", None)
+    cfg = config_mgr.get_all_cached() if (config_mgr is not None and hasattr(config_mgr, "get_all_cached")) else {}
+    exchange = _get_cached_public_exchange(cfg.get("http_proxy"))
+
+    try:
+        raw = await asyncio.to_thread(
+            load_ohlcv_with_cache, exchange, symbol, timeframe, warmup_start_ms, eff_end_ms
+        )
+    except Exception as exc:
+        logger.warning("load_ohlcv_with_cache failed for %s %s: %s", symbol, timeframe, exc)
+        raw = []
+
+    # Append currently forming live bar when viewing recent real-time trades
+    if eff_end_ms >= now_ms - 2 * step_ms and exchange is not None:
+        def _fetch_tail():
+            with _public_exchange_call_lock:
+                return exchange.fetch_ohlcv(symbol, timeframe, limit=3)
+
+        try:
+            tail = await asyncio.to_thread(_fetch_tail)
+            if tail:
+                last_cached_ts = int(raw[-1][0]) if raw else -1
+                for b in tail:
+                    bts = int(b[0])
+                    if bts > last_cached_ts and bts <= eff_end_ms:
+                        raw.append([bts, float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5])])
+                        last_cached_ts = bts
+        except Exception:
+            pass
+
+    if not raw:
+        raise HTTPException(
+            status_code=503,
+            detail=f"未能获取 {symbol} ({timeframe}) 该时间段的K线数据，请检查网络或代理设置。",
+        )
+
+    closes = [b[4] for b in raw]
+    n = len(closes)
+
+    def _ma(period: int) -> list:
+        res = [None] * n
+        if n < period:
+            return res
+        w_sum = sum(closes[:period])
+        res[period - 1] = round(w_sum / period, 2)
+        for idx in range(period, n):
+            w_sum += closes[idx] - closes[idx - period]
+            res[idx] = round(w_sum / period, 2)
+        return res
+
+    ma7 = _ma(7)
+    ma25 = _ma(25)
+    ma60 = _ma(60)
+
+    bars_out = [
+        [
+            int(bar[0]),
+            bar[1],
+            bar[2],
+            bar[3],
+            bar[4],
+            round(bar[5], 4),
+            ma7[i],
+            ma25[i],
+            ma60[i],
+        ]
+        for i, bar in enumerate(raw)
+        if int(bar[0]) >= eff_start_ms
+    ]
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "start_ms": bars_out[0][0] if bars_out else eff_start_ms,
+        "end_ms": bars_out[-1][0] if bars_out else eff_end_ms,
+        "requested_start_ms": req_start_ms,
+        "has_more_left": has_more_left,
+        "bars": bars_out,
+    }
 
 
 # ---------------------------------------------------------------------------

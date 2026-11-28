@@ -321,6 +321,10 @@ const AppController = (() => {
     if (btnConfirmArchiveAction) btnConfirmArchiveAction.addEventListener('click', executeArchiveTrades);
     const btnViewArchives = document.getElementById('btnViewArchives');
     if (btnViewArchives) btnViewArchives.addEventListener('click', openArchivesModal);
+    const btnTradesKline = document.getElementById('btnTradesKline');
+    if (btnTradesKline) btnTradesKline.addEventListener('click', openTradesKlineModal);
+    const btnArchiveDetailKline = document.getElementById('btnArchiveDetailKline');
+    if (btnArchiveDetailKline) btnArchiveDetailKline.addEventListener('click', openArchiveKlineModal);
     _bindArchiveDetailStrategyBtns();
   }
 
@@ -412,6 +416,9 @@ const AppController = (() => {
       }
       if (typeof TradesEquityChart !== 'undefined' && TradesEquityChart.updateTheme) {
         TradesEquityChart.updateTheme();
+      }
+      if (typeof TradeKlineModal !== 'undefined' && TradeKlineModal.updateTheme) {
+        TradeKlineModal.updateTheme();
       }
     }
   }
@@ -1331,6 +1338,42 @@ const AppController = (() => {
     } catch (err) {
       alert('删除存档请求失败: ' + err.message);
     }
+  }
+
+  function openTradesKlineModal() {
+    if (typeof TradeKlineModal === 'undefined') return;
+    const allTrades = state.trades || [];
+    const selectedStrats = state.tradesStrategies || [];
+    const filtered = allTrades.filter(t =>
+      (state.tradesMode === 'live' ? !t.is_paper : Boolean(t.is_paper)) && _matchTradeStrategy(t, selectedStrats)
+    );
+    const eqSym = document.getElementById('tradesEquitySymbol')?.value;
+    const prefSym = (eqSym && eqSym !== 'ALL')
+      ? eqSym
+      : (filtered[0]?.symbol || state.currentSymbol || 'BTCUSDT');
+    const symCfg = (state.symbols || []).find(s => s.symbol === prefSym);
+    const tf = symCfg?.timeframe || state.currentTimeframe || '1m';
+    const modeTitle = state.tradesMode === 'live' ? '实盘交易记录' : '模拟交易记录';
+    TradeKlineModal.open({
+      title: `${modeTitle} · K线买卖点复盘`,
+      symbol: prefSym,
+      timeframe: tf,
+      trades: filtered,
+    });
+  }
+
+  function openArchiveKlineModal() {
+    if (typeof TradeKlineModal === 'undefined' || !state.activeArchiveDetail?.archive) return;
+    const arc = state.activeArchiveDetail.archive;
+    const selStrats = state.archiveDetailStrategies || [];
+    const trades = (state.activeArchiveDetail.trades || []).filter(t => _matchTradeStrategy(t, selStrats));
+    const prefSym = trades[0]?.symbol || state.currentSymbol || 'BTCUSDT';
+    TradeKlineModal.open({
+      title: `存档 #${arc.id} ${arc.title} · K线买卖点复盘`,
+      symbol: prefSym,
+      timeframe: '1m',
+      trades,
+    });
   }
 
   async function clearAllTrades() {

@@ -752,9 +752,12 @@
           </div>
 
           <div class="card card-dark">
-            <div class="card-header d-flex gap-2 align-items-center">
+            <div class="card-header d-flex flex-wrap gap-2 align-items-center">
               <span><i class="fa-solid fa-list me-2"></i>交易记录</span>
               <span class="text-secondary small fw-normal ms-1">共 <span id="tradeCount">0</span> 条</span>
+              <button class="btn btn-xs btn-outline-info ms-1" id="btnTradesKline" title="弹窗展示当前交易记录的K线与买卖点">
+                <i class="fa-solid fa-chart-line me-1"></i>K线
+              </button>
               <div class="ms-auto d-flex flex-wrap align-items-center gap-2">
                 <span class="text-secondary small fw-normal me-1">实时更新 <i class="fa-solid fa-circle-dot text-success blink ms-1" id="liveIndicator"></i></span>
                 <button class="btn btn-xs btn-outline-primary" id="btnArchiveTrades" title="归档保存当前全部交易记录并恢复初始状态">
@@ -1436,6 +1439,9 @@
             <div class="d-flex flex-wrap align-items-center gap-2">
               <span class="fw-bold small text-primary" id="archiveDetailTitle">—</span>
               <span class="small text-secondary" id="archiveDetailMeta"></span>
+              <button type="button" class="btn btn-xs btn-outline-info" id="btnArchiveDetailKline" title="弹窗查看该存档批次的K线买卖点">
+                <i class="fa-solid fa-chart-line me-1"></i>K线
+              </button>
             </div>
             <div class="d-inline-flex flex-wrap align-items-center gap-1" id="archiveDetailStrategyBtns" role="group">
               <button type="button" class="btn btn-xs btn-primary active" data-arc-strat="balanced">方案A</button>
@@ -1473,13 +1479,73 @@
   </div>
 </div>
 
+<!-- ══════════ MODAL: TRADE / BACKTEST K-LINE BUY/SELL VIEWER ══════════ -->
+<div class="modal fade" id="tradeKlineModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-xl" style="max-width:94vw;">
+    <div class="modal-content card-dark shadow-lg">
+      <div class="modal-header py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <h6 class="modal-title fs-6 mb-0 d-flex align-items-center gap-2">
+            <i class="fa-solid fa-chart-line text-info"></i><span id="klineModalTitle">K线买卖点复盘</span>
+          </h6>
+          <span class="badge ms-1" style="background:#16c784;color:#fff;font-size:11px;">B 买入(开多/平空)</span>
+          <span class="badge" style="background:#f6465d;color:#fff;font-size:11px;">S 卖出(开空/平多)</span>
+          <span class="small text-secondary ms-1 d-none d-md-inline">
+            <span style="color:#f0b90b;font-weight:600;">━ MA7</span>
+            <span class="ms-2" style="color:#ec4899;font-weight:600;">━ MA25</span>
+            <span class="ms-2" style="color:#9b6dd6;font-weight:600;">━ MA60</span>
+          </span>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-2">
+        <!-- Toolbar: Symbol + Timeframe + Trade Quick Jumper -->
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 px-2 py-1 mb-2 rounded border border-secondary-subtle bg-body-tertiary">
+          <div class="d-flex flex-wrap align-items-center gap-2">
+            <select class="form-select form-select-sm w-auto py-0 px-2" id="klineModalSymbol" style="height:26px;font-size:12px;"></select>
+            <div class="btn-group btn-group-sm" id="klineModalTfBtns" role="group">
+              <button type="button" class="btn btn-xs btn-primary active" data-km-tf="1m">1m</button>
+              <button type="button" class="btn btn-xs btn-outline-secondary" data-km-tf="5m">5m</button>
+              <button type="button" class="btn btn-xs btn-outline-secondary" data-km-tf="15m">15m</button>
+              <button type="button" class="btn btn-xs btn-outline-secondary" data-km-tf="1h">1h</button>
+              <button type="button" class="btn btn-xs btn-outline-secondary" data-km-tf="4h">4h</button>
+            </div>
+            <span class="small text-secondary" id="klineModalStatsHint"></span>
+          </div>
+          <div class="d-flex flex-wrap align-items-center gap-1">
+            <button type="button" class="btn btn-xs btn-outline-secondary" id="btnKmPrevTrade" title="定位到上一笔交易">
+              <i class="fa-solid fa-chevron-left"></i> 上一笔
+            </button>
+            <select class="form-select form-select-sm w-auto py-0 px-2" id="klineModalTradeSelect" style="height:26px;font-size:12px;max-width:260px;">
+              <option value="-1">全部买卖点</option>
+            </select>
+            <button type="button" class="btn btn-xs btn-outline-secondary" id="btnKmNextTrade" title="定位到下一笔交易">
+              下一笔 <i class="fa-solid fa-chevron-right"></i>
+            </button>
+            <button type="button" class="btn btn-xs btn-outline-secondary ms-1" id="btnKmResetZoom" title="恢复最新全局视图">
+              <i class="fa-solid fa-expand"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Chart Canvas Area -->
+        <div class="position-relative border border-secondary-subtle rounded overflow-hidden">
+          <div id="klineModalLoading" class="position-absolute top-0 start-0 w-100 h-100 d-none align-items-center justify-content-center" style="z-index:10;background:rgba(13,17,23,0.72);"></div>
+          <div id="klineModalMainChart" style="width:100%;height:430px;"></div>
+          <div id="klineModalVolChart" style="width:100%;height:92px;border-top:1px solid rgba(128,128,128,0.18);"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Scripts -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="js/auth.js?v=20261128_1"></script>
-<script src="js/chart.js?v=20261128_1"></script>
-<script src="js/settings.js?v=20261128_1"></script>
-<script src="js/backtest.js?v=20261128_1"></script>
-<script src="js/app.js?v=20261128_1"></script>
+<script src="js/auth.js?v=20261128_2"></script>
+<script src="js/chart.js?v=20261128_2"></script>
+<script src="js/settings.js?v=20261128_2"></script>
+<script src="js/backtest.js?v=20261128_2"></script>
+<script src="js/app.js?v=20261128_2"></script>
 </body>
 </html>
