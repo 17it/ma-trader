@@ -42,31 +42,55 @@ FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 
 class ConnectionManager:
-    """Manages WebSocket connections."""
+    """Manages WebSocket connections with optional per-client env ('live' | 'paper') filtering."""
 
     def __init__(self):
         self.active_connections: list[WebSocket] = []
+        self._client_envs: dict[WebSocket, str] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
         logger.info(f"WebSocket client connected. Total: {len(self.active_connections)}")
 
-    def register_accepted(self, websocket: WebSocket):
+    def register_accepted(self, websocket: WebSocket, env: str = "all"):
         if websocket not in self.active_connections:
             self.active_connections.append(websocket)
-        logger.info(f"WebSocket client authenticated. Total: {len(self.active_connections)}")
+        norm_env = env if env in ("live", "paper") else "all"
+        self._client_envs[websocket] = norm_env
+        logger.info(f"WebSocket client authenticated (env={norm_env}). Total: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        self._client_envs.pop(websocket, None)
         logger.info(f"WebSocket client disconnected. Total: {len(self.active_connections)}")
 
+    def _matches_env(self, websocket: WebSocket, msg_env: Optional[str]) -> bool:
+        if not msg_env:
+            return True
+        client_env = self._client_envs.get(websocket, "all")
+        return client_env == "all" or client_env == msg_env
+
     async def broadcast(self, message: dict):
-        """Broadcast a JSON message to all connected clients."""
+        """Broadcast a JSON message to matching connected clients (market data goes to all)."""
+        msg_type = message.get("type") if isinstance(message, dict) else None
+        msg_env: Optional[str] = None
+        if isinstance(message, dict) and msg_type not in {"ticker", "ma_update", "bot_status", "pong"}:
+            if message.get("mode") in ("live", "paper"):
+                msg_env = message["mode"]
+            elif "is_paper" in message and message["is_paper"] is not None:
+                msg_env = "paper" if message["is_paper"] else "live"
+            elif msg_type in {"trade_opened", "trade_closed"} and isinstance(message.get("trade"), dict):
+                tr = message["trade"]
+                if "is_paper" in tr and tr["is_paper"] is not None:
+                    msg_env = "paper" if tr["is_paper"] else "live"
+
         text = json.dumps(message, ensure_ascii=False, default=str)
         dead = []
         for connection in list(self.active_connections):
+            if not self._matches_env(connection, msg_env):
+                continue
             try:
                 await connection.send_text(text)
             except Exception:
@@ -211,6 +235,7 @@ app.include_router(stats_router.router, prefix="/api")
 
 
 @app.get("/", include_in_schema=False)
+@app.get("/demo", include_in_schema=False)
 async def root():
     index = FRONTEND_DIR / "index.html"
     if index.exists():
@@ -246,12 +271,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
     await websocket.accept()
 
+    client_env = "all"
     if not token:
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
             msg = json.loads(raw)
             if isinstance(msg, dict) and msg.get("type") == "auth":
                 token = str(msg.get("token") or "").strip()
+                raw_env = str(msg.get("env") or "").strip().lower()
+                if raw_env in ("live", "paper"):
+                    client_env = raw_env
         except Exception:
             await websocket.close(code=4401)
             return
@@ -261,7 +290,7 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=4401)
         return
 
-    ws_manager.register_accepted(websocket)
+    ws_manager.register_accepted(websocket, env=client_env)
 
     bots = getattr(websocket.app.state, "bots", {}) or {}
     await ws_manager.send_personal(websocket, trading_router._bot_status_payload(bots))

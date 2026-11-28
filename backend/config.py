@@ -114,6 +114,39 @@ def set_setting(db: Session, key: str, value: str) -> None:
     update_settings(db, {key: value})
 
 
+PAPER_SCOPED_SETTING_KEYS = (
+    "strategy_mode",
+    "cooldown_bars",
+    "max_daily_loss",
+    "telegram_token",
+    "telegram_chat_id",
+)
+
+
+def extract_env_settings(raw_settings: Dict[str, str], env: str = "live") -> Dict[str, str]:
+    """
+    Build an environment-scoped settings view ('live' or 'paper').
+    - 'live' : returns base keys (strips internal 'paper:*' & '_*' keys).
+    - 'paper': overlays 'paper:<key>' onto '<key>' for PAPER_SCOPED_SETTING_KEYS,
+               keeps shared 'http_proxy', and omits live Binance API credentials.
+    """
+    norm_env = "paper" if str(env or "").strip().lower() == "paper" else "live"
+    base = {
+        k: v for k, v in raw_settings.items()
+        if not k.startswith("paper:") and not k.startswith("_")
+    }
+    if norm_env == "live":
+        return base
+    paper_view = dict(base)
+    paper_view.pop("binance_key", None)
+    paper_view.pop("binance_secret", None)
+    for k in PAPER_SCOPED_SETTING_KEYS:
+        pk = f"paper:{k}"
+        if pk in raw_settings:
+            paper_view[k] = raw_settings[pk]
+    return paper_view
+
+
 def reset_to_defaults(db: Session) -> Dict[str, str]:
     """Re-seed all default settings (only fills blanks, does not overwrite)."""
     for key, value in DEFAULT_SETTINGS.items():

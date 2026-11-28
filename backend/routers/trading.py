@@ -296,6 +296,8 @@ async def start_trading(
         else:
             target_modes = [MAStrategy.normalize_mode(cfg.get("strategy_mode") or "balanced")]
 
+        from config import extract_env_settings
+        paper_cfg = extract_env_settings(cfg, "paper")
         shared_feed = _get_shared_paper_feed(app, cfg, shared_ws=shared_ws)
         started_modes: list[str] = []
         last_notifier = None
@@ -307,11 +309,11 @@ async def start_trading(
                 continue
 
             notifier = TelegramNotifier(
-                token=cfg.get("telegram_token"),
-                chat_id=cfg.get("telegram_chat_id"),
-                proxy=cfg.get("http_proxy") or None,
+                token=paper_cfg.get("telegram_token"),
+                chat_id=paper_cfg.get("telegram_chat_id"),
+                proxy=paper_cfg.get("http_proxy") or None,
             )
-            executor = Executor(exchange=None, config=cfg, is_paper=True)
+            executor = Executor(exchange=None, config=paper_cfg, is_paper=True)
             bot = TradingBot(
                 db_session_factory=SessionLocal,
                 data_feed=shared_feed,
@@ -419,7 +421,9 @@ async def stop_trading(
             else None
         )
 
-        cfg = _get_config(request).get_all_cached()
+        from config import extract_env_settings
+        raw_cfg = _get_config(request).get_all_cached()
+        cfg = extract_env_settings(raw_cfg, "paper" if (mode == "paper") else "live")
         notifier = TelegramNotifier(
             token=cfg.get("telegram_token"),
             chat_id=cfg.get("telegram_chat_id"),
@@ -442,7 +446,11 @@ async def stop_trading(
 
 
 @router.get("/trading/status", response_model=TradingStatus)
-async def get_trading_status(request: Request, db: Session = Depends(get_db)):
+async def get_trading_status(
+    request: Request,
+    is_paper: Optional[bool] = Query(None),
+    db: Session = Depends(get_db),
+):
     """Return bot running status (per-strategy paper & live), active symbols, and today's realized PnL."""
     bots = _get_bots(request)
     status_payload = _bot_status_payload(bots)
@@ -453,7 +461,9 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
 
     cfg_mgr = _get_config(request)
     cfg = cfg_mgr.get_all(db) if cfg_mgr else {}
-    if paper_running and live_running:
+    if is_paper is not None:
+        mode = "paper" if is_paper else "live"
+    elif paper_running and live_running:
         mode = "both"
     elif live_running:
         mode = "live"
@@ -465,9 +475,12 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
     active_symbols_set = set()
     started_at_candidates = []
     live_bot = bots.get("live")
-    running_bots = [b for _, b in _iter_paper_bots(bots) if b.running]
-    if live_bot is not None and live_bot.running:
-        running_bots.append(live_bot)
+    paper_bots = [b for _, b in _iter_paper_bots(bots) if b.running]
+    running_bots = (
+        paper_bots if is_paper is True
+        else ([live_bot] if (is_paper is False and live_bot is not None and live_bot.running)
+              else (paper_bots + ([live_bot] if (live_bot is not None and live_bot.running) else [])))
+    )
 
     for bot in running_bots:
         status_info = bot.get_status()
@@ -476,7 +489,10 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
         if started:
             started_at_candidates.append(started)
 
-    open_trades_count = db.query(Trade).filter(Trade.status == "open", Trade.archive_id.is_(None)).count()
+    open_q = db.query(Trade).filter(Trade.status == "open", Trade.archive_id.is_(None))
+    if is_paper is not None:
+        open_q = open_q.filter(Trade.is_paper == bool(is_paper))
+    open_trades_count = open_q.count()
 
     # Calculate today's UTC realized PnL across closed trades
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
@@ -544,9 +560,15 @@ def list_trades(
 
 
 @router.get("/trades/archives", response_model=list[TradeArchiveResponse])
-def list_trade_archives(db: Session = Depends(get_db)):
-    """List all saved trade archive batches (newest first)."""
-    rows = db.query(TradeArchive).order_by(TradeArchive.id.desc()).all()
+def list_trade_archives(
+    is_paper: Optional[bool] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """List saved trade archive batches (optionally filtered by is_paper, newest first)."""
+    q = db.query(TradeArchive)
+    if is_paper is not None:
+        q = q.filter(TradeArchive.is_paper == bool(is_paper))
+    rows = q.order_by(TradeArchive.id.desc()).all()
     return [TradeArchiveResponse.model_validate(r) for r in rows]
 
 
@@ -583,31 +605,31 @@ def delete_trade_archive(archive_id: int, db: Session = Depends(get_db)):
 @router.post("/trades/archive", response_model=TradeArchiveResponse)
 async def archive_trades(
     request: Request,
+    is_paper: Optional[bool] = Query(None),
     body: Optional[ArchiveTradesRequest] = Body(default=None),
     db: Session = Depends(get_db),
 ):
     """
-    Archive all current active trades into a snapshot batch and reset active state
-    (paper equities, bot open paper positions, cooldowns, and active trade list) back to initial state.
-    Refuses if any LIVE position is still open on the exchange.
+    Archive active trades (scoped to is_paper when provided) into a snapshot batch
+    and reset that environment's active state back to initial values.
+    Refuses if any LIVE position is still open when archiving live/all trades.
     """
-    open_live = db.query(Trade).filter(
-        Trade.status == "open",
-        Trade.is_paper == False,  # noqa: E712
-        Trade.archive_id.is_(None),
-    ).count()
-    if open_live > 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"当前仍有 {open_live} 笔持仓中的实盘订单，请先平仓后再执行存档！",
-        )
+    if is_paper is not True:
+        open_live = db.query(Trade).filter(
+            Trade.status == "open",
+            Trade.is_paper == False,  # noqa: E712
+            Trade.archive_id.is_(None),
+        ).count()
+        if open_live > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"当前仍有 {open_live} 笔持仓中的实盘订单，请先平仓后再执行存档！",
+            )
 
-    active_trades = (
-        db.query(Trade)
-        .filter(Trade.archive_id.is_(None))
-        .order_by(Trade.open_time.asc())
-        .all()
-    )
+    arc_q = db.query(Trade).filter(Trade.archive_id.is_(None))
+    if is_paper is not None:
+        arc_q = arc_q.filter(Trade.is_paper == bool(is_paper))
+    active_trades = arc_q.order_by(Trade.open_time.asc()).all()
     if not active_trades:
         raise HTTPException(status_code=400, detail="当前暂无可存档的交易记录")
 
@@ -663,9 +685,11 @@ async def archive_trades(
     raw_note = (body.note or "").strip() if body else ""
     title = raw_title or f"存档 {bj_now.strftime('%Y-%m-%d %H:%M')}"
 
+    arc_is_paper = bool(is_paper) if is_paper is not None else (paper_cnt == total_cnt and total_cnt > 0)
     arc = TradeArchive(
         title=title,
         note=raw_note or None,
+        is_paper=arc_is_paper,
         total_trades=total_cnt,
         closed_trades=closed_cnt,
         win_trades=win_cnt,
@@ -685,12 +709,15 @@ async def archive_trades(
     db.commit()
     db.refresh(arc)
 
-    # Reset all bots' in-memory paper positions, cooldowns, and signal state back to initial state
+    # Reset matching bots' in-memory positions, cooldowns, and signal state back to initial state
     bots = _get_bots(request)
     for slot_key, bot in bots.items():
         if bot is None:
             continue
-        if getattr(bot, "is_paper", True) and hasattr(bot, "positions"):
+        bot_is_paper = getattr(bot, "is_paper", True)
+        if is_paper is not None and bot_is_paper != bool(is_paper):
+            continue
+        if bot_is_paper and hasattr(bot, "positions"):
             bot.positions.clear()
         if hasattr(bot, "cooldown_until_ts"):
             bot.cooldown_until_ts.clear()
@@ -705,17 +732,19 @@ async def archive_trades(
                 st._ribbon_traded_cross_dir = None
 
     pnl_sign = "+" if total_pnl >= 0 else ""
+    op_mode = "paper" if arc_is_paper else "live"
     record_operation_log(
         log_type="archive",
         title=f"交易记录存档 ({arc.title})",
         message=f"归档 {total_cnt} 笔交易（胜率 {win_rate:.1f}%，净盈亏 {pnl_sign}${total_pnl:.2f}），当前账户已恢复初始状态",
         level="info",
+        mode=op_mode,
         db=db,
     )
     ws_manager = _get_ws_manager(request)
     if ws_manager is not None:
-        await ws_manager.broadcast({"type": "trades_archived", "archive_id": arc.id})
-        await ws_manager.broadcast({"type": "operation_log"})
+        await ws_manager.broadcast({"type": "trades_archived", "archive_id": arc.id, "is_paper": arc_is_paper, "mode": op_mode})
+        await ws_manager.broadcast({"type": "operation_log", "is_paper": arc_is_paper, "mode": op_mode})
 
     return TradeArchiveResponse.model_validate(arc)
 
@@ -877,6 +906,7 @@ async def simulate_trade(
         f"[模拟开仓] {direction.upper()} {symbol} 价格:{entry_price} 止损:{sl:.4f} 止盈:{tp:.4f}",
         level="success",
         symbol=symbol,
+        mode="paper",
         db=db,
     )
 
@@ -1023,6 +1053,7 @@ async def manual_close_trade(
         f"[手动平仓] {trade.symbol} #{trade.id} 出场:{exit_price} 盈亏:{pnl_sign}${trade.pnl:.2f} ({pnl_sign}{trade.pnl_pct:.2f}%)",
         level="success" if trade.pnl >= 0 else "warning",
         symbol=trade.symbol,
+        mode="paper" if trade.is_paper else "live",
         db=db,
     )
 
@@ -1095,25 +1126,35 @@ def delete_trade(trade_id: int, request: Request, db: Session = Depends(get_db))
 
 @router.delete("/trades")
 @router.post("/trades/clear")
-def clear_trades(request: Request, db: Session = Depends(get_db)):
-    """Delete active unarchived trade records (preserves saved archives; refuses while any live position is open)."""
-    open_live = db.query(Trade).filter(
-        Trade.status == "open",
-        Trade.is_paper == False,  # noqa: E712
-        Trade.archive_id.is_(None),
-    ).count()
-    if open_live > 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"当前仍有 {open_live} 笔持仓中的实盘订单，禁止清空全部记录，请先平仓！",
-        )
+def clear_trades(
+    request: Request,
+    is_paper: Optional[bool] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Delete active unarchived trade records (scoped to is_paper when given; preserves saved archives)."""
+    if is_paper is not True:
+        open_live = db.query(Trade).filter(
+            Trade.status == "open",
+            Trade.is_paper == False,  # noqa: E712
+            Trade.archive_id.is_(None),
+        ).count()
+        if open_live > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"当前仍有 {open_live} 笔持仓中的实盘订单，禁止清空全部记录，请先平仓！",
+            )
 
-    deleted_count = db.query(Trade).filter(Trade.archive_id.is_(None)).delete()
+    del_q = db.query(Trade).filter(Trade.archive_id.is_(None))
+    if is_paper is not None:
+        del_q = del_q.filter(Trade.is_paper == bool(is_paper))
+    deleted_count = del_q.delete()
     db.commit()
 
     bots = _get_bots(request)
     for bot in bots.values():
-        if bot is not None and hasattr(bot, "positions"):
+        if bot is None or not hasattr(bot, "positions"):
+            continue
+        if is_paper is None or getattr(bot, "is_paper", True) == bool(is_paper):
             bot.positions.clear()
 
     return {"status": "cleared", "deleted": deleted_count}
@@ -1357,13 +1398,16 @@ async def get_klines_range(
 
 @router.get("/logs", response_model=OperationLogPageResponse)
 def list_operation_logs(
-    log_type: Optional[str] = Query(None, description="Filter by log_type: open, close, start, stop"),
+    log_type: Optional[str] = Query(None, description="Filter by log_type: open, close, start, stop, archive"),
+    mode: Optional[str] = Query(None, pattern="^(paper|live)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
     """Return paginated persistent operation logs ordered newest first."""
     q = db.query(OperationLog)
+    if mode:
+        q = q.filter(OperationLog.mode == mode)
     if log_type:
         q = q.filter(OperationLog.log_type == log_type)
     total = q.count()
@@ -1386,9 +1430,15 @@ def list_operation_logs(
 
 @router.delete("/logs")
 @router.post("/logs/clear")
-def clear_operation_logs(db: Session = Depends(get_db)):
-    """Clear all operation logs."""
-    deleted = db.query(OperationLog).delete()
+def clear_operation_logs(
+    mode: Optional[str] = Query(None, pattern="^(paper|live)$"),
+    db: Session = Depends(get_db),
+):
+    """Clear operation logs (optionally scoped to mode=paper|live)."""
+    q = db.query(OperationLog)
+    if mode:
+        q = q.filter(OperationLog.mode == mode)
+    deleted = q.delete()
     db.commit()
     return {"status": "cleared", "deleted": deleted}
 
@@ -1401,12 +1451,15 @@ def clear_operation_logs(db: Session = Depends(get_db)):
 def list_system_logs(
     keyword: Optional[str] = Query(None, max_length=100, description="按关键字模糊筛选日志内容或交易对"),
     level: Optional[str] = Query(None, description="按级别筛选: info, success, warning, error"),
+    mode: Optional[str] = Query(None, pattern="^(paper|live)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    """Return paginated persistent system logs ordered newest first, with keyword & level filters."""
+    """Return paginated persistent system logs ordered newest first, with keyword, level & mode filters."""
     q = db.query(SystemLog)
+    if mode:
+        q = q.filter(SystemLog.mode == mode)
     if level and level.strip():
         q = q.filter(SystemLog.level == level.strip().lower())
     if keyword and keyword.strip():
@@ -1437,8 +1490,14 @@ def list_system_logs(
 
 @router.delete("/system-logs")
 @router.post("/system-logs/clear")
-def clear_system_logs(db: Session = Depends(get_db)):
-    """Clear all persistent system logs."""
-    deleted = db.query(SystemLog).delete()
+def clear_system_logs(
+    mode: Optional[str] = Query(None, pattern="^(paper|live)$"),
+    db: Session = Depends(get_db),
+):
+    """Clear persistent system logs (optionally scoped to mode=paper|live)."""
+    q = db.query(SystemLog)
+    if mode:
+        q = q.filter(SystemLog.mode == mode)
+    deleted = q.delete()
     db.commit()
     return {"status": "cleared", "deleted": deleted}

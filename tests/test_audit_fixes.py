@@ -1334,6 +1334,117 @@ class TestThirdAuditFixes(unittest.TestCase):
                     self.assertGreater(len(kr_body["bars"]), 50)
                     self.assertEqual(len(kr_body["bars"][-1]), 9)  # [ts, o, h, l, c, v, ma7, ma25, ma60]
 
+    def test_live_and_demo_environment_isolation(self):
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        import main as main_mod
+
+        auth_mod._login_fails.clear()
+        with patch("binance_ws.BinanceWSStreamer.start"), patch("binance_ws.BinanceWSStreamer.stop"):
+            with TestClient(main_mod.app) as client:
+                # 1. Both / and /demo serve the frontend page
+                r_live = client.get("/")
+                r_demo = client.get("/demo")
+                self.assertEqual(r_live.status_code, 200)
+                self.assertEqual(r_demo.status_code, 200)
+                self.assertIn("MA Trader", r_demo.text)
+
+                login_res = client.post("/api/auth/login", json={"username": "admin", "password": "StrongPass99"})
+                if login_res.status_code != 200:
+                    login_res = client.post("/api/auth/login", json={"username": "admin", "password": "InitPass123"})
+                    tok = login_res.json()["token"]
+                    client.post(
+                        "/api/auth/change-password",
+                        headers={"Authorization": f"Bearer {tok}"},
+                        json={"old_password": "InitPass123", "new_password": "StrongPass99"},
+                    )
+                    login_res = client.post("/api/auth/login", json={"username": "admin", "password": "StrongPass99"})
+                headers = {"Authorization": f"Bearer {login_res.json()['token']}"}
+
+                # 2. Global settings isolation (paper vs live) while sharing http_proxy
+                client.put("/api/settings?env=live", json={"cooldown_bars": "15", "max_daily_loss": "4"}, headers=headers)
+                client.put("/api/settings?env=paper", json={"cooldown_bars": "45", "max_daily_loss": "9"}, headers=headers)
+                live_s = client.get("/api/settings?env=live", headers=headers).json()
+                paper_s = client.get("/api/settings?env=paper", headers=headers).json()
+                self.assertEqual(live_s["cooldown_bars"], "15")
+                self.assertEqual(live_s["max_daily_loss"], "4")
+                self.assertEqual(paper_s["cooldown_bars"], "45")
+                self.assertEqual(paper_s["max_daily_loss"], "9")
+                self.assertNotIn("binance_key", paper_s)
+
+                # 3. SymbolConfig isolation: adding SOLUSDT to paper does not affect live
+                r_add = client.post(
+                    "/api/symbols",
+                    json={"symbol": "SOLUSDT", "is_paper": True, "timeframe": "1m", "htf_timeframe": "15m"},
+                    headers=headers,
+                )
+                self.assertEqual(r_add.status_code, 201, r_add.text)
+                sol_id = r_add.json()["id"]
+                live_syms = [s["symbol"] for s in client.get("/api/symbols?is_paper=false", headers=headers).json()]
+                paper_syms = [s["symbol"] for s in client.get("/api/symbols?is_paper=true", headers=headers).json()]
+                self.assertIn("SOLUSDT", paper_syms)
+                self.assertNotIn("SOLUSDT", live_syms)
+                client.delete(f"/api/symbols/{sol_id}", headers=headers)
+
+                # 4. SystemLog & OperationLog isolation (untagged legacy mode=None must not leak into live)
+                db_mod.record_system_log("live-only-msg", level="info", mode="live")
+                db_mod.record_system_log("paper-only-msg", level="info", mode="paper")
+                db_mod.record_system_log("legacy-untagged-msg", level="info", mode=None)
+                live_logs = client.get("/api/system-logs?mode=live", headers=headers).json()["items"]
+                paper_logs = client.get("/api/system-logs?mode=paper", headers=headers).json()["items"]
+                self.assertTrue(any(x["message"] == "live-only-msg" for x in live_logs))
+                self.assertFalse(any(x["message"] == "paper-only-msg" for x in live_logs))
+                self.assertFalse(any(x["message"] == "legacy-untagged-msg" for x in live_logs))
+                self.assertTrue(any(x["message"] == "paper-only-msg" for x in paper_logs))
+                self.assertFalse(any(x["message"] == "live-only-msg" for x in paper_logs))
+
+                client.post("/api/system-logs/clear?mode=paper", headers=headers)
+                live_logs_after = client.get("/api/system-logs?mode=live", headers=headers).json()["items"]
+                self.assertTrue(any(x["message"] == "live-only-msg" for x in live_logs_after))
+
+                # 5. One-time legacy data -> paper migration runs once and never repeats on future restarts
+                now_utc = datetime.now(timezone.utc)
+                with db_mod.SessionLocal() as s:
+                    s.query(db_mod.SettingModel).filter(
+                        db_mod.SettingModel.key == "_migrated_existing_data_to_paper_v1"
+                    ).delete()
+                    s.add(db_mod.Trade(
+                        symbol="BTCUSDT", direction="long", entry_price=60000.0, exit_price=60500.0,
+                        quantity=0.1, stop_loss=59500.0, take_profit=61000.0,
+                        pnl=50.0, pnl_pct=0.83, status="closed", is_paper=False,
+                        open_time=now_utc, timeframe="1m",
+                    ))
+                    s.add(db_mod.TradeArchive(title="Legacy Archive", total_trades=1, total_pnl=50.0, is_paper=False))
+                    s.commit()
+
+                db_mod.create_tables()
+
+                with db_mod.SessionLocal() as s:
+                    migrated_trade = s.query(db_mod.Trade).filter(db_mod.Trade.entry_price == 60000.0).first()
+                    migrated_arch = s.query(db_mod.TradeArchive).filter(db_mod.TradeArchive.title == "Legacy Archive").first()
+                    self.assertTrue(migrated_trade.is_paper)
+                    self.assertTrue(migrated_arch.is_paper)
+                    # Add a real live trade & archive after migration, then run create_tables() again
+                    s.add(db_mod.Trade(
+                        symbol="ETHUSDT", direction="short", entry_price=3000.0, exit_price=2900.0,
+                        quantity=1.0, stop_loss=3050.0, take_profit=2850.0,
+                        pnl=100.0, pnl_pct=3.33, status="closed", is_paper=False,
+                        open_time=now_utc, timeframe="1m",
+                    ))
+                    s.add(db_mod.TradeArchive(title="Post-Upgrade Live Archive", total_trades=1, total_pnl=100.0, is_paper=False))
+                    s.commit()
+
+                db_mod.create_tables()
+
+                with db_mod.SessionLocal() as s:
+                    live_trade = s.query(db_mod.Trade).filter(db_mod.Trade.entry_price == 3000.0).first()
+                    live_arch = s.query(db_mod.TradeArchive).filter(db_mod.TradeArchive.title == "Post-Upgrade Live Archive").first()
+                    self.assertFalse(live_trade.is_paper)
+                    self.assertFalse(live_arch.is_paper)
+                    s.query(db_mod.Trade).filter(db_mod.Trade.entry_price.in_([60000.0, 3000.0])).delete(synchronize_session=False)
+                    s.query(db_mod.TradeArchive).filter(db_mod.TradeArchive.title.in_(["Legacy Archive", "Post-Upgrade Live Archive"])).delete(synchronize_session=False)
+                    s.commit()
+
 
 def tearDownModule():
     db_mod.engine.dispose()

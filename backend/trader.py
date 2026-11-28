@@ -249,10 +249,11 @@ class TradingBot:
         }
 
         active_symbols = [c.symbol for c in symbol_configs if getattr(c, "symbol", None)]
+        all_ws_symbols = self._load_all_enabled_symbols() or active_symbols
         if not getattr(self.ws_streamer, "_running", False):
-            self.ws_streamer.start(active_symbols)
+            self.ws_streamer.start(all_ws_symbols)
         else:
-            self.ws_streamer.update_symbols(active_symbols)
+            self.ws_streamer.update_symbols(all_ws_symbols)
 
         try:
             from database import record_operation_log
@@ -425,22 +426,29 @@ class TradingBot:
     # Symbol management
     # ------------------------------------------------------------------
     def _load_global_strategy_settings(self) -> None:
-        """Load strategy_mode (unless pinned) and cooldown_bars from DB settings."""
+        """Load strategy_mode (unless pinned) and cooldown_bars from DB settings (env-scoped)."""
         try:
             from database import SettingModel
             session = self.db_session_factory()
             try:
-                rows = session.query(SettingModel).filter(
-                    SettingModel.key.in_(["strategy_mode", "cooldown_bars"])
-                ).all()
+                keys = (
+                    ["paper:strategy_mode", "paper:cooldown_bars", "strategy_mode", "cooldown_bars"]
+                    if self.is_paper
+                    else ["strategy_mode", "cooldown_bars"]
+                )
+                rows = session.query(SettingModel).filter(SettingModel.key.in_(keys)).all()
                 kv = {r.key: (r.value or "").strip() for r in rows}
                 if self.fixed_strategy_mode:
                     self.strategy_mode = self.fixed_strategy_mode
                 else:
-                    mode = kv.get("strategy_mode", "").lower()
+                    mode = (kv.get("paper:strategy_mode") if self.is_paper else kv.get("strategy_mode") or "").lower()
+                    if not mode and self.is_paper:
+                        mode = kv.get("strategy_mode", "").lower()
                     if mode in VALID_STRATEGY_MODES:
                         self.strategy_mode = mode
-                raw_cd = kv.get("cooldown_bars", "")
+                raw_cd = (kv.get("paper:cooldown_bars") if self.is_paper else kv.get("cooldown_bars")) or ""
+                if raw_cd == "" and self.is_paper:
+                    raw_cd = kv.get("cooldown_bars", "")
                 if raw_cd != "":
                     self.cooldown_bars = max(0, min(500, int(float(raw_cd))))
             finally:
@@ -503,7 +511,7 @@ class TradingBot:
         logger.info("Monitoring started for %s", symbol)
 
     def _load_symbol_configs(self) -> list:
-        """Load enabled SymbolConfig rows from the database."""
+        """Load enabled SymbolConfig rows for this bot's environment (live vs paper)."""
         try:
             try:
                 from backend.database import SymbolConfig
@@ -511,7 +519,11 @@ class TradingBot:
                 from database import SymbolConfig
             session = self.db_session_factory()
             try:
-                rows = session.query(SymbolConfig).filter_by(enabled=True).all()
+                rows = (
+                    session.query(SymbolConfig)
+                    .filter_by(enabled=True, is_paper=bool(self.is_paper))
+                    .all()
+                )
                 for r in rows:
                     session.expunge(r)
                 return rows
@@ -519,6 +531,22 @@ class TradingBot:
                 session.close()
         except Exception as exc:
             logger.error("Failed to load symbol configs: %s", exc)
+            return []
+
+    def _load_all_enabled_symbols(self) -> list:
+        """Return deduplicated union of enabled symbols across live & paper for shared WS."""
+        try:
+            try:
+                from backend.database import SymbolConfig
+            except ImportError:
+                from database import SymbolConfig
+            session = self.db_session_factory()
+            try:
+                rows = session.query(SymbolConfig.symbol).filter_by(enabled=True).distinct().all()
+                return sorted({r[0] for r in rows if r and r[0]})
+            finally:
+                session.close()
+        except Exception:
             return []
 
     async def reload_symbols(self):
@@ -555,7 +583,8 @@ class TradingBot:
                 await self._start_symbol(cfg)
                 logger.info("Hot-reload: restarted %s with updated config", sym)
 
-        self.ws_streamer.update_symbols(list(desired.keys()))
+        all_ws_symbols = self._load_all_enabled_symbols() or list(desired.keys())
+        self.ws_streamer.update_symbols(all_ws_symbols)
         logger.info("Hot-reload completed: active symbols = %s", list(desired.keys()))
 
     # ------------------------------------------------------------------
@@ -716,7 +745,10 @@ class TradingBot:
         try:
             from database import Trade, SettingModel
 
-            row = session.query(SettingModel).filter(SettingModel.key == "max_daily_loss").first()
+            loss_key = "paper:max_daily_loss" if is_paper else "max_daily_loss"
+            row = session.query(SettingModel).filter(SettingModel.key == loss_key).first()
+            if row is None and is_paper:
+                row = session.query(SettingModel).filter(SettingModel.key == "max_daily_loss").first()
             max_pct = float(row.value) if row and row.value else 5.0
             if max_pct <= 0:
                 return False
@@ -1508,6 +1540,9 @@ class TradingBot:
             self.ws_callbacks.append(callback)
 
     def broadcast(self, message: dict):
+        if isinstance(message, dict) and message.get("type") not in {"ticker", "ma_update", "bot_status", "pong"}:
+            message.setdefault("is_paper", self.is_paper)
+            message.setdefault("mode", "paper" if self.is_paper else "live")
         self._persist_system_log_event(message)
         for cb in list(self.ws_callbacks):
             try:
@@ -1564,7 +1599,8 @@ class TradingBot:
                 def _write_log():
                     session = self.db_session_factory() if callable(self.db_session_factory) else None
                     try:
-                        record_system_log(log_msg, level=log_level, symbol=log_symbol, db=session)
+                        log_mode = message.get("mode") or ("paper" if self.is_paper else "live")
+                        record_system_log(log_msg, level=log_level, symbol=log_symbol, mode=log_mode, db=session)
                     finally:
                         if session is not None:
                             session.close()

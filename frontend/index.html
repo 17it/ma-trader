@@ -74,12 +74,16 @@
   </span>
 
   <div class="d-flex align-items-center gap-2 me-auto">
+    <span class="badge bg-danger" id="envBadge" style="font-size:11px;">实盘</span>
     <span class="status-dot" id="statusDot"></span>
     <span class="status-label d-none d-sm-inline" id="statusLabel">未连接</span>
     <span class="badge badge-ws ms-1" id="wsBadge">WS</span>
   </div>
 
   <div class="d-flex align-items-center gap-2">
+    <a class="btn btn-sm btn-outline-primary d-inline-flex align-items-center" id="btnSwitchEnv" href="/demo" title="切换到模拟盘演练">
+      <i class="fa-solid fa-flask me-1"></i><span class="d-none d-md-inline">模拟盘</span>
+    </a>
     <!-- 用户个人操作下拉菜单 -->
     <div class="dropdown" id="userMenuDropdown">
       <button class="btn btn-sm user-badge-btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -105,7 +109,7 @@
       <i class="fa-solid fa-sun" id="themeIcon"></i>
       <span class="d-none d-md-inline ms-1" id="themeLabel">日间模式</span>
     </button>
-    <div class="btn-group btn-group-sm" role="group" aria-label="交易控制">
+    <div class="d-inline-flex align-items-center" role="group" aria-label="交易控制">
       <button class="btn btn-sm btn-success" id="btnPaperToggle" title="启动模拟自动交易">
         <i class="fa-solid fa-play me-1"></i>模拟
       </button>
@@ -152,7 +156,7 @@
           <i class="fa-solid fa-chart-bar me-1"></i>统计
         </a>
       </li>
-      <li class="nav-item">
+      <li class="nav-item" id="navBacktestItem">
         <a class="nav-link" data-bs-toggle="tab" href="#tabBacktest">
           <i class="fa-solid fa-flask me-1"></i>回测
         </a>
@@ -239,8 +243,8 @@
                 <div class="progress-bar signal-progress-bar" id="signalProgressBar" role="progressbar" style="width:0%"></div>
               </div>
             </div>
-            <hr class="my-0 border-secondary" />
-            <div>
+            <div id="simOrderPanel">
+              <hr class="my-0 border-secondary mb-3" />
               <div class="d-flex align-items-center justify-content-between mb-2">
                 <span class="text-secondary small"><i class="fa-solid fa-gamepad me-1"></i>模拟下单</span>
                 <select class="form-select form-select-sm py-0 px-2 w-auto" id="simStrategyMode" style="font-size:11px;height:24px" title="归属模拟策略账户">
@@ -283,18 +287,18 @@
               </div>
               <div class="card-body">
                 <form id="globalSettingsForm">
-                  <div class="mb-3">
+                  <div class="mb-3" id="binanceKeyGroup">
                     <label class="form-label small">Binance API Key</label>
                     <input type="password" class="form-control form-control-sm" id="binanceKey" placeholder="••••••••" autocomplete="new-password" />
                   </div>
-                  <div class="mb-3">
+                  <div class="mb-3" id="binanceSecretGroup">
                     <label class="form-label small">Binance Secret</label>
                     <input type="password" class="form-control form-control-sm" id="binanceSecret" placeholder="••••••••" autocomplete="new-password" />
                   </div>
                   <div class="mb-3">
-                    <label class="form-label small">HTTP 代理 (网络受限时配置)</label>
+                    <label class="form-label small">HTTP 代理 (全局共享)</label>
                     <input type="text" class="form-control form-control-sm" id="httpProxy" placeholder="http://127.0.0.1:7890" />
-                    <div class="form-text text-secondary" style="font-size:11px">国内直连 Binance 超时时填入梯子端口</div>
+                    <div class="form-text text-secondary" style="font-size:11px">国内直连 Binance 超时时填入梯子端口（实盘与模拟盘共享）</div>
                   </div>
                   <div class="mb-3">
                     <label class="form-label small">Telegram Token</label>
@@ -310,7 +314,7 @@
                     <input type="text" class="form-control form-control-sm" id="telegramChatId" placeholder="纯数字 Chat ID (如留空或填写 Bot 名字，点击上方测试可自动识别)" />
                     <div class="form-text text-secondary" style="font-size:11px">在 Telegram 给机器人发消息后点击上方“测试”可自动获取并绑定数字 ID</div>
                   </div>
-                  <div class="mb-3 p-2 rounded border border-primary-subtle bg-body-tertiary">
+                  <div class="mb-3 p-2 rounded border border-primary-subtle bg-body-tertiary" id="strategyModeGroup">
                     <label class="form-label small fw-semibold mb-1"><i class="fa-solid fa-wand-magic-sparkles me-1 text-primary"></i>交易策略方案</label>
                     <select class="form-select form-select-sm" id="strategyMode">
                       <option value="balanced">方案 A：高胜率均衡版（1m/15m 推荐）</option>
@@ -1547,10 +1551,10 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
-<script src="js/auth.js?v=20261128_3"></script>
-<script src="js/chart.js?v=20261128_3"></script>
-<script src="js/settings.js?v=20261128_3"></script>
-<script src="js/backtest.js?v=20261128_3"></script>
-<script src="js/app.js?v=20261128_3"></script>
+<script src="js/auth.js?v=20261129_1"></script>
+<script src="js/chart.js?v=20261129_1"></script>
+<script src="js/settings.js?v=20261129_1"></script>
+<script src="js/backtest.js?v=20261129_1"></script>
+<script src="js/app.js?v=20261129_2"></script>
 </body>
 </html>

@@ -4,6 +4,9 @@
  */
 
 const AppController = (() => {
+  const IS_DEMO = window.location.pathname.startsWith('/demo');
+  const APP_ENV = IS_DEMO ? 'paper' : 'live';
+
   // ─── State ─────────────────────────────────────────────────────────
   const state = {
     currentSymbol: 'BTCUSDT',
@@ -22,8 +25,8 @@ const AppController = (() => {
     klinesData: [],
     isLoadingHistory: false,
     hasMoreHistory: true,
-    tradingMode: 'paper',
-    tradesMode: 'paper',
+    tradingMode: APP_ENV,
+    tradesMode: APP_ENV,
     tradesStrategies: ['balanced', 'breakout', 'ribbon', 'classic'],
     statsStrategies: ['balanced', 'breakout', 'ribbon', 'classic'],
     archives: [],
@@ -52,6 +55,9 @@ const AppController = (() => {
 
     // 0. Setup Theme (Day / Night mode)
     setupTheme();
+
+    // 0.02 Apply single-environment layout (/ = live, /demo = paper)
+    applyEnvironmentLayout();
 
     // 0.05 Setup collapsible sidebar (collapsed by default on small screens)
     setupSidebar();
@@ -353,6 +359,71 @@ const AppController = (() => {
     });
   }
 
+  function applyEnvironmentLayout() {
+    document.title = IS_DEMO ? 'MA Trader — 模拟盘 (/demo)' : 'MA Trader — 实盘交易';
+
+    const envBadge = document.getElementById('envBadge');
+    if (envBadge) {
+      envBadge.textContent = IS_DEMO ? '模拟盘' : '实盘';
+      envBadge.className = IS_DEMO ? 'badge bg-primary' : 'badge bg-danger';
+    }
+
+    const switchBtn = document.getElementById('btnSwitchEnv');
+    if (switchBtn) {
+      if (IS_DEMO) {
+        switchBtn.href = '/';
+        switchBtn.className = 'btn btn-sm btn-outline-danger d-inline-flex align-items-center';
+        switchBtn.title = '切换到实盘交易页面';
+        switchBtn.innerHTML = '<i class="fa-solid fa-bolt me-1"></i><span class="d-none d-md-inline">前往实盘</span>';
+      } else {
+        switchBtn.href = '/demo';
+        switchBtn.className = 'btn btn-sm btn-outline-primary d-inline-flex align-items-center';
+        switchBtn.title = '切换到模拟盘演练页面';
+        switchBtn.innerHTML = '<i class="fa-solid fa-flask me-1"></i><span class="d-none d-md-inline">前往模拟盘</span>';
+      }
+    }
+
+    const paperToggle = document.getElementById('btnPaperToggle');
+    const liveToggle  = document.getElementById('btnLiveToggle');
+    if (paperToggle) {
+      paperToggle.classList.toggle('d-none', !IS_DEMO);
+      paperToggle.classList.toggle('d-inline-flex', IS_DEMO);
+      paperToggle.hidden = !IS_DEMO;
+    }
+    if (liveToggle) {
+      liveToggle.classList.toggle('d-none', IS_DEMO);
+      liveToggle.classList.toggle('d-inline-flex', !IS_DEMO);
+      liveToggle.hidden = IS_DEMO;
+    }
+
+    // Backtest Tab is only shown in /demo
+    const navBt = document.getElementById('navBacktestItem');
+    const tabBt = document.getElementById('tabBacktest');
+    if (navBt) navBt.style.display = IS_DEMO ? '' : 'none';
+    if (tabBt && !IS_DEMO) tabBt.classList.remove('active', 'show');
+
+    // Sim order panel on homepage sidebar is only shown in /demo
+    const simPanel = document.getElementById('simOrderPanel');
+    if (simPanel) simPanel.style.display = IS_DEMO ? '' : 'none';
+
+    // Trades mode tabs & Stats mode selector are locked to current environment
+    const tradesModeTabs = document.getElementById('tradesModeTabs');
+    if (tradesModeTabs) tradesModeTabs.style.display = 'none';
+    const statsModeSel = document.getElementById('statsMode');
+    if (statsModeSel) {
+      statsModeSel.value = APP_ENV;
+      statsModeSel.style.display = 'none';
+    }
+
+    // Settings visibility: hide Binance API keys & live strategy selector on /demo
+    const bkGrp = document.getElementById('binanceKeyGroup');
+    const bsGrp = document.getElementById('binanceSecretGroup');
+    const smGrp = document.getElementById('strategyModeGroup');
+    if (bkGrp) bkGrp.style.display = IS_DEMO ? 'none' : '';
+    if (bsGrp) bsGrp.style.display = IS_DEMO ? 'none' : '';
+    if (smGrp) smGrp.style.display = IS_DEMO ? 'none' : '';
+  }
+
   // ─── Sidebar Collapse / Expand ─────────────────────────────────────
   function setupSidebar() {
     const sidebar = document.getElementById('sidebar');
@@ -491,13 +562,10 @@ const AppController = (() => {
   // ─── HTTP API Calls ────────────────────────────────────────────────
   async function loadSettings() {
     try {
-      const res = await fetch('/api/settings');
+      const res = await fetch(`/api/settings?env=${APP_ENV}`);
       if (res.ok) {
         const data = await res.json();
-        const settingsObj = data.settings || data;
-        if (settingsObj.trading_mode) {
-          state.tradingMode = settingsObj.trading_mode;
-        }
+        state.tradingMode = APP_ENV;
         if (typeof SettingsManager !== 'undefined') {
           SettingsManager.loadGlobalSettings(data);
         }
@@ -509,7 +577,7 @@ const AppController = (() => {
 
   async function loadSymbols() {
     try {
-      const res = await fetch('/api/symbols');
+      const res = await fetch(`/api/symbols?is_paper=${IS_DEMO}`);
       if (!res.ok) return;
       const symbols = await res.json();
       state.symbols = symbols;
@@ -665,7 +733,7 @@ const AppController = (() => {
 
   async function loadTrades() {
     try {
-      const res = await fetch('/api/trades?limit=500');
+      const res = await fetch(`/api/trades?is_paper=${IS_DEMO}&limit=500`);
       if (!res.ok) return;
       const trades = await res.json();
       state.trades = trades;
@@ -686,12 +754,10 @@ const AppController = (() => {
     try {
       const sym = document.getElementById('statsSymbol')?.value || '';
       const days = document.getElementById('statsDays')?.value || '30';
-      const mode = document.getElementById('statsMode')?.value || '';
       const selectedStrats = state.statsStrategies || [];
 
-      let url = `/api/stats?days=${days}`;
+      let url = `/api/stats?days=${days}&is_paper=${IS_DEMO}`;
       if (sym) url += `&symbol=${encodeURIComponent(sym)}`;
-      if (mode) url += `&is_paper=${mode === 'paper'}`;
       if (selectedStrats.length === 0) {
         url += '&strategy_modes=none';
       } else if (selectedStrats.length < 4) {
@@ -740,7 +806,7 @@ const AppController = (() => {
 
   async function checkBotStatus() {
     try {
-      const res = await fetch('/api/trading/status');
+      const res = await fetch(`/api/trading/status?is_paper=${IS_DEMO}`);
       if (res.ok) {
         const status = await res.json();
         if (status.mode) {
@@ -1077,7 +1143,7 @@ const AppController = (() => {
 
   async function loadArchivesList() {
     try {
-      const res = await fetch('/api/trades/archives');
+      const res = await fetch(`/api/trades/archives?is_paper=${IS_DEMO}`);
       if (!res.ok) return [];
       const list = await res.json();
       state.archives = Array.isArray(list) ? list : [];
@@ -1141,7 +1207,7 @@ const AppController = (() => {
     const titleVal = document.getElementById('archiveTitleInput')?.value?.trim() || null;
     if (btn) btn.disabled = true;
     try {
-      const res = await fetch('/api/trades/archive', {
+      const res = await fetch(`/api/trades/archive?is_paper=${IS_DEMO}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: titleVal })
@@ -1379,7 +1445,7 @@ const AppController = (() => {
   async function clearAllTrades() {
     if (!confirm('确定要清空当前未存档的全部交易记录吗？（已保存的历史存档不受影响）')) return;
     try {
-      const res = await fetch('/api/trades/clear', { method: 'POST' });
+      const res = await fetch(`/api/trades/clear?is_paper=${IS_DEMO}`, { method: 'POST' });
       if (res.ok) {
         appendLog('[记录管理] 已清空全部交易记录', 'info');
         await loadTrades();
@@ -1446,37 +1512,43 @@ const AppController = (() => {
     const paperBtn = document.getElementById('btnPaperToggle');
     const liveBtn  = document.getElementById('btnLiveToggle');
 
-    if (dot) dot.className = 'status-dot ' + (anyRunning ? 'running' : 'stopped');
+    const envRunning = IS_DEMO ? paperRunning : liveRunning;
+    if (dot) dot.className = 'status-dot ' + (envRunning ? 'running' : 'stopped');
     if (label) {
-      const paperDesc = activeCount > 0
-        ? `模拟(${activePaperList.map(m => m.short).join('/')})`
-        : '模拟';
-      if (paperRunning && liveRunning) label.textContent = `${paperDesc}+实盘运行中`;
-      else if (liveRunning)            label.textContent = '实盘运行中';
-      else if (paperRunning)           label.textContent = `${paperDesc}运行中`;
-      else                             label.textContent = '已停止';
+      if (IS_DEMO) {
+        const paperDesc = activeCount > 0
+          ? `模拟(${activePaperList.map(m => m.short).join('/')})`
+          : '模拟';
+        label.textContent = paperRunning ? `${paperDesc}运行中` : '已停止';
+      } else {
+        label.textContent = liveRunning ? '实盘运行中' : '已停止';
+      }
     }
 
     if (paperBtn) {
+      const displayCls = IS_DEMO ? 'd-inline-flex align-items-center' : 'd-none';
+      paperBtn.hidden = !IS_DEMO;
       if (paperRunning) {
         const cntSuffix = activeCount > 0 ? ` ${activeCount}/${PAPER_STRATEGY_META.length}` : '';
-        paperBtn.className = 'btn btn-sm btn-primary d-inline-flex align-items-center';
+        paperBtn.className = `btn btn-sm btn-primary ${displayCls}`;
         paperBtn.innerHTML = `<i class="fa-solid fa-flask me-1"></i>模拟${cntSuffix}`;
         paperBtn.title = '模拟盘运行中，点击管理各策略启停';
       } else {
-        paperBtn.className = 'btn btn-sm btn-success d-inline-flex align-items-center';
+        paperBtn.className = `btn btn-sm btn-success ${displayCls}`;
         paperBtn.innerHTML = '<i class="fa-solid fa-play me-1"></i>模拟';
         paperBtn.title = '点击管理多策略模拟盘启停';
       }
     }
 
     if (liveBtn) {
+      const displayCls = IS_DEMO ? 'd-none' : 'd-inline-flex align-items-center';
+      liveBtn.hidden = IS_DEMO;
       if (liveRunning) {
-        liveBtn.className = 'btn btn-sm btn-danger d-inline-flex align-items-center';
+        liveBtn.className = `btn btn-sm btn-danger ${displayCls}`;
         liveBtn.innerHTML = '<i class="fa-solid fa-stop me-1"></i>实盘';
         liveBtn.title = '实盘运行中，点击停止';
       } else {
-        liveBtn.className = 'btn btn-sm btn-outline-danger d-inline-flex align-items-center';
+        liveBtn.className = `btn btn-sm btn-outline-danger ${displayCls}`;
         liveBtn.innerHTML = '<i class="fa-solid fa-play me-1"></i>实盘';
         liveBtn.title = '点击启动实盘自动交易';
       }
@@ -1647,7 +1719,7 @@ const AppController = (() => {
 
   async function loadOperationLogs() {
     try {
-      let url = `/api/logs?page=${state.logsPage}&page_size=${state.logsPageSize}`;
+      let url = `/api/logs?mode=${APP_ENV}&page=${state.logsPage}&page_size=${state.logsPageSize}`;
       if (state.logsTypeFilter) {
         url += `&log_type=${encodeURIComponent(state.logsTypeFilter)}`;
       }
@@ -1731,7 +1803,7 @@ const AppController = (() => {
   async function clearOperationLogs() {
     if (!confirm('确定清空所有操作日志吗？此操作不可撤销。')) return;
     try {
-      const res = await fetch('/api/logs/clear', { method: 'POST' });
+      const res = await fetch(`/api/logs/clear?mode=${APP_ENV}`, { method: 'POST' });
       if (res.ok) {
         state.logsPage = 1;
         loadOperationLogs();
@@ -1754,7 +1826,7 @@ const AppController = (() => {
     const box = document.getElementById('logBox');
     if (!box || box.children.length > 0) return;
     try {
-      const res = await fetch('/api/system-logs?page=1&page_size=25');
+      const res = await fetch(`/api/system-logs?mode=${APP_ENV}&page=1&page_size=25`);
       if (!res.ok) return;
       const data = await res.json();
       const items = Array.isArray(data?.items) ? data.items.slice().reverse() : [];
@@ -1774,7 +1846,7 @@ const AppController = (() => {
 
   async function loadSystemLogs() {
     try {
-      let url = `/api/system-logs?page=${state.sysLogsPage}&page_size=${state.sysLogsPageSize}`;
+      let url = `/api/system-logs?mode=${APP_ENV}&page=${state.sysLogsPage}&page_size=${state.sysLogsPageSize}`;
       if (state.sysLogsLevelFilter) {
         url += `&level=${encodeURIComponent(state.sysLogsLevelFilter)}`;
       }
@@ -1863,7 +1935,7 @@ const AppController = (() => {
   async function clearSystemLogs() {
     if (!confirm('确定清空所有系统日志吗？此操作不可撤销。')) return;
     try {
-      const res = await fetch('/api/system-logs/clear', { method: 'POST' });
+      const res = await fetch(`/api/system-logs/clear?mode=${APP_ENV}`, { method: 'POST' });
       if (res.ok) {
         state.sysLogsPage = 1;
         loadSystemLogs();
@@ -2198,8 +2270,8 @@ const AppController = (() => {
       state.ws = ws;
 
       ws.onopen = () => {
-        // Send token in the first JSON frame instead of URL query string
-        ws.send(JSON.stringify({ type: 'auth', token }));
+        // Send token + environment ('live' | 'paper') in first JSON frame
+        ws.send(JSON.stringify({ type: 'auth', token, env: APP_ENV }));
         console.log('[WS] Connected to MA Trader stream');
         if (badge) {
           badge.className = 'badge bg-success-subtle text-success border border-success-subtle connected';

@@ -75,6 +75,7 @@ class SettingResponse(BaseModel):
 
 class SymbolConfigCreate(BaseModel):
     symbol: str = Field(..., min_length=4, max_length=25, example="BTCUSDT")
+    is_paper: bool = False
     timeframe: TimeframeType = Field("1m", example="1m")
     htf_timeframe: TimeframeType = Field("15m", example="15m")
     confirm_candles: int = Field(2, ge=1, le=20)
@@ -113,6 +114,7 @@ class SymbolConfigUpdate(BaseModel):
 class SymbolConfigResponse(BaseModel):
     id: int
     symbol: str
+    is_paper: bool = False
     timeframe: str
     htf_timeframe: str
     confirm_candles: int
@@ -305,6 +307,7 @@ class OperationLogPageResponse(BaseModel):
 class SystemLogResponse(BaseModel):
     id: int
     level: str
+    mode: Optional[str] = None
     symbol: Optional[str] = None
     message: str
     created_at: datetime
@@ -333,6 +336,7 @@ class TradeArchiveResponse(BaseModel):
     id: int
     title: str
     note: Optional[str] = None
+    is_paper: bool = False
     total_trades: int = 0
     closed_trades: int = 0
     win_trades: int = 0

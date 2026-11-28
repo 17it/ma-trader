@@ -3,6 +3,8 @@
  */
 
 const SettingsManager = (() => {
+  const IS_DEMO = window.location.pathname.startsWith('/demo');
+  const APP_ENV = IS_DEMO ? 'paper' : 'live';
   let symbols = [];
   let modalInstance = null;
   let editingId = null;
@@ -220,13 +222,13 @@ const SettingsManager = (() => {
         telegram_token:   document.getElementById('telegramToken').value.trim(),
         telegram_chat_id: document.getElementById('telegramChatId').value.trim(),
       };
-      await fetch('/api/settings', {
+      await fetch(`/api/settings?env=${APP_ENV}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      const res = await fetch('/api/settings/test-telegram', { method: 'POST' });
+      const res = await fetch(`/api/settings/test-telegram?env=${APP_ENV}`, { method: 'POST' });
       const rawText = await res.text();
       let data = {};
       try {
@@ -282,18 +284,20 @@ const SettingsManager = (() => {
     }
 
     const payload = {
-      binance_key:      document.getElementById('binanceKey').value.trim(),
-      binance_secret:   document.getElementById('binanceSecret').value.trim(),
       http_proxy:       (document.getElementById('httpProxy')?.value || '').trim(),
       telegram_token:   document.getElementById('telegramToken').value.trim(),
       telegram_chat_id: document.getElementById('telegramChatId').value.trim(),
       max_daily_loss:   document.getElementById('maxDailyLoss').value.trim() || '5',
-      strategy_mode:    document.getElementById('strategyMode')?.value || 'balanced',
       cooldown_bars:    (document.getElementById('cooldownBars')?.value ?? '30').toString().trim() || '30'
     };
+    if (!IS_DEMO) {
+      payload.binance_key = document.getElementById('binanceKey').value.trim();
+      payload.binance_secret = document.getElementById('binanceSecret').value.trim();
+      payload.strategy_mode = document.getElementById('strategyMode')?.value || 'balanced';
+    }
 
     try {
-      const res = await fetch('/api/settings', {
+      const res = await fetch(`/api/settings?env=${APP_ENV}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -477,6 +481,7 @@ const SettingsManager = (() => {
   async function saveSymbol() {
     const payload = {
       symbol:          document.getElementById('symSymbol').value.toUpperCase().trim(),
+      is_paper:        IS_DEMO,
       timeframe:       document.getElementById('symTf').value,
       htf_timeframe:   document.getElementById('symHtf').value,
       confirm_candles: parseInt(document.getElementById('symConfirm').value),

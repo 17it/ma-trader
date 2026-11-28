@@ -76,9 +76,13 @@ class UserModel(Base):
 
 class SymbolConfig(Base):
     __tablename__ = "symbol_configs"
+    __table_args__ = (
+        UniqueConstraint("symbol", "is_paper", name="uix_symbol_paper"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String, unique=True, nullable=False)       # e.g. "BTCUSDT"
+    symbol = Column(String, nullable=False)                    # e.g. "BTCUSDT"
+    is_paper = Column(Boolean, default=False, nullable=False)  # False=实盘, True=模拟盘
     timeframe = Column(String, default="1m")                   # "1m","5m","15m"
     htf_timeframe = Column(String, default="15m")              # 高时间框架
     confirm_candles = Column(Integer, default=2)               # 连续确认K线数
@@ -134,6 +138,7 @@ class TradeArchive(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String(120), nullable=False)
     note = Column(String(500), nullable=True)
+    is_paper = Column(Boolean, default=False, nullable=False)
     total_trades = Column(Integer, default=0)
     closed_trades = Column(Integer, default=0)
     win_trades = Column(Integer, default=0)
@@ -216,6 +221,7 @@ class SystemLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     level = Column(String(16), default="info", nullable=False, index=True)  # "info" | "success" | "warning" | "error"
+    mode = Column(String(16), nullable=True, index=True)                     # "paper" | "live" | None
     symbol = Column(String(32), nullable=True, index=True)
     message = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
@@ -226,6 +232,7 @@ def record_system_log(
     *,
     level: str = "info",
     symbol: str | None = None,
+    mode: str | None = None,
     db=None,
 ) -> None:
     """Persist a SystemLog entry safely without disrupting trading execution."""
@@ -242,6 +249,7 @@ def record_system_log(
     try:
         entry = SystemLog(
             level=norm_level,
+            mode=mode,
             symbol=symbol.upper() if symbol else None,
             message=str(message),
             created_at=datetime.now(timezone.utc),
@@ -431,6 +439,51 @@ def create_tables() -> None:
             conn.execute(text("ALTER TABLE symbol_configs ADD COLUMN breakeven_buffer FLOAT DEFAULT 0.003"))
         if "trailing_ma" not in sym_cols:
             conn.execute(text("ALTER TABLE symbol_configs ADD COLUMN trailing_ma VARCHAR(10) DEFAULT 'ma25'"))
+        if "is_paper" not in sym_cols:
+            # Rebuild symbol_configs to replace single-column UNIQUE(symbol) with UNIQUE(symbol, is_paper)
+            conn.execute(text("ALTER TABLE symbol_configs RENAME TO symbol_configs_old"))
+            conn.execute(text("""
+                CREATE TABLE symbol_configs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol VARCHAR NOT NULL,
+                    is_paper BOOLEAN NOT NULL DEFAULT 0,
+                    timeframe VARCHAR DEFAULT '1m',
+                    htf_timeframe VARCHAR DEFAULT '15m',
+                    confirm_candles INTEGER DEFAULT 2,
+                    leverage INTEGER DEFAULT 5,
+                    risk_per_trade FLOAT DEFAULT 0.01,
+                    rr_ratio FLOAT DEFAULT 1.5,
+                    trailing_activate_r FLOAT DEFAULT 0.88,
+                    breakeven_buffer FLOAT DEFAULT 0.003,
+                    trailing_ma VARCHAR(10) DEFAULT 'ma25',
+                    enabled BOOLEAN DEFAULT 1,
+                    CONSTRAINT uix_symbol_paper UNIQUE (symbol, is_paper)
+                )
+            """))
+            conn.execute(text("""
+                INSERT INTO symbol_configs
+                (symbol, is_paper, timeframe, htf_timeframe, confirm_candles, leverage, risk_per_trade, rr_ratio, trailing_activate_r, breakeven_buffer, trailing_ma, enabled)
+                SELECT symbol, 0, timeframe, htf_timeframe, confirm_candles, leverage, risk_per_trade, rr_ratio,
+                       COALESCE(trailing_activate_r, 0.88), COALESCE(breakeven_buffer, 0.003), COALESCE(trailing_ma, 'ma25'), enabled
+                FROM symbol_configs_old
+            """))
+            conn.execute(text("""
+                INSERT INTO symbol_configs
+                (symbol, is_paper, timeframe, htf_timeframe, confirm_candles, leverage, risk_per_trade, rr_ratio, trailing_activate_r, breakeven_buffer, trailing_ma, enabled)
+                SELECT symbol, 1, timeframe, htf_timeframe, confirm_candles, leverage, risk_per_trade, rr_ratio,
+                       COALESCE(trailing_activate_r, 0.88), COALESCE(breakeven_buffer, 0.003), COALESCE(trailing_ma, 'ma25'), enabled
+                FROM symbol_configs_old
+            """))
+            conn.execute(text("DROP TABLE symbol_configs_old"))
+
+        arc_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(trade_archives)")).fetchall()}
+        if "is_paper" not in arc_cols:
+            conn.execute(text("ALTER TABLE trade_archives ADD COLUMN is_paper BOOLEAN NOT NULL DEFAULT 0"))
+
+        syslog_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(system_logs)")).fetchall()}
+        if "mode" not in syslog_cols:
+            conn.execute(text("ALTER TABLE system_logs ADD COLUMN mode VARCHAR(16)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_system_logs_mode ON system_logs (mode)"))
 
         user_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(users)")).fetchall()}
         if "must_change_password" not in user_cols:
@@ -463,28 +516,66 @@ def create_tables() -> None:
                 # If database setting is empty, populate from .env environment variable
                 existing.value = env_val
 
-        # Seed default symbols if empty
+        # Seed independent paper settings once from existing live/global settings
+        for pkey in ("strategy_mode", "cooldown_bars", "max_daily_loss", "telegram_token", "telegram_chat_id"):
+            paper_key = f"paper:{pkey}"
+            if not db.query(SettingModel).filter(SettingModel.key == paper_key).first():
+                base_row = db.query(SettingModel).filter(SettingModel.key == pkey).first()
+                base_val = (base_row.value if base_row else DEFAULT_SETTINGS.get(pkey, "")) or ""
+                db.add(SettingModel(key=paper_key, value=base_val))
+
+        # Seed default symbols if empty (for both live and paper)
         if not db.query(SymbolConfig).first():
-            db.add(SymbolConfig(
-                symbol="BTCUSDT",
-                timeframe="1m",
-                htf_timeframe="15m",
-                confirm_candles=2,
-                leverage=5,
-                risk_per_trade=0.01,
-                rr_ratio=1.5,
-                enabled=True
-            ))
-            db.add(SymbolConfig(
-                symbol="ETHUSDT",
-                timeframe="1m",
-                htf_timeframe="15m",
-                confirm_candles=2,
-                leverage=5,
-                risk_per_trade=0.01,
-                rr_ratio=1.5,
-                enabled=True
-            ))
+            for paper_flag in (False, True):
+                db.add(SymbolConfig(
+                    symbol="BTCUSDT",
+                    is_paper=paper_flag,
+                    timeframe="1m",
+                    htf_timeframe="15m",
+                    confirm_candles=2,
+                    leverage=5,
+                    risk_per_trade=0.01,
+                    rr_ratio=1.5,
+                    enabled=True
+                ))
+                db.add(SymbolConfig(
+                    symbol="ETHUSDT",
+                    is_paper=paper_flag,
+                    timeframe="1m",
+                    htf_timeframe="15m",
+                    confirm_candles=2,
+                    leverage=5,
+                    risk_per_trade=0.01,
+                    rr_ratio=1.5,
+                    enabled=True
+                ))
+        elif not db.query(SettingModel).filter(SettingModel.key == "_paper_symbols_seeded").first():
+            has_paper_syms = db.query(SymbolConfig).filter(SymbolConfig.is_paper == True).first()  # noqa: E712
+            if not has_paper_syms:
+                for row in db.query(SymbolConfig).filter(SymbolConfig.is_paper == False).all():  # noqa: E712
+                    db.add(SymbolConfig(
+                        symbol=row.symbol,
+                        is_paper=True,
+                        timeframe=row.timeframe,
+                        htf_timeframe=row.htf_timeframe,
+                        confirm_candles=row.confirm_candles,
+                        leverage=row.leverage,
+                        risk_per_trade=row.risk_per_trade,
+                        rr_ratio=row.rr_ratio,
+                        trailing_activate_r=row.trailing_activate_r,
+                        breakeven_buffer=row.breakeven_buffer,
+                        trailing_ma=row.trailing_ma,
+                        enabled=row.enabled,
+                    ))
+            db.add(SettingModel(key="_paper_symbols_seeded", value="1"))
+
+        # One-time migration: treat all pre-existing trades, archives, and untagged system logs as paper data.
+        # Guarded by _migrated_existing_data_to_paper_v1 so future upgrades/restarts never repeat it.
+        if not db.query(SettingModel).filter(SettingModel.key == "_migrated_existing_data_to_paper_v1").first():
+            db.execute(text("UPDATE trades SET is_paper = 1 WHERE is_paper = 0 OR is_paper IS NULL"))
+            db.execute(text("UPDATE trade_archives SET is_paper = 1 WHERE is_paper = 0 OR is_paper IS NULL"))
+            db.execute(text("UPDATE system_logs SET mode = 'paper' WHERE mode IS NULL"))
+            db.add(SettingModel(key="_migrated_existing_data_to_paper_v1", value="1"))
         # Seed the admin user. Never ship a well-known default password:
         #   - ADMIN_PASSWORD from env if provided
         #   - otherwise a random password written to data/admin_initial_password.txt (0600)

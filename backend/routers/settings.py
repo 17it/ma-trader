@@ -23,11 +23,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from database import SymbolConfig, get_db
-from config import get_all_settings, update_settings
+from config import PAPER_SCOPED_SETTING_KEYS, extract_env_settings, get_all_settings, update_settings
 from models import (
     SymbolConfigCreate,
     SymbolConfigResponse,
@@ -136,14 +136,12 @@ def _validate_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
     return cleaned
 
 
-def _hot_reload_bot_settings(request: Request, full_settings: Dict[str, str]) -> None:
-    """Propagate updated notifier / proxy / API credentials to running bots & shared WS."""
+def _hot_reload_bot_settings(request: Request, full_settings: Dict[str, str], env: str = "live") -> None:
+    """Propagate updated notifier / proxy / API credentials to matching bots & shared WS."""
     bots = getattr(request.app.state, "bots", {}) or {}
-    tg_token = full_settings.get("telegram_token", "")
-    tg_chat = full_settings.get("telegram_chat_id", "")
+    live_cfg = extract_env_settings(full_settings, "live")
+    paper_cfg = extract_env_settings(full_settings, "paper")
     proxy = full_settings.get("http_proxy", "")
-    binance_key = full_settings.get("binance_key", "")
-    binance_secret = full_settings.get("binance_secret", "")
 
     shared_ws = getattr(request.app.state, "ws_streamer", None)
     if shared_ws is not None and hasattr(shared_ws, "update_proxy"):
@@ -152,27 +150,42 @@ def _hot_reload_bot_settings(request: Request, full_settings: Dict[str, str]) ->
     for mode_key, bot in bots.items():
         if bot is None:
             continue
+        is_paper_bot = mode_key != "live"
+        target_cfg = paper_cfg if is_paper_bot else live_cfg
         if hasattr(bot, "update_strategy_settings"):
             bot.update_strategy_settings(
-                full_settings.get("strategy_mode", "balanced"),
-                full_settings.get("cooldown_bars", "30"),
+                target_cfg.get("strategy_mode", "balanced"),
+                target_cfg.get("cooldown_bars", "30"),
             )
         notifier = getattr(bot, "notifier", None)
         if notifier is not None and hasattr(notifier, "update_config"):
-            notifier.update_config(tg_token, tg_chat, proxy=proxy)
+            notifier.update_config(
+                target_cfg.get("telegram_token", ""),
+                target_cfg.get("telegram_chat_id", ""),
+                proxy=proxy,
+            )
         data_feed = getattr(bot, "data_feed", None)
         if data_feed is not None:
             if hasattr(data_feed, "update_credentials") and mode_key == "live":
-                data_feed.update_credentials(binance_key, binance_secret, proxy=proxy)
+                data_feed.update_credentials(
+                    live_cfg.get("binance_key", ""),
+                    live_cfg.get("binance_secret", ""),
+                    proxy=proxy,
+                )
             elif hasattr(data_feed, "update_proxy"):
                 data_feed.update_proxy(proxy)
-        if mode_key == "live" and getattr(bot, "executor", None) is not None and binance_key and binance_secret:
+        if (
+            mode_key == "live"
+            and getattr(bot, "executor", None) is not None
+            and live_cfg.get("binance_key")
+            and live_cfg.get("binance_secret")
+        ):
             try:
                 from routers.trading import _build_exchange
-                new_ex = _build_exchange(full_settings, require_auth=True)
+                new_ex = _build_exchange(live_cfg, require_auth=True)
                 if new_ex is not None:
                     bot.executor.exchange = new_ex
-                    bot.executor.config = full_settings
+                    bot.executor.config = live_cfg
             except Exception:
                 pass
 
@@ -194,9 +207,13 @@ def _hot_reload_bot_settings(request: Request, full_settings: Dict[str, str]) ->
 # ---------------------------------------------------------------------------
 
 @router.get("/settings", summary="Get all settings (secrets masked)")
-def read_settings(db: Session = Depends(get_db)):
+def read_settings(
+    env: str = Query("live", pattern="^(live|paper)$"),
+    db: Session = Depends(get_db),
+):
     all_settings = get_all_settings(db)
-    masked = _mask_settings_response(all_settings)
+    env_settings = extract_env_settings(all_settings, env)
+    masked = _mask_settings_response(env_settings)
     resp = dict(masked)
     resp["settings"] = masked
     return resp
@@ -204,22 +221,39 @@ def read_settings(db: Session = Depends(get_db)):
 
 @router.put("/settings", summary="Bulk update settings")
 @router.post("/settings", summary="Bulk update settings (POST fallback for Nginx/CDN)")
-def write_settings(body: dict, request: Request, db: Session = Depends(get_db)):
+def write_settings(
+    body: dict,
+    request: Request,
+    env: str = Query("live", pattern="^(live|paper)$"),
+    db: Session = Depends(get_db),
+):
     if "settings" in body and isinstance(body["settings"], dict):
         raw_updates = {str(k): str(v) for k, v in body["settings"].items()}
     else:
         raw_updates = {str(k): str(v) for k, v in body.items() if k != "settings"}
 
     updates = _validate_settings_updates(raw_updates)
+    if env == "paper":
+        paper_updates: Dict[str, str] = {}
+        for k, v in updates.items():
+            if k in ("binance_key", "binance_secret"):
+                continue
+            if k in PAPER_SCOPED_SETTING_KEYS:
+                paper_updates[f"paper:{k}"] = v
+            else:
+                paper_updates[k] = v
+        updates = paper_updates
+
     updated = update_settings(db, updates) if updates else get_all_settings(db)
 
     cfg_mgr = getattr(request.app.state, "config", None)
     if cfg_mgr is not None and hasattr(cfg_mgr, "invalidate"):
         cfg_mgr.invalidate()
 
-    _hot_reload_bot_settings(request, updated)
+    _hot_reload_bot_settings(request, updated, env=env)
 
-    masked = _mask_settings_response(updated)
+    env_view = extract_env_settings(updated, env)
+    masked = _mask_settings_response(env_view)
     resp = dict(masked)
     resp["settings"] = masked
     return resp
@@ -230,15 +264,23 @@ def write_settings(body: dict, request: Request, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.get("/symbols", response_model=List[SymbolConfigResponse], summary="List symbol configs")
-def list_symbols(db: Session = Depends(get_db)):
-    return db.query(SymbolConfig).all()
+def list_symbols(
+    is_paper: Optional[bool] = Query(None),
+    db: Session = Depends(get_db),
+):
+    target_paper = False if is_paper is None else bool(is_paper)
+    return db.query(SymbolConfig).filter(SymbolConfig.is_paper == target_paper).all()
 
 
-async def _reload_running_bots(request: Request) -> None:
+async def _reload_running_bots(request: Request, db: Optional[Session] = None) -> None:
     bots = getattr(request.app.state, "bots", {}) or {}
     for bot in bots.values():
         if bot is not None and getattr(bot, "running", False) and hasattr(bot, "reload_symbols"):
             await bot.reload_symbols()
+    shared_ws = getattr(request.app.state, "ws_streamer", None)
+    if shared_ws is not None and getattr(shared_ws, "_running", False) and db is not None:
+        rows = db.query(SymbolConfig.symbol).filter_by(enabled=True).distinct().all()
+        shared_ws.update_symbols(sorted({r[0] for r in rows if r and r[0]}))
 
 
 @router.post(
@@ -248,14 +290,20 @@ async def _reload_running_bots(request: Request) -> None:
     summary="Create symbol config",
 )
 async def create_symbol(body: SymbolConfigCreate, request: Request, db: Session = Depends(get_db)):
-    existing = db.query(SymbolConfig).filter(SymbolConfig.symbol == body.symbol.upper()).first()
+    existing = (
+        db.query(SymbolConfig)
+        .filter(SymbolConfig.symbol == body.symbol.upper(), SymbolConfig.is_paper == body.is_paper)
+        .first()
+    )
     if existing:
+        env_label = "模拟盘" if body.is_paper else "实盘"
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Symbol '{body.symbol}' already exists.",
+            detail=f"{env_label}已存在交易对 '{body.symbol}'",
         )
     obj = SymbolConfig(
         symbol=body.symbol.upper(),
+        is_paper=body.is_paper,
         timeframe=body.timeframe,
         htf_timeframe=body.htf_timeframe,
         confirm_candles=body.confirm_candles,
@@ -271,7 +319,7 @@ async def create_symbol(body: SymbolConfigCreate, request: Request, db: Session 
     db.commit()
     db.refresh(obj)
 
-    await _reload_running_bots(request)
+    await _reload_running_bots(request, db=db)
     return obj
 
 
@@ -296,7 +344,7 @@ async def update_symbol(symbol_id: int, body: SymbolConfigUpdate, request: Reque
     db.commit()
     db.refresh(obj)
 
-    await _reload_running_bots(request)
+    await _reload_running_bots(request, db=db)
     return obj
 
 
@@ -312,7 +360,7 @@ async def delete_symbol(symbol_id: int, request: Request, db: Session = Depends(
     db.delete(obj)
     db.commit()
 
-    await _reload_running_bots(request)
+    await _reload_running_bots(request, db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +368,18 @@ async def delete_symbol(symbol_id: int, request: Request, db: Session = Depends(
 # ---------------------------------------------------------------------------
 
 @router.post("/settings/test-telegram", summary="Test Telegram notification")
-async def test_telegram_notification(request: Request, db: Session = Depends(get_db)):
+async def test_telegram_notification(
+    request: Request,
+    env: str = Query("live", pattern="^(live|paper)$"),
+    db: Session = Depends(get_db),
+):
     from notifier import TelegramNotifier
     from config import get_setting, set_setting
 
-    token = (get_setting(db, "telegram_token", "") or "").strip()
-    chat_id = (get_setting(db, "telegram_chat_id", "") or "").strip()
+    token_key = "paper:telegram_token" if env == "paper" else "telegram_token"
+    chat_key = "paper:telegram_chat_id" if env == "paper" else "telegram_chat_id"
+    token = (get_setting(db, token_key, "") or "").strip()
+    chat_id = (get_setting(db, chat_key, "") or "").strip()
     proxy = (get_setting(db, "http_proxy", "") or "").strip()
 
     if not token:
@@ -341,7 +395,7 @@ async def test_telegram_notification(request: Request, db: Session = Depends(get
         discovered = await notifier.get_latest_chat_id()
         if discovered and discovered.get("chat_id"):
             chat_id = discovered["chat_id"]
-            set_setting(db, "telegram_chat_id", chat_id)
+            set_setting(db, chat_key, chat_id)
             cfg_mgr = getattr(request.app.state, "config", None)
             if cfg_mgr is not None and hasattr(cfg_mgr, "invalidate"):
                 cfg_mgr.invalidate()
