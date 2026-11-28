@@ -27,7 +27,7 @@ BREAKEVEN_BUFFER = 0.003  # +0.3% / -0.3% profit-lock buffer
 TRAILING_MA_DEFAULT = "ma25"
 VALID_TRAILING_MAS = {"ma25", "ma60"}
 STRATEGY_MODE_DEFAULT = "classic"
-VALID_STRATEGY_MODES = {"balanced", "breakout", "classic"}
+VALID_STRATEGY_MODES = {"balanced", "breakout", "classic", "ribbon"}
 DEFAULT_COOLDOWN_BARS = 30
 DEFAULT_FEE_RATE = 0.0004
 DEFAULT_SLIPPAGE_RATE = 0.0001
@@ -40,6 +40,7 @@ class MAStrategy:
         self.confirm_count: int = 0
         self._last_direction: Optional[str] = None
         self._entry_time: Optional[datetime] = None
+        self._ribbon_traded_cross_dir: Optional[str] = None
         self.strategy_mode: str = (
             strategy_mode if strategy_mode in VALID_STRATEGY_MODES else STRATEGY_MODE_DEFAULT
         )
@@ -48,11 +49,16 @@ class MAStrategy:
         norm = str(mode or "").strip().lower()
         if norm in VALID_STRATEGY_MODES and norm != self.strategy_mode:
             self.strategy_mode = norm
+            self._ribbon_traded_cross_dir = None
             self.reset()
 
     def reset(self) -> None:
         self.confirm_count = 0
         self._last_direction = None
+
+    def mark_ribbon_traded(self, direction: Optional[str]) -> None:
+        if direction in ("long", "short"):
+            self._ribbon_traded_cross_dir = direction
 
     @staticmethod
     def normalize_mode(mode: Optional[str]) -> str:
@@ -66,6 +72,8 @@ class MAStrategy:
             return 1.0
         if mode == "breakout":
             return 1.2
+        if mode == "ribbon":
+            return 0.9
         return float(configured_r)
 
     # ------------------------------------------------------------------
@@ -111,10 +119,12 @@ class MAStrategy:
         htf_ma60: float = math.nan,
         fast_momentum: bool = False,
         ltf_atr14: float = math.nan,
+        ma25: float = math.nan,
     ) -> Tuple[float, float, float]:
         """
         Mode-aware initial stop-loss & reference take-profit:
           - classic : LTF MA60 or signal bar extreme, min 0.3%
+          - ribbon  : MA25 structure buffer clamp(1.3 * |entry - MA25|, 0.45%, 1.0%)
           - fast_momentum (Plan A/B 1m waterfall override): compact ATR/structure stop in [0.45%, 0.75%]
           - balanced: HTF wave volatility stop max(2.0 * HTF_ATR14, 0.8% of entry)
           - breakout: HTF structure stop max(|entry - HTF_MA60|, 1.8 * HTF_ATR14, 0.8% of entry)
@@ -123,7 +133,15 @@ class MAStrategy:
         if mode == "classic":
             return cls.compute_sl_tp(direction, entry_price, ma60, candle_low, candle_high, rr_ratio=rr_ratio)
 
-        if fast_momentum:
+        if mode == "ribbon":
+            d25 = 0.0
+            if not math.isnan(ma25) and ma25 > 0:
+                if direction == "long" and ma25 < entry_price:
+                    d25 = (entry_price - ma25) * 1.3
+                elif direction == "short" and ma25 > entry_price:
+                    d25 = (ma25 - entry_price) * 1.3
+            sl_distance = min(entry_price * 0.01, max(entry_price * 0.0045, d25))
+        elif fast_momentum:
             la = 0.0 if (math.isnan(ltf_atr14) or ltf_atr14 <= 0) else float(ltf_atr14)
             ma60_dist = 0.0
             if not math.isnan(ma60) and ma60 > 0:
@@ -276,7 +294,15 @@ class MAStrategy:
                 sl = max(current_stop_loss, sl) if direction == "long" else min(current_stop_loss, sl)
             return sl, True
 
-        if peak_r >= 2.0:
+        if mode == "ribbon":
+            if peak_r >= 2.0:
+                trail_gap = max(0.85 * risk_r, entry_price * 0.0085)
+                locked_dist = max(0.75 * risk_r, abs(best_price - entry_price) - trail_gap)
+            elif peak_r >= 1.4:
+                locked_dist = 0.75 * risk_r
+            else:
+                locked_dist = max(0.25 * risk_r, entry_price * 0.0025)
+        elif peak_r >= 2.0:
             cushion_pct = 0.010 if mode == "breakout" else 0.0085
             trail_gap = max(0.85 * risk_r, entry_price * cushion_pct)
             locked_dist = max(0.85 * risk_r, abs(best_price - entry_price) - trail_gap)
@@ -559,6 +585,20 @@ class MAStrategy:
             return reason
         return None
 
+    @staticmethod
+    def evaluate_ribbon_exit(direction: str, ma7: float, ma25: float) -> Optional[str]:
+        """
+        Plan C (ribbon) primary exit rule: close immediately when LTF MA7 crosses MA25
+        against the open position (even if trailing profit-lock hasn't activated yet).
+        """
+        if math.isnan(ma7) or math.isnan(ma25):
+            return None
+        if direction == "long" and ma7 <= ma25:
+            return "ma7_ma25_cross"
+        if direction == "short" and ma7 >= ma25:
+            return "ma7_ma25_cross"
+        return None
+
     def evaluate_bar(
         self,
         o: float,
@@ -579,13 +619,59 @@ class MAStrategy:
         """
         Single-bar entry signal state machine (identical for live and backtest):
           - classic : 3-line alignment + 3-bar MA7/MA25 slope, non-opposing HTF, ATR14 bias, adverse wick
+          - ribbon  : N consecutive bars on MA7 single side without crossing MA25 + expanding ribbon + ATR>=0.09% + non-opposing HTF
           - balanced: STRICT HTF trend required (or fast_dir 1m burst override) + LTF 3-line alignment
           - breakout: STRICT HTF strong-spread trend (or fast_dir 1m burst override) + LTF breakout
         """
         mode = self.normalize_mode(strategy_mode or self.strategy_mode)
         m7_0, _m7_1, m7_2 = ma7_seq
-        _m25_0, _m25_1, m25_2 = ma25_seq
+        m25_0, _m25_1, m25_2 = ma25_seq
         used_fast_override = False
+
+        if mode == "ribbon":
+            if any(math.isnan(v) for v in (o, h, l, c, m7_0, m7_2, m25_0, m25_2, atr14)) or c <= 0:
+                self.reset()
+                return None
+            cur_cross_dir = "long" if m7_2 > m25_2 else ("short" if m7_2 < m25_2 else None)
+            if self._ribbon_traded_cross_dir is not None and cur_cross_dir != self._ribbon_traded_cross_dir:
+                self._ribbon_traded_cross_dir = None
+
+            if c > m7_2 and m7_2 > m25_2 and l > m25_2:
+                direction = "long"
+            elif c < m7_2 and m7_2 < m25_2 and h < m25_2:
+                direction = "short"
+            else:
+                self.reset()
+                return None
+
+            if direction != self._last_direction:
+                self.confirm_count = 0
+                self._last_direction = direction
+            self.confirm_count = min(self.confirm_count + 1, confirm_candles)
+            signal_info = {
+                "direction": direction,
+                "confirm": self.confirm_count,
+                "max_confirm": confirm_candles,
+            }
+            if self.confirm_count < confirm_candles:
+                return {**signal_info, "pending": True}
+
+            # Entry-readiness filters on confirmed ribbon streak (without resetting streak count)
+            if self._ribbon_traded_cross_dir == direction:
+                return {**signal_info, "pending": True}
+            if atr14 / c < 0.0009:
+                return {**signal_info, "pending": True}
+            if abs(m7_2 - m25_2) <= abs(m7_0 - m25_0):
+                return {**signal_info, "pending": True}
+            if direction == "long" and not (m7_2 > m7_0 and m25_2 > m25_0):
+                return {**signal_info, "pending": True}
+            if direction == "short" and not (m7_2 < m7_0 and m25_2 < m25_0):
+                return {**signal_info, "pending": True}
+            if self.check_overextended_scalars(c, m25_2, atr14):
+                return {**signal_info, "pending": True}
+            if htf_dir is not None and htf_dir != direction:
+                return {**signal_info, "pending": True}
+            return signal_info
 
         if mode == "classic":
             direction = self.check_alignment_scalars(c, ma7_seq, ma25_seq, ma60)
@@ -702,7 +788,7 @@ class MAStrategy:
         if df_htf is None or len(df_htf) < 60:
             return None
         mode = self.normalize_mode(strategy_mode or self.strategy_mode)
-        if mode == "classic":
+        if mode in ("classic", "ribbon"):
             df_htf = self.calculate_ma(df_htf)
             last = df_htf.iloc[-1]
             return self.check_htf_scalars(
@@ -747,13 +833,13 @@ class MAStrategy:
         htf_ma200 = math.nan
         htf_atr14 = math.nan
         if df_htf is not None and len(df_htf) >= 60:
-            df_htf_calc = self.calculate_ma(df_htf, include_ma200=(mode != "classic"))
+            df_htf_calc = self.calculate_ma(df_htf, include_ma200=(mode not in ("classic", "ribbon")))
             htf_last = df_htf_calc.iloc[-1]
             htf_ma25 = float(htf_last["ma25"])
             htf_ma60 = float(htf_last["ma60"])
             htf_ma200 = float(htf_last["ma200"]) if "ma200" in df_htf_calc.columns else math.nan
             htf_atr14 = float(htf_last["atr14"])
-            if mode == "classic":
+            if mode in ("classic", "ribbon"):
                 htf_dir = self.check_htf_scalars(
                     float(htf_last["close"]), float(htf_last["ma7"]), htf_ma25, htf_ma60
                 )

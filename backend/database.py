@@ -122,8 +122,28 @@ class Trade(Base):
     trailing_activate_r = Column(Float, nullable=True)         # 开仓时该交易对的追踪触发 R
     breakeven_buffer = Column(Float, nullable=True)            # 开仓时该交易对的保本缓冲比例
     trailing_ma = Column(String(10), nullable=True)            # 开仓时该交易对的追踪均线（"ma25" | "ma60"）
-    strategy_mode = Column(String(20), nullable=True)          # 开仓时策略模式（"balanced" | "breakout" | "classic"）
+    strategy_mode = Column(String(20), nullable=True)          # 开仓时策略模式（"balanced" | "breakout" | "classic" | "ribbon"）
     fee = Column(Float, default=0.0)                           # 累计手续费（USDT）
+    archive_id = Column(Integer, nullable=True, index=True)    # 归属存档批次 ID（NULL 表示当前活动记录）
+
+
+class TradeArchive(Base):
+    """Archived batch of trades created when user archives & resets current session."""
+    __tablename__ = "trade_archives"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(120), nullable=False)
+    note = Column(String(500), nullable=True)
+    total_trades = Column(Integer, default=0)
+    closed_trades = Column(Integer, default=0)
+    win_trades = Column(Integer, default=0)
+    win_rate = Column(Float, default=0.0)
+    total_pnl = Column(Float, default=0.0)
+    paper_trades = Column(Integer, default=0)
+    live_trades = Column(Integer, default=0)
+    start_time = Column(DateTime, nullable=True)
+    end_time = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
 
 class SessionTokenModel(Base):
@@ -401,6 +421,8 @@ def create_tables() -> None:
             conn.execute(text("ALTER TABLE trades ADD COLUMN strategy_mode VARCHAR(20)"))
         if "fee" not in cols:
             conn.execute(text("ALTER TABLE trades ADD COLUMN fee FLOAT DEFAULT 0"))
+        if "archive_id" not in cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN archive_id INTEGER"))
 
         sym_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(symbol_configs)")).fetchall()}
         if "trailing_activate_r" not in sym_cols:
@@ -419,6 +441,7 @@ def create_tables() -> None:
         # Hot query paths: open-position restore, daily-loss check, stats
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trades_status_paper ON trades (status, is_paper)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trades_close_time ON trades (close_time)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trades_archive_id ON trades (archive_id)"))
 
     try:
         os.chmod(DB_PATH, 0o600)
@@ -516,6 +539,7 @@ def get_paper_equity(
         q = session.query(func.coalesce(func.sum(Trade.pnl), 0.0)).filter(
             Trade.status == "closed",
             Trade.is_paper == True,  # noqa: E712
+            Trade.archive_id.is_(None),
         )
         if strategy_mode:
             norm = str(strategy_mode).strip().lower()

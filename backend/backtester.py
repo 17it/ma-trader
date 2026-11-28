@@ -168,7 +168,7 @@ class Backtester:
         if df_htf_override is not None:
             df_htf = df_htf_override.copy().reset_index(drop=True)
         else:
-            htf_warmup = 220 if mode != "classic" else 70
+            htf_warmup = 220 if mode not in ("classic", "ribbon") else 70
             htf_fetch_since = since_ms - htf_warmup * htf_ms
             logger.info("[Backtest] Fetching HTF %s %s (mode=%s)", symbol, htf_timeframe, mode)
             raw_htf = _fetch_ohlcv_all(self.exchange, symbol, htf_timeframe, htf_fetch_since, until_ms)
@@ -223,7 +223,7 @@ class Backtester:
             max_closed_htf_open_ts = (ltf_open_ts + tf_ms) - htf_ms
             idx = int(np.searchsorted(htf_ts_arr, max_closed_htf_open_ts, side="right")) - 1
             if idx < 61 or idx >= len(htf_ts_arr):
-                return -1 if mode != "classic" else (idx if 59 <= idx < len(htf_ts_arr) else -1)
+                return -1 if mode not in ("classic", "ribbon") else (idx if 59 <= idx < len(htf_ts_arr) else -1)
             return idx
 
         def get_closed_htf_direction(htf_idx: int, ltf_c: float) -> Optional[str]:
@@ -233,7 +233,7 @@ class Backtester:
             """
             if htf_idx < 0:
                 return None
-            if mode == "classic":
+            if mode in ("classic", "ribbon"):
                 return MAStrategy.check_htf_scalars(
                     htf_close_arr[htf_idx], htf_ma7_arr[htf_idx], htf_ma25_arr[htf_idx], htf_ma60_arr[htf_idx]
                 )
@@ -343,7 +343,7 @@ class Backtester:
             htf_idx = get_closed_htf_idx(ts)
             trail_ma_val = ma60 if trailing_ma_key == "ma60" else ma25
 
-            # ---- 1. Manage open trade (aligned with TradingBot across classic / balanced / breakout) ----
+            # ---- 1. Manage open trade (aligned with TradingBot across classic / ribbon / balanced / breakout) ----
             if in_trade:
                 if trade_direction == "long":
                     if l <= trade_sl:
@@ -361,7 +361,13 @@ class Backtester:
                             if activated:
                                 trade_sl = new_ratchet_sl
                                 trailing_active = True
-                        if trailing_active:
+                        if mode == "ribbon":
+                            rib_exit = MAStrategy.evaluate_ribbon_exit("long", ma7, ma25)
+                            if rib_exit:
+                                record_close(c, ts, rib_exit)
+                                if eff_cooldown > 0:
+                                    cooldown_until_idx = i + eff_cooldown
+                        elif trailing_active:
                             if mode == "classic":
                                 exit_sig = MAStrategy.evaluate_exit_bar("long", c, trail_ma_val, True, trailing_ma=trailing_ma_key)
                                 if exit_sig:
@@ -397,7 +403,13 @@ class Backtester:
                             if activated:
                                 trade_sl = new_ratchet_sl
                                 trailing_active = True
-                        if trailing_active:
+                        if mode == "ribbon":
+                            rib_exit = MAStrategy.evaluate_ribbon_exit("short", ma7, ma25)
+                            if rib_exit:
+                                record_close(c, ts, rib_exit)
+                                if eff_cooldown > 0:
+                                    cooldown_until_idx = i + eff_cooldown
+                        elif trailing_active:
                             if mode == "classic":
                                 exit_sig = MAStrategy.evaluate_exit_bar("short", c, trail_ma_val, True, trailing_ma=trailing_ma_key)
                                 if exit_sig:
@@ -485,6 +497,7 @@ class Backtester:
                     htf_ma60=h_ma60,
                     fast_momentum=is_fast,
                     ltf_atr14=ltf_atr14[i],
+                    ma25=ma25,
                 )
                 if risk_r > 0:
                     qty = MAStrategy.calc_position_size(
@@ -508,6 +521,8 @@ class Backtester:
                         trade_qty = qty
                         trade_entry_time = ts
                         trade_entry_fee = entry_fill * qty * fee_rate
+                        if mode == "ribbon":
+                            strategy.mark_ribbon_traded(direction)
                         strategy.reset()
 
             # Record mark-to-market equity so drawdown & daily Sharpe capture floating P&L

@@ -122,11 +122,13 @@ STRATEGY_MODE_NAMES: Dict[str, str] = {
     "balanced": "方案A(高胜率均衡)",
     "breakout": "方案B(单边爆发)",
     "classic": "经典多均线",
+    "ribbon": "方案C(双均线贴线)",
 }
 STRATEGY_SHORT_NAMES: Dict[str, str] = {
     "balanced": "方案A",
     "breakout": "方案B",
     "classic": "经典",
+    "ribbon": "方案C",
 }
 _LAST_MA_BROADCAST: Dict[str, tuple] = {}
 
@@ -273,7 +275,11 @@ class TradingBot:
             from database import Trade
             session = self.db_session_factory()
             try:
-                open_q = session.query(Trade).filter_by(status="open", is_paper=self.is_paper)
+                open_q = session.query(Trade).filter(
+                    Trade.status == "open",
+                    Trade.is_paper == self.is_paper,
+                    Trade.archive_id.is_(None),
+                )
                 open_trades = self._scope_paper_query(open_q, Trade).all()
                 for ot in open_trades:
                     saved_risk = getattr(ot, "initial_risk", None)
@@ -337,6 +343,7 @@ class TradingBot:
                         Trade.status == "closed",
                         Trade.is_paper == self.is_paper,
                         Trade.close_time.isnot(None),
+                        Trade.archive_id.is_(None),
                     )
                     recent_closed = (
                         self._scope_paper_query(closed_q, Trade)
@@ -721,6 +728,7 @@ class TradingBot:
                 Trade.status == "closed",
                 Trade.is_paper == is_paper,
                 Trade.close_time >= today_start,
+                Trade.archive_id.is_(None),
             )
             closed_today = self._scope_paper_query(closed_q, Trade).all()
             today_pnl = sum(t.pnl or 0.0 for t in closed_today)
@@ -787,6 +795,7 @@ class TradingBot:
             htf_ma60=htf_ma60,
             fast_momentum=bool(signal.get("fast_momentum")),
             ltf_atr14=float(last["atr14"]) if "atr14" in last else math.nan,
+            ma25=ma25,
         )
         if sl_distance <= 0:
             return
@@ -913,6 +922,8 @@ class TradingBot:
                     "strategy_mode": cur_mode,
                     "entry_fee": entry_fee,
                 }
+                if cur_mode == "ribbon" and symbol in self.strategies:
+                    self.strategies[symbol].mark_ribbon_traded(direction)
 
                 trade_dict = {
                     "id": trade.id,
@@ -1133,8 +1144,12 @@ class TradingBot:
                     pos_trail_ma = TRAILING_MA_DEFAULT
                 pos_mode = MAStrategy.normalize_mode(pos.get("strategy_mode") or self.strategy_mode)
                 htf_timeframe = pos.get("htf_timeframe", "15m")
-                use_htf_rail = pos_mode != "classic"
-                trail_ma_label = f"{htf_timeframe} {pos_trail_ma.upper()}" if use_htf_rail else pos_trail_ma.upper()
+                use_htf_rail = pos_mode not in ("classic", "ribbon")
+                trail_ma_label = (
+                    "MA7×MA25"
+                    if pos_mode == "ribbon"
+                    else (f"{htf_timeframe} {pos_trail_ma.upper()}" if use_htf_rail else pos_trail_ma.upper())
+                )
 
                 # Track post-entry peak excursion from both live price and recent closed 1m wicks (prevents 15s missed-wick bug)
                 best_price = float(pos.get("best_price") or entry_price)
@@ -1212,9 +1227,32 @@ class TradingBot:
                     await self._close_trade(symbol, pos, close_reason, price)
                     continue
 
-                # 2. Once trailing is active: ONLY evaluate candles that CLOSED AFTER max(open_time, trailing_activated_at) (fixes V2-T1)
+                # 2. Indicator exit checks:
+                #    - ribbon: check closed LTF MA7xMA25 cross on every post-open bar (even before trailing activates)
+                #    - other modes: once trailing is active, ONLY evaluate candles CLOSED AFTER max(open_time, trailing_activated_at)
                 strategy = self.strategies.get(symbol)
-                if trailing_active and strategy is not None:
+                if pos_mode == "ribbon" and strategy is not None:
+                    df_rib = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, timeframe, 60)
+                    if df_rib is not None and not df_rib.empty:
+                        df_rib = strategy.calculate_ma(df_rib)
+                        eval_rib = df_rib.iloc[:-1] if len(df_rib) >= 2 else df_rib
+                        if len(eval_rib) >= 1:
+                            last_rib = eval_rib.iloc[-1]
+                            rib_close_ts = (
+                                (_to_utc_ts(last_rib["timestamp"]) + _TF_SECONDS.get(timeframe, 60))
+                                if "timestamp" in eval_rib.columns
+                                else float("inf")
+                            )
+                            if rib_close_ts > _to_utc_ts(open_time):
+                                rib_sig = MAStrategy.evaluate_ribbon_exit(
+                                    direction, float(last_rib["ma7"]), float(last_rib["ma25"])
+                                )
+                                if rib_sig:
+                                    await self._close_trade(
+                                        symbol, pos, rib_sig, price or float(df_rib.iloc[-1]["close"])
+                                    )
+                                    continue
+                elif trailing_active and strategy is not None:
                     rail_tf = htf_timeframe if use_htf_rail else timeframe
                     df = await asyncio.to_thread(self.data_feed.get_ohlcv, symbol, rail_tf, 100)
                     if df is not None and not df.empty:

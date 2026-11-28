@@ -166,7 +166,7 @@ class SimulateTradeRequest(BaseModel):
     symbol: str = Field(..., min_length=4, max_length=25)
     direction: Literal["long", "short"] = "long"
     entry_price: float = Field(..., gt=0)
-    strategy_mode: Optional[Literal["balanced", "breakout", "classic"]] = None
+    strategy_mode: Optional[Literal["balanced", "breakout", "classic", "ribbon"]] = None
 
     @field_validator("symbol")
     @classmethod
@@ -190,7 +190,7 @@ class BacktestRunCreate(BaseModel):
     trailing_activate_r: float = Field(0.88, ge=0.1, le=10.0)
     breakeven_buffer: float = Field(0.003, ge=0.0, le=0.05)
     trailing_ma: Literal["ma25", "ma60"] = "ma25"
-    strategy_mode: Optional[Literal["balanced", "breakout", "classic"]] = None
+    strategy_mode: Optional[Literal["balanced", "breakout", "classic", "ribbon"]] = None
     cooldown_bars: Optional[int] = Field(None, ge=0, le=500)
     initial_capital: float = Field(10000.0, gt=0, le=1e9)
     risk_per_trade: Optional[float] = Field(None, gt=0, le=0.2)
@@ -263,7 +263,7 @@ class TradingStatus(BaseModel):
     paper_running: bool = False
     live_running: bool = False
     paper_modes: Dict[str, bool] = Field(
-        default_factory=lambda: {"balanced": False, "breakout": False, "classic": False}
+        default_factory=lambda: {"balanced": False, "breakout": False, "classic": False, "ribbon": False}
     )
     mode: str                          # "paper" or "live" or "both"
     active_symbols: List[str] = Field(default_factory=list)
@@ -318,3 +318,35 @@ class SystemLogPageResponse(BaseModel):
     page: int = 1
     page_size: int = 20
     total_pages: int = 1
+
+
+# ---------------------------------------------------------------------------
+# Trade Archives
+# ---------------------------------------------------------------------------
+
+class ArchiveTradesRequest(BaseModel):
+    title: Optional[str] = Field(None, max_length=120)
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class TradeArchiveResponse(BaseModel):
+    id: int
+    title: str
+    note: Optional[str] = None
+    total_trades: int = 0
+    closed_trades: int = 0
+    win_trades: int = 0
+    win_rate: float = 0.0
+    total_pnl: float = 0.0
+    paper_trades: int = 0
+    live_trades: int = 0
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TradeArchiveDetailResponse(BaseModel):
+    archive: TradeArchiveResponse
+    trades: List[Any] = Field(default_factory=list)

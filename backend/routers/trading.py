@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import ccxt
@@ -20,6 +20,7 @@ from database import (
     get_db,
     get_paper_equity,
     Trade,
+    TradeArchive,
     SymbolConfig,
     OperationLog,
     SystemLog,
@@ -27,10 +28,13 @@ from database import (
     record_system_log,
 )
 from models import (
+    ArchiveTradesRequest,
     ManualCloseRequest,
     OperationLogPageResponse,
     SimulateTradeRequest,
     SystemLogPageResponse,
+    TradeArchiveDetailResponse,
+    TradeArchiveResponse,
     TradeResponse,
     TradingStatus,
     VALID_TIMEFRAMES,
@@ -85,7 +89,7 @@ def _get_cached_public_exchange(proxy: Optional[str]) -> Optional[object]:
 # Dependency helpers
 # ---------------------------------------------------------------------------
 
-PAPER_STRATEGY_MODES = ("balanced", "breakout", "classic")
+PAPER_STRATEGY_MODES = ("balanced", "breakout", "classic", "ribbon")
 
 
 def _paper_slot_key(strategy_mode: str) -> str:
@@ -99,6 +103,7 @@ def _get_bots(request: Request) -> dict:
             "paper:balanced": None,
             "paper:breakout": None,
             "paper:classic": None,
+            "paper:ribbon": None,
             "live": None,
         }
         request.app.state.bots = bots
@@ -220,7 +225,7 @@ def _normalize_httpx_proxy(proxy: Optional[str]) -> Optional[str]:
 async def start_trading(
     request: Request,
     mode: str = Query("paper", pattern="^(paper|live)$"),
-    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic|all)$"),
+    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic|ribbon|all)$"),
     db: Session = Depends(get_db),
 ):
     """Start TradingBot(s): 'live' (single) or 'paper' (one strategy_mode or 'all', sharing DataFeed & WS)."""
@@ -348,7 +353,7 @@ async def start_trading(
 async def stop_trading(
     request: Request,
     mode: Optional[str] = Query(None, pattern="^(paper|live)$"),
-    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic|all)$"),
+    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic|ribbon|all)$"),
     db: Session = Depends(get_db),
 ):
     """Stop TradingBot(s): specific paper strategy_mode, all paper bots, live bot, or everything."""
@@ -399,7 +404,11 @@ async def stop_trading(
             await ws_manager.broadcast(status_payload)
 
         open_live_count = (
-            db.query(Trade).filter(Trade.status == "open", Trade.is_paper == False).count()  # noqa: E712
+            db.query(Trade).filter(
+                Trade.status == "open",
+                Trade.is_paper == False,  # noqa: E712
+                Trade.archive_id.is_(None),
+            ).count()
             if live_stopped
             else 0
         )
@@ -466,11 +475,15 @@ async def get_trading_status(request: Request, db: Session = Depends(get_db)):
         if started:
             started_at_candidates.append(started)
 
-    open_trades_count = db.query(Trade).filter(Trade.status == "open").count()
+    open_trades_count = db.query(Trade).filter(Trade.status == "open", Trade.archive_id.is_(None)).count()
 
     # Calculate today's UTC realized PnL across closed trades
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-    today_q = db.query(Trade).filter(Trade.status == "closed", Trade.close_time >= today_start)
+    today_q = db.query(Trade).filter(
+        Trade.status == "closed",
+        Trade.close_time >= today_start,
+        Trade.archive_id.is_(None),
+    )
     if mode in ("paper", "live"):
         today_q = today_q.filter(Trade.is_paper == (mode == "paper"))
     today_trades = today_q.all()
@@ -504,11 +517,16 @@ def list_trades(
     symbol: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     is_paper: Optional[bool] = Query(None),
-    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic)$"),
+    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic|ribbon)$"),
+    archive_id: Optional[int] = Query(None),
     limit: int = Query(50, ge=1, le=500),
 ):
-    """Query trade records with optional filters."""
+    """Query trade records with optional filters (defaults to active unarchived trades)."""
     q = db.query(Trade)
+    if archive_id is not None:
+        q = q.filter(Trade.archive_id == archive_id)
+    else:
+        q = q.filter(Trade.archive_id.is_(None))
     if symbol:
         q = q.filter(Trade.symbol == symbol.upper())
     if status:
@@ -522,6 +540,183 @@ def list_trades(
             q = q.filter(Trade.strategy_mode == strategy_mode)
     trades = q.order_by(Trade.open_time.desc()).limit(limit).all()
     return [TradeResponse.model_validate(t) for t in trades]
+
+
+@router.get("/trades/archives", response_model=list[TradeArchiveResponse])
+def list_trade_archives(db: Session = Depends(get_db)):
+    """List all saved trade archive batches (newest first)."""
+    rows = db.query(TradeArchive).order_by(TradeArchive.id.desc()).all()
+    return [TradeArchiveResponse.model_validate(r) for r in rows]
+
+
+@router.get("/trades/archives/{archive_id}", response_model=TradeArchiveDetailResponse)
+def get_trade_archive_detail(archive_id: int, db: Session = Depends(get_db)):
+    """Get metadata and full trade list for a specific archive batch."""
+    arc = db.query(TradeArchive).filter(TradeArchive.id == archive_id).first()
+    if arc is None:
+        raise HTTPException(status_code=404, detail="存档记录不存在")
+    trades = (
+        db.query(Trade)
+        .filter(Trade.archive_id == archive_id)
+        .order_by(Trade.open_time.desc())
+        .all()
+    )
+    return TradeArchiveDetailResponse(
+        archive=TradeArchiveResponse.model_validate(arc),
+        trades=[TradeResponse.model_validate(t) for t in trades],
+    )
+
+
+@router.delete("/trades/archives/{archive_id}")
+def delete_trade_archive(archive_id: int, db: Session = Depends(get_db)):
+    """Delete an archived batch and its archived trade rows."""
+    arc = db.query(TradeArchive).filter(TradeArchive.id == archive_id).first()
+    if arc is None:
+        raise HTTPException(status_code=404, detail="存档记录不存在")
+    deleted_trades = db.query(Trade).filter(Trade.archive_id == archive_id).delete()
+    db.delete(arc)
+    db.commit()
+    return {"status": "deleted", "id": archive_id, "deleted_trades": deleted_trades}
+
+
+@router.post("/trades/archive", response_model=TradeArchiveResponse)
+async def archive_trades(
+    request: Request,
+    body: Optional[ArchiveTradesRequest] = Body(default=None),
+    db: Session = Depends(get_db),
+):
+    """
+    Archive all current active trades into a snapshot batch and reset active state
+    (paper equities, bot open paper positions, cooldowns, and active trade list) back to initial state.
+    Refuses if any LIVE position is still open on the exchange.
+    """
+    open_live = db.query(Trade).filter(
+        Trade.status == "open",
+        Trade.is_paper == False,  # noqa: E712
+        Trade.archive_id.is_(None),
+    ).count()
+    if open_live > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前仍有 {open_live} 笔持仓中的实盘订单，请先平仓后再执行存档！",
+        )
+
+    active_trades = (
+        db.query(Trade)
+        .filter(Trade.archive_id.is_(None))
+        .order_by(Trade.open_time.asc())
+        .all()
+    )
+    if not active_trades:
+        raise HTTPException(status_code=400, detail="当前暂无可存档的交易记录")
+
+    cfg_mgr = _get_config(request)
+    cfg = cfg_mgr.get_all_cached() if (cfg_mgr is not None and hasattr(cfg_mgr, "get_all_cached")) else {}
+    now_utc = datetime.now(timezone.utc)
+
+    # Settle any still-open paper positions at current live price (fallback entry_price) before archiving
+    price_cache: dict[str, float] = {}
+    for t in active_trades:
+        if t.status == "open" and t.is_paper:
+            if t.symbol not in price_cache:
+                px = await _resolve_live_price(request, t.symbol, cfg, allow_spot=True)
+                price_cache[t.symbol] = float(px) if (px and px > 0) else float(t.entry_price)
+            exit_px = price_cache[t.symbol]
+            gross = (
+                (exit_px - t.entry_price) * t.quantity
+                if t.direction == "long"
+                else (t.entry_price - exit_px) * t.quantity
+            )
+            fee_val = float(t.fee or 0.0)
+            net_pnl = gross - fee_val
+            notional = t.entry_price * t.quantity
+            t.exit_price = exit_px
+            t.pnl = round(net_pnl, 4)
+            t.pnl_pct = round((net_pnl / notional * 100.0) if notional > 0 else 0.0, 4)
+            t.close_time = now_utc
+            t.close_reason = "archived"
+            t.status = "closed"
+
+    total_cnt = len(active_trades)
+    closed_list = [t for t in active_trades if t.status == "closed"]
+    closed_cnt = len(closed_list)
+    win_cnt = sum(1 for t in closed_list if (t.pnl or 0.0) > 0)
+    win_rate = round((win_cnt / closed_cnt * 100.0) if closed_cnt > 0 else 0.0, 2)
+    total_pnl = round(sum(float(t.pnl or 0.0) for t in closed_list), 4)
+    paper_cnt = sum(1 for t in active_trades if t.is_paper)
+    live_cnt = total_cnt - paper_cnt
+    def _utc_naive(dt_val: Optional[datetime]) -> Optional[datetime]:
+        if dt_val is None:
+            return None
+        return dt_val.astimezone(timezone.utc).replace(tzinfo=None) if dt_val.tzinfo else dt_val
+
+    now_naive = _utc_naive(now_utc)
+    start_dt = min((_utc_naive(t.open_time) for t in active_trades if t.open_time), default=now_naive)
+    end_dt = max(
+        (_utc_naive(t.close_time or t.open_time) for t in active_trades if (t.close_time or t.open_time)),
+        default=now_naive,
+    )
+
+    bj_now = now_utc.astimezone(timezone(timedelta(hours=8)))
+    raw_title = (body.title or "").strip() if body else ""
+    raw_note = (body.note or "").strip() if body else ""
+    title = raw_title or f"存档 {bj_now.strftime('%Y-%m-%d %H:%M')}"
+
+    arc = TradeArchive(
+        title=title,
+        note=raw_note or None,
+        total_trades=total_cnt,
+        closed_trades=closed_cnt,
+        win_trades=win_cnt,
+        win_rate=win_rate,
+        total_pnl=total_pnl,
+        paper_trades=paper_cnt,
+        live_trades=live_cnt,
+        start_time=start_dt,
+        end_time=end_dt,
+        created_at=now_utc,
+    )
+    db.add(arc)
+    db.flush()
+
+    for t in active_trades:
+        t.archive_id = arc.id
+    db.commit()
+    db.refresh(arc)
+
+    # Reset all bots' in-memory paper positions, cooldowns, and signal state back to initial state
+    bots = _get_bots(request)
+    for slot_key, bot in bots.items():
+        if bot is None:
+            continue
+        if getattr(bot, "is_paper", True) and hasattr(bot, "positions"):
+            bot.positions.clear()
+        if hasattr(bot, "cooldown_until_ts"):
+            bot.cooldown_until_ts.clear()
+        if hasattr(bot, "cooldown_last_dir"):
+            bot.cooldown_last_dir.clear()
+        if hasattr(bot, "confirm_counts"):
+            for k in list(bot.confirm_counts.keys()):
+                bot.confirm_counts[k] = 0
+        if hasattr(bot, "strategies"):
+            for st in bot.strategies.values():
+                st.reset()
+                st._ribbon_traded_cross_dir = None
+
+    pnl_sign = "+" if total_pnl >= 0 else ""
+    record_operation_log(
+        log_type="archive",
+        title=f"交易记录存档 ({arc.title})",
+        message=f"归档 {total_cnt} 笔交易（胜率 {win_rate:.1f}%，净盈亏 {pnl_sign}${total_pnl:.2f}），当前账户已恢复初始状态",
+        level="info",
+        db=db,
+    )
+    ws_manager = _get_ws_manager(request)
+    if ws_manager is not None:
+        await ws_manager.broadcast({"type": "trades_archived", "archive_id": arc.id})
+        await ws_manager.broadcast({"type": "operation_log"})
+
+    return TradeArchiveResponse.model_validate(arc)
 
 
 @router.get("/trades/{trade_id}", response_model=TradeResponse)
@@ -559,6 +754,7 @@ async def simulate_trade(
         Trade.symbol == symbol,
         Trade.status == "open",
         Trade.is_paper == True,  # noqa: E712
+        Trade.archive_id.is_(None),
     )
     if strategy_mode == "balanced":
         dup_q = dup_q.filter(or_(Trade.strategy_mode == "balanced", Trade.strategy_mode.is_(None)))
@@ -899,15 +1095,19 @@ def delete_trade(trade_id: int, request: Request, db: Session = Depends(get_db))
 @router.delete("/trades")
 @router.post("/trades/clear")
 def clear_trades(request: Request, db: Session = Depends(get_db)):
-    """Delete trade records (refuses to clear while any live position is still open)."""
-    open_live = db.query(Trade).filter(Trade.status == "open", Trade.is_paper == False).count()  # noqa: E712
+    """Delete active unarchived trade records (preserves saved archives; refuses while any live position is open)."""
+    open_live = db.query(Trade).filter(
+        Trade.status == "open",
+        Trade.is_paper == False,  # noqa: E712
+        Trade.archive_id.is_(None),
+    ).count()
     if open_live > 0:
         raise HTTPException(
             status_code=400,
             detail=f"当前仍有 {open_live} 笔持仓中的实盘订单，禁止清空全部记录，请先平仓！",
         )
 
-    deleted_count = db.query(Trade).delete()
+    deleted_count = db.query(Trade).filter(Trade.archive_id.is_(None)).delete()
     db.commit()
 
     bots = _get_bots(request)

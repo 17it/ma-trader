@@ -116,10 +116,10 @@ def _validate_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
             )
         if k == "strategy_mode" and val:
             val = val.lower()
-            if val not in {"balanced", "breakout", "classic"}:
+            if val not in {"balanced", "breakout", "classic", "ribbon"}:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="strategy_mode 仅支持 balanced（方案A）、breakout（方案B）或 classic（经典）",
+                    detail="strategy_mode 仅支持 balanced（方案A）、breakout（方案B）、ribbon（方案C）或 classic（经典）",
                 )
         if k == "cooldown_bars" and val != "":
             try:

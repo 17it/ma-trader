@@ -14,7 +14,7 @@ const AppController = (() => {
     botRunning: false,
     paperRunning: false,
     liveRunning: false,
-    paperModes: { balanced: false, breakout: false, classic: false },
+    paperModes: { balanced: false, breakout: false, classic: false, ribbon: false },
     paperModalOpen: false,
     ws: null,
     wsPingInterval: null,
@@ -24,8 +24,11 @@ const AppController = (() => {
     hasMoreHistory: true,
     tradingMode: 'paper',
     tradesMode: 'paper',
-    tradesStrategies: ['balanced', 'breakout', 'classic'],
-    statsStrategies: ['balanced', 'breakout', 'classic'],
+    tradesStrategies: ['balanced', 'breakout', 'ribbon', 'classic'],
+    statsStrategies: ['balanced', 'breakout', 'ribbon', 'classic'],
+    archives: [],
+    activeArchiveDetail: null,
+    archiveDetailStrategies: ['balanced', 'breakout', 'ribbon', 'classic'],
     tradesPage: 1,
     tradesPageSize: 20,
     logs: [],
@@ -85,6 +88,7 @@ const AppController = (() => {
     try { await loadSymbols(); } catch (e) { console.warn(e); }
     try { await checkBotStatus(); } catch (e) { console.warn(e); }
     try { await loadTrades(); } catch (e) { console.warn(e); }
+    try { await loadArchivesList(); } catch (e) { console.warn(e); }
     try { await loadStats(); } catch (e) { console.warn(e); }
     try { await hydrateHomepageLogBox(); } catch (e) { console.warn(e); }
 
@@ -308,9 +312,16 @@ const AppController = (() => {
     if (btnSimLong) btnSimLong.addEventListener('click', () => simulateTrade('long'));
     if (btnSimShort) btnSimShort.addEventListener('click', () => simulateTrade('short'));
 
-    // Clear all trades button
+    // Clear & Archive trades buttons
     const btnClearTrades = document.getElementById('btnClearTrades');
     if (btnClearTrades) btnClearTrades.addEventListener('click', clearAllTrades);
+    const btnArchiveTrades = document.getElementById('btnArchiveTrades');
+    if (btnArchiveTrades) btnArchiveTrades.addEventListener('click', openArchiveConfirmModal);
+    const btnConfirmArchiveAction = document.getElementById('btnConfirmArchiveAction');
+    if (btnConfirmArchiveAction) btnConfirmArchiveAction.addEventListener('click', executeArchiveTrades);
+    const btnViewArchives = document.getElementById('btnViewArchives');
+    if (btnViewArchives) btnViewArchives.addEventListener('click', openArchivesModal);
+    _bindArchiveDetailStrategyBtns();
   }
 
   function _bindStrategyToggleGroup(containerId, getSelected, onUpdate) {
@@ -325,7 +336,7 @@ const AppController = (() => {
         } else {
           cur.add(key);
         }
-        const next = ['balanced', 'breakout', 'classic'].filter(k => cur.has(k));
+        const next = ['balanced', 'breakout', 'ribbon', 'classic'].filter(k => cur.has(k));
         wrap.querySelectorAll('button[data-strategy]').forEach(b => {
           const bKey = b.getAttribute('data-strategy');
           const active = cur.has(bKey);
@@ -676,7 +687,7 @@ const AppController = (() => {
       if (mode) url += `&is_paper=${mode === 'paper'}`;
       if (selectedStrats.length === 0) {
         url += '&strategy_modes=none';
-      } else if (selectedStrats.length < 3) {
+      } else if (selectedStrats.length < 4) {
         url += `&strategy_modes=${encodeURIComponent(selectedStrats.join(','))}`;
       }
 
@@ -739,14 +750,16 @@ const AppController = (() => {
   let botConfirmModalInstance = null;
 
   const PAPER_STRATEGY_META = [
-    { key: 'balanced', short: '方案A', name: '方案 A：高胜率均衡', desc: '双周期三线+斜率+MA200顺势 · 独立$10,000模拟账户' },
-    { key: 'breakout', short: '方案B', name: '方案 B：单边爆发',   desc: '大周期强发散+小周期突破 · 独立$10,000模拟账户' },
+    { key: 'balanced', short: '方案A', name: '方案 A：高胜率均衡', desc: '双周期三线+极速单边+阶梯锁盈 · 独立$10,000模拟账户' },
+    { key: 'breakout', short: '方案B', name: '方案 B：单边爆发',   desc: '大周期强发散+极速突破+阶梯锁盈 · 独立$10,000模拟账户' },
+    { key: 'ribbon',   short: '方案C', name: '方案 C：双均线贴线', desc: '1m连续贴MA7单边+未破MA25+交叉离场 · 独立$10,000模拟账户' },
     { key: 'classic',  short: '经典',  name: '经典多均线',         desc: '三线排列+自定义触发R追踪 · 独立$10,000模拟账户' },
   ];
 
   function _strategyShortLabel(mode) {
     const m = String(mode || 'balanced').toLowerCase();
     if (m === 'breakout') return '方案B';
+    if (m === 'ribbon') return '方案C';
     if (m === 'classic') return '经典';
     return '方案A';
   }
@@ -757,10 +770,11 @@ const AppController = (() => {
     const footerEl = document.getElementById('botModalFooter');
     if (!titleEl || !bodyEl || !footerEl) return;
 
-    const pm = state.paperModes || { balanced: false, breakout: false, classic: false };
+    const pm = state.paperModes || { balanced: false, breakout: false, classic: false, ribbon: false };
+    const totalSlots = PAPER_STRATEGY_META.length;
     const runningCount = PAPER_STRATEGY_META.filter(item => Boolean(pm[item.key])).length;
 
-    titleEl.innerHTML = `<i class="fa-solid fa-flask text-primary"></i><span>模拟盘独立启停控制 (${runningCount}/3 运行中)</span>`;
+    titleEl.innerHTML = `<i class="fa-solid fa-flask text-primary"></i><span>模拟盘独立启停控制 (${runningCount}/${totalSlots} 运行中)</span>`;
 
     const rowsHtml = PAPER_STRATEGY_META.map(item => {
       const running = Boolean(pm[item.key]);
@@ -788,7 +802,7 @@ const AppController = (() => {
 
     bodyEl.innerHTML = `
       <div class="small text-secondary mb-2">
-        三个模拟盘共享同一套实时行情与 K 线缓存（零重复内存与请求开销），各自独立持仓、独立风控与独立 $10,000 权益核算。
+        四个模拟盘共享同一套实时行情与 K 线缓存（零重复内存与请求开销），各自独立持仓、独立风控与独立 $10,000 权益核算。
       </div>
       ${rowsHtml}
     `;
@@ -810,7 +824,7 @@ const AppController = (() => {
     footerEl.innerHTML = `
       <div class="d-flex w-100 justify-content-between align-items-center gap-2">
         <div class="d-flex gap-2">
-          <button type="button" class="btn btn-outline-success btn-sm" id="btnStartAllPaper" ${runningCount === 3 ? 'disabled' : ''}>
+          <button type="button" class="btn btn-outline-success btn-sm" id="btnStartAllPaper" ${runningCount === totalSlots ? 'disabled' : ''}>
             <i class="fa-solid fa-play me-1"></i>全部启动
           </button>
           <button type="button" class="btn btn-outline-danger btn-sm" id="btnStopAllPaper" ${runningCount === 0 ? 'disabled' : ''}>
@@ -1051,8 +1065,276 @@ const AppController = (() => {
     }
   }
 
+  let archiveConfirmModalInstance = null;
+  let archivesModalInstance = null;
+
+  async function loadArchivesList() {
+    try {
+      const res = await fetch('/api/trades/archives');
+      if (!res.ok) return [];
+      const list = await res.json();
+      state.archives = Array.isArray(list) ? list : [];
+      const badge = document.getElementById('archiveCountBadge');
+      if (badge) badge.textContent = state.archives.length;
+      return state.archives;
+    } catch (err) {
+      console.warn('[App] Load archives error:', err);
+      return [];
+    }
+  }
+
+  function openArchiveConfirmModal() {
+    const allTrades = state.trades || [];
+    const openLive = allTrades.filter(t => !t.is_paper && t.status === 'open');
+    if (openLive.length > 0) {
+      alert(`当前仍有 ${openLive.length} 笔持仓中的【实盘】订单，请先平仓后再执行存档！`);
+      return;
+    }
+    if (allTrades.length === 0) {
+      alert('当前暂无可存档的交易记录。');
+      return;
+    }
+
+    const paperCnt = allTrades.filter(t => Boolean(t.is_paper)).length;
+    const liveCnt = allTrades.length - paperCnt;
+    const openPaperCnt = allTrades.filter(t => Boolean(t.is_paper) && t.status === 'open').length;
+    const closedPnl = allTrades
+      .filter(t => t.status === 'closed')
+      .reduce((acc, t) => acc + Number(t.pnl || 0), 0);
+    const pnlSign = closedPnl >= 0 ? '+' : '';
+    const pnlCls = closedPnl >= 0 ? 'text-success' : 'text-danger';
+
+    const summaryEl = document.getElementById('archiveConfirmSummary');
+    if (summaryEl) {
+      const openTip = openPaperCnt > 0
+        ? `<div class="mt-2 text-warning"><i class="fa-solid fa-triangle-exclamation me-1"></i>当前包含 <b>${openPaperCnt}</b> 笔持仓中的模拟单，确认存档时将自动按实时市价结算并一并归档。</div>`
+        : '';
+      summaryEl.innerHTML = `
+        <div class="p-2 rounded border border-secondary-subtle bg-body-tertiary">
+          <div>即将归档交易记录：<b>${allTrades.length}</b> 笔（模拟 <b>${paperCnt}</b> 笔 / 实盘 <b>${liveCnt}</b> 笔）</div>
+          <div class="mt-1">已平仓累计净盈亏：<span class="${pnlCls} fw-bold">${pnlSign}$${closedPnl.toFixed(2)}</span></div>
+          ${openTip}
+        </div>
+      `;
+    }
+
+    const titleInput = document.getElementById('archiveTitleInput');
+    if (titleInput) titleInput.value = '';
+
+    const modalEl = document.getElementById('archiveConfirmModal');
+    if (!modalEl || typeof bootstrap === 'undefined') return;
+    if (!archiveConfirmModalInstance) {
+      archiveConfirmModalInstance = new bootstrap.Modal(modalEl);
+    }
+    archiveConfirmModalInstance.show();
+  }
+
+  async function executeArchiveTrades() {
+    const btn = document.getElementById('btnConfirmArchiveAction');
+    const titleVal = document.getElementById('archiveTitleInput')?.value?.trim() || null;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch('/api/trades/archive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: titleVal })
+      });
+      if (res.ok) {
+        const arc = await res.json();
+        if (archiveConfirmModalInstance) archiveConfirmModalInstance.hide();
+        appendLog(`[交易存档] 已创建「${arc.title}」（共 ${arc.total_trades} 笔），当前状态已恢复初始值`, 'success');
+        state.tradesPage = 1;
+        await Promise.all([loadTrades(), loadStats(), loadArchivesList(), checkBotStatus()]);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('存档失败: ' + (err.detail || res.statusText));
+      }
+    } catch (err) {
+      alert('存档请求失败: ' + err.message);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function _bindArchiveDetailStrategyBtns() {
+    const wrap = document.getElementById('archiveDetailStrategyBtns');
+    if (!wrap) return;
+    wrap.querySelectorAll('button[data-arc-strat]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const k = btn.getAttribute('data-arc-strat');
+        const cur = new Set(state.archiveDetailStrategies || []);
+        if (cur.has(k)) cur.delete(k); else cur.add(k);
+        state.archiveDetailStrategies = ['balanced', 'breakout', 'ribbon', 'classic'].filter(x => cur.has(x));
+        wrap.querySelectorAll('button[data-arc-strat]').forEach(b => {
+          const bk = b.getAttribute('data-arc-strat');
+          const active = cur.has(bk);
+          b.className = active ? 'btn btn-xs btn-primary active' : 'btn btn-xs btn-outline-secondary';
+        });
+        renderArchiveDetailPanel();
+      });
+    });
+  }
+
+  async function openArchivesModal() {
+    const modalEl = document.getElementById('archivesModal');
+    if (!modalEl || typeof bootstrap === 'undefined') return;
+    if (!archivesModalInstance) {
+      archivesModalInstance = new bootstrap.Modal(modalEl);
+    }
+    archivesModalInstance.show();
+    const list = await loadArchivesList();
+    renderArchivesTable(list);
+    if (list.length > 0) {
+      await viewArchiveDetail(list[0].id);
+    } else {
+      state.activeArchiveDetail = null;
+      const wrap = document.getElementById('archiveDetailWrap');
+      if (wrap) wrap.style.display = 'none';
+    }
+  }
+
+  function renderArchivesTable(list) {
+    const tbody = document.getElementById('archivesTableBody');
+    const countEl = document.getElementById('archivesListCount');
+    if (countEl) countEl.textContent = `共 ${(list || []).length} 个存档`;
+    if (!tbody) return;
+    if (!list || list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="text-center text-secondary py-3">暂无存档记录</td></tr>';
+      return;
+    }
+    const activeId = state.activeArchiveDetail?.archive?.id;
+    tbody.innerHTML = list.map(a => {
+      const idNum = Number(a.id) || 0;
+      const pnl = Number(a.total_pnl || 0);
+      const pnlSign = pnl >= 0 ? '+' : '';
+      const pnlCls = pnl >= 0 ? 'text-success' : 'text-danger';
+      const rangeStr = `${_fmtTradeTime(a.start_time)} ~ ${_fmtTradeTime(a.end_time)}`;
+      const isSelected = activeId === idNum;
+      return `
+        <tr class="${isSelected ? 'table-active' : ''}" style="cursor:pointer" onclick="AppController.viewArchiveDetail(${idNum})">
+          <td class="text-secondary small">#${idNum}</td>
+          <td class="fw-semibold">${_escapeHtml(a.title)}</td>
+          <td class="small text-secondary font-monospace">${_fmtLogTime(a.created_at)}</td>
+          <td class="small text-secondary">${_escapeHtml(rangeStr)}</td>
+          <td>${Number(a.total_trades || 0)} <span class="text-secondary small">(模${Number(a.paper_trades || 0)}/实${Number(a.live_trades || 0)})</span></td>
+          <td>${Number(a.win_rate || 0).toFixed(1)}%</td>
+          <td class="${pnlCls} fw-bold">${pnlSign}$${pnl.toFixed(2)}</td>
+          <td class="text-end pe-3 text-nowrap" onclick="event.stopPropagation()">
+            <button class="btn btn-xs btn-outline-primary" onclick="AppController.viewArchiveDetail(${idNum})">查看明细</button>
+            <button class="btn btn-xs btn-outline-danger ms-1" onclick="AppController.deleteArchive(${idNum})" title="删除此存档">
+              <i class="fa-solid fa-trash-can"></i>
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  async function viewArchiveDetail(archiveId) {
+    try {
+      const res = await fetch(`/api/trades/archives/${archiveId}`);
+      if (!res.ok) return;
+      const detail = await res.json();
+      state.activeArchiveDetail = detail;
+      renderArchivesTable(state.archives || []);
+      renderArchiveDetailPanel();
+    } catch (err) {
+      console.warn('[App] Load archive detail error:', err);
+    }
+  }
+
+  function renderArchiveDetailPanel() {
+    const wrap = document.getElementById('archiveDetailWrap');
+    const titleEl = document.getElementById('archiveDetailTitle');
+    const metaEl = document.getElementById('archiveDetailMeta');
+    const tbody = document.getElementById('archiveDetailTradesBody');
+    if (!wrap || !tbody) return;
+
+    const detail = state.activeArchiveDetail;
+    if (!detail || !detail.archive) {
+      wrap.style.display = 'none';
+      return;
+    }
+    wrap.style.display = 'block';
+    const arc = detail.archive;
+    const selStrats = state.archiveDetailStrategies || [];
+    const trades = (detail.trades || []).filter(t => _matchTradeStrategy(t, selStrats));
+
+    const subClosed = trades.filter(t => t.status === 'closed');
+    const subWins = subClosed.filter(t => Number(t.pnl || 0) > 0).length;
+    const subWr = subClosed.length > 0 ? (subWins / subClosed.length * 100).toFixed(1) : '0.0';
+    const subPnl = subClosed.reduce((s, t) => s + Number(t.pnl || 0), 0);
+    const subSign = subPnl >= 0 ? '+' : '';
+    const subCls = subPnl >= 0 ? 'text-success' : 'text-danger';
+
+    if (titleEl) titleEl.textContent = `#${arc.id} ${arc.title}`;
+    if (metaEl) {
+      metaEl.innerHTML = `筛选共 <b>${trades.length}</b> 笔 · 胜率 <b>${subWr}%</b> · 净盈亏 <span class="${subCls} fw-bold">${subSign}$${subPnl.toFixed(2)}</span>`;
+    }
+
+    if (trades.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="11" class="text-center text-secondary py-3">当前策略筛选下暂无归档明细</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = trades.map(t => {
+      const isLong = (t.direction || '').toLowerCase() === 'long';
+      const dirBadge = isLong
+        ? '<span class="badge bg-success-subtle text-success border border-success-subtle">多</span>'
+        : '<span class="badge bg-danger-subtle text-danger border border-danger-subtle">空</span>';
+      const pnlVal = Number(t.pnl || 0);
+      const pSign = pnlVal >= 0 ? '+' : '';
+      const pCls = pnlVal >= 0 ? 'text-success' : 'text-danger';
+      const pctStr = t.pnl_pct != null ? ` (${t.pnl_pct >= 0 ? '+' : ''}${Number(t.pnl_pct).toFixed(2)}%)` : '';
+      const stratShort = _strategyShortLabel(t.strategy_mode);
+      const typeBadge = t.is_paper
+        ? `<span class="badge el-tag-paper">模拟·${stratShort}</span>`
+        : `<span class="badge bg-danger-subtle text-danger border border-danger-subtle">实盘·${stratShort}</span>`;
+      const reasonBadge = _renderCloseReasonBadge(t.close_reason);
+      return `
+        <tr>
+          <td class="text-secondary small">#${Number(t.id) || 0}</td>
+          <td><strong>${_escapeHtml(t.symbol)}</strong></td>
+          <td>${dirBadge}</td>
+          <td>${t.entry_price != null ? Number(t.entry_price).toFixed(2) : '—'}</td>
+          <td>${t.exit_price != null ? Number(t.exit_price).toFixed(2) : '—'}</td>
+          <td class="text-secondary small">${t.stop_loss != null ? Number(t.stop_loss).toFixed(2) : '—'}</td>
+          <td class="${pCls} fw-bold">${pSign}$${pnlVal.toFixed(2)}${pctStr}</td>
+          <td class="small text-secondary">${_fmtTradeTime(t.open_time)}</td>
+          <td class="small text-secondary">${_fmtTradeTime(t.close_time)}</td>
+          <td>${reasonBadge}</td>
+          <td>${typeBadge}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  async function deleteArchive(archiveId) {
+    if (!confirm(`确定要永久删除存档 #${archiveId} 及其包含的全部归档交易明细吗？此操作不可恢复！`)) return;
+    try {
+      const res = await fetch(`/api/trades/archives/${archiveId}`, { method: 'DELETE' });
+      if (res.ok) {
+        const list = await loadArchivesList();
+        if (state.activeArchiveDetail?.archive?.id === archiveId) {
+          state.activeArchiveDetail = null;
+        }
+        renderArchivesTable(list);
+        if (list.length > 0 && !state.activeArchiveDetail) {
+          await viewArchiveDetail(list[0].id);
+        } else {
+          renderArchiveDetailPanel();
+        }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('删除存档失败: ' + (err.detail || res.statusText));
+      }
+    } catch (err) {
+      alert('删除存档请求失败: ' + err.message);
+    }
+  }
+
   async function clearAllTrades() {
-    if (!confirm('确定要清空全部交易记录吗？该操作不可恢复！')) return;
+    if (!confirm('确定要清空当前未存档的全部交易记录吗？（已保存的历史存档不受影响）')) return;
     try {
       const res = await fetch('/api/trades/clear', { method: 'POST' });
       if (res.ok) {
@@ -1083,11 +1365,11 @@ const AppController = (() => {
   function updateBotUI(statusOrBool) {
     let paperRunning = state.paperRunning;
     let liveRunning = state.liveRunning;
-    const nextPaperModes = { ...(state.paperModes || { balanced: false, breakout: false, classic: false }) };
+    const nextPaperModes = { ...(state.paperModes || { balanced: false, breakout: false, classic: false, ribbon: false }) };
 
     if (typeof statusOrBool === 'object' && statusOrBool !== null) {
       if (statusOrBool.paper_modes && typeof statusOrBool.paper_modes === 'object') {
-        ['balanced', 'breakout', 'classic'].forEach(k => {
+        ['balanced', 'breakout', 'ribbon', 'classic'].forEach(k => {
           if (k in statusOrBool.paper_modes) nextPaperModes[k] = Boolean(statusOrBool.paper_modes[k]);
         });
         paperRunning = Object.values(nextPaperModes).some(Boolean);
@@ -1134,7 +1416,7 @@ const AppController = (() => {
 
     if (paperBtn) {
       if (paperRunning) {
-        const cntSuffix = activeCount > 0 ? ` ${activeCount}/3` : '';
+        const cntSuffix = activeCount > 0 ? ` ${activeCount}/${PAPER_STRATEGY_META.length}` : '';
         paperBtn.className = 'btn btn-sm btn-primary d-inline-flex align-items-center';
         paperBtn.innerHTML = `<i class="fa-solid fa-flask me-1"></i>模拟${cntSuffix}`;
         paperBtn.title = '模拟盘运行中，点击管理各策略启停';
@@ -1374,10 +1656,11 @@ const AppController = (() => {
     }
 
     const typeMeta = {
-      open:  { label: '开仓',     cls: 'bg-primary-subtle text-primary border border-primary-subtle' },
-      close: { label: '平仓',     cls: 'bg-success-subtle text-success border border-success-subtle' },
-      start: { label: '系统启动', cls: 'bg-info-subtle text-info border border-info-subtle' },
-      stop:  { label: '系统停止', cls: 'bg-warning-subtle text-warning border border-warning-subtle' }
+      open:    { label: '开仓',     cls: 'bg-primary-subtle text-primary border border-primary-subtle' },
+      close:   { label: '平仓',     cls: 'bg-success-subtle text-success border border-success-subtle' },
+      archive: { label: '交易存档', cls: 'bg-info-subtle text-info border border-info-subtle' },
+      start:   { label: '系统启动', cls: 'bg-info-subtle text-info border border-info-subtle' },
+      stop:    { label: '系统停止', cls: 'bg-warning-subtle text-warning border border-warning-subtle' }
     };
 
     tbody.innerHTML = logs.map(log => {
@@ -1560,6 +1843,27 @@ const AppController = (() => {
     return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
+  function _renderCloseReasonBadge(closeReason) {
+    const reasonMap = {
+      stop_loss:        '<span class="badge bg-danger-subtle text-danger border border-danger-subtle">初始止损</span>',
+      profit_lock_stop: '<span class="badge bg-success-subtle text-success border border-success-subtle">阶梯锁盈</span>',
+      trailing_stop:    '<span class="badge bg-success-subtle text-success border border-success-subtle">移动止损</span>',
+      ma7_ma25_cross:   '<span class="badge bg-info-subtle text-info border border-info-subtle">MA7/25交叉</span>',
+      ma7_trailing:     '<span class="badge bg-success-subtle text-success border border-success-subtle">MA7 止盈</span>',
+      ma25_trailing:    '<span class="badge bg-success-subtle text-success border border-success-subtle">MA25 止盈</span>',
+      ma60_trailing:    '<span class="badge bg-success-subtle text-success border border-success-subtle">MA60 止盈</span>',
+      htf_ma25_trailing:'<span class="badge bg-success-subtle text-success border border-success-subtle">大周期MA25止盈</span>',
+      htf_ma60_trailing:'<span class="badge bg-success-subtle text-success border border-success-subtle">大周期MA60止盈</span>',
+      ma60_cross:       '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">MA60 穿线</span>',
+      take_profit:      '<span class="badge bg-success-subtle text-success border border-success-subtle">目标止盈</span>',
+      exchange_closed:  '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">交易所平仓</span>',
+      archived:         '<span class="badge bg-primary-subtle text-primary border border-primary-subtle">存档结算</span>',
+      manual:           '<span class="badge el-tag-paper">手动平仓</span>',
+      time_stop:        '<span class="badge el-tag-paper">超时平仓</span>',
+    };
+    return reasonMap[closeReason] || (closeReason ? `<span class="badge el-tag-paper">${_escapeHtml(closeReason)}</span>` : '<span class="text-secondary">—</span>');
+  }
+
   function renderTradesTable(trades) {
     const tbody = document.getElementById('tradesTableBody');
     if (!tbody) return;
@@ -1619,24 +1923,9 @@ const AppController = (() => {
         ? `<span class="badge el-tag-paper" title="模拟策略: ${stratShort}">模拟·${stratShort}</span>`
         : `<span class="badge bg-danger-subtle text-danger border border-danger-subtle" title="实盘策略: ${stratShort}">实盘·${stratShort}</span>`;
 
-      const reasonMap = {
-        stop_loss:        '<span class="badge bg-danger-subtle text-danger border border-danger-subtle">初始止损</span>',
-        profit_lock_stop: '<span class="badge bg-success-subtle text-success border border-success-subtle">阶梯锁盈</span>',
-        trailing_stop:    '<span class="badge bg-success-subtle text-success border border-success-subtle">移动止损</span>',
-        ma7_trailing:     '<span class="badge bg-success-subtle text-success border border-success-subtle">MA7 止盈</span>',
-        ma25_trailing:    '<span class="badge bg-success-subtle text-success border border-success-subtle">MA25 止盈</span>',
-        ma60_trailing:    '<span class="badge bg-success-subtle text-success border border-success-subtle">MA60 止盈</span>',
-        htf_ma25_trailing:'<span class="badge bg-success-subtle text-success border border-success-subtle">大周期MA25止盈</span>',
-        htf_ma60_trailing:'<span class="badge bg-success-subtle text-success border border-success-subtle">大周期MA60止盈</span>',
-        ma60_cross:       '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">MA60 穿线</span>',
-        take_profit:      '<span class="badge bg-success-subtle text-success border border-success-subtle">目标止盈</span>',
-        exchange_closed:  '<span class="badge bg-warning-subtle text-warning border border-warning-subtle">交易所平仓</span>',
-        manual:           '<span class="badge el-tag-paper">手动平仓</span>',
-        time_stop:        '<span class="badge el-tag-paper">超时平仓</span>',
-      };
       const reasonBadge = t.status === 'open'
         ? '<span class="text-secondary">—</span>'
-        : (reasonMap[t.close_reason] || (t.close_reason ? `<span class="badge el-tag-paper">${_escapeHtml(t.close_reason)}</span>` : '<span class="text-secondary">—</span>'));
+        : _renderCloseReasonBadge(t.close_reason);
 
       const openTimeStr = _fmtTradeTime(t.open_time);
       const closeTimeStr = t.status === 'open' ? '—' : _fmtTradeTime(t.close_time);
@@ -2015,6 +2304,13 @@ const AppController = (() => {
         break;
       }
 
+      case 'trades_archived': {
+        loadTrades();
+        loadStats();
+        loadArchivesList();
+        break;
+      }
+
       case 'bot_status': {
         updateBotUI(msg);
         break;
@@ -2046,6 +2342,10 @@ const AppController = (() => {
     closeTrade,
     deleteTrade,
     clearAllTrades,
+    openArchiveConfirmModal,
+    openArchivesModal,
+    viewArchiveDetail,
+    deleteArchive,
     highlightTrade,
     loadTrades,
     loadStats,

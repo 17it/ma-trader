@@ -1093,7 +1093,7 @@ class TestThirdAuditFixes(unittest.TestCase):
                 self.assertTrue(st["paper_running"])
                 self.assertEqual(
                     st["paper_modes"],
-                    {"balanced": True, "breakout": True, "classic": False},
+                    {"balanced": True, "breakout": True, "classic": False, "ribbon": False},
                 )
 
                 # Stopping ONLY balanced keeps breakout running!
@@ -1103,7 +1103,7 @@ class TestThirdAuditFixes(unittest.TestCase):
                 self.assertTrue(st2["paper_running"])
                 self.assertEqual(
                     st2["paper_modes"],
-                    {"balanced": False, "breakout": True, "classic": False},
+                    {"balanced": False, "breakout": True, "classic": False, "ribbon": False},
                 )
 
                 # Simultaneous open paper trades on BTCUSDT across different strategies succeed
@@ -1190,6 +1190,137 @@ class TestThirdAuditFixes(unittest.TestCase):
             strategy_mode="balanced",
         )
         self.assertIsNone(chop_dir)
+
+    def test_ribbon_mode_entry_cross_exit_and_cycle_lock(self):
+        st = MAStrategy(strategy_mode="ribbon")
+        # 3 consecutive bars above MA7 and clear of MA25, expanding ribbon, ATR/price >= 0.09%
+        for step_idx in range(1, 3):
+            res_p = st.evaluate_bar(
+                o=60020.0, h=60090.0, l=59980.0, c=60060.0,
+                ma7_seq=(59990.0, 60005.0, 60025.0),
+                ma25_seq=(59950.0, 59955.0, 59960.0),
+                ma60=60100.0,  # Note: MA60 is ABOVE price, yet ribbon still works on V-reversal!
+                atr14=75.0,
+                htf_dir=None,
+                confirm_candles=3,
+                strategy_mode="ribbon",
+            )
+            self.assertTrue(res_p["pending"])
+            self.assertEqual(res_p["confirm"], step_idx)
+
+        sig = st.evaluate_bar(
+            o=60060.0, h=60130.0, l=60010.0, c=60110.0,
+            ma7_seq=(60000.0, 60020.0, 60050.0),
+            ma25_seq=(59952.0, 59958.0, 59968.0),
+            ma60=60100.0,
+            atr14=75.0,
+            htf_dir=None,
+            confirm_candles=3,
+            strategy_mode="ribbon",
+        )
+        self.assertIsNotNone(sig)
+        self.assertFalse(sig.get("pending", False))
+        self.assertEqual(sig["direction"], "long")
+
+        # Once marked traded in this cross cycle, same-side bars stay pending until MA7 crosses below MA25
+        st.mark_ribbon_traded("long")
+        st.reset()
+        for _ in range(3):
+            blocked_same_wave = st.evaluate_bar(
+                o=60100.0, h=60160.0, l=60030.0, c=60140.0,
+                ma7_seq=(60040.0, 60065.0, 60095.0),
+                ma25_seq=(59970.0, 59985.0, 60000.0),
+                ma60=60050.0,
+                atr14=75.0,
+                htf_dir=None,
+                confirm_candles=3,
+                strategy_mode="ribbon",
+            )
+        self.assertTrue(blocked_same_wave.get("pending", False))
+
+        # MA7 crossing below MA25 triggers exit AND unlocks cycle
+        self.assertEqual(MAStrategy.evaluate_ribbon_exit("long", 59980.0, 60000.0), "ma7_ma25_cross")
+        self.assertIsNone(MAStrategy.evaluate_ribbon_exit("long", 60020.0, 60000.0))
+
+    def test_trade_archive_resets_state_and_preserves_history(self):
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        import main as main_mod
+
+        auth_mod._login_fails.clear()
+        fake_klines = [
+            [1700000000000 + i * 60000, 60000.0, 60050.0, 59950.0, 60010.0, 10.0]
+            for i in range(80)
+        ]
+        with patch("binance_ws.BinanceWSStreamer.start"), patch("binance_ws.BinanceWSStreamer.stop"):
+            with TestClient(main_mod.app) as client:
+                login_res = client.post("/api/auth/login", json={"username": "admin", "password": "StrongPass99"})
+                if login_res.status_code != 200:
+                    login_res = client.post("/api/auth/login", json={"username": "admin", "password": "InitPass123"})
+                    tok = login_res.json()["token"]
+                    client.post(
+                        "/api/auth/change-password",
+                        headers={"Authorization": f"Bearer {tok}"},
+                        json={"old_password": "InitPass123", "new_password": "StrongPass99"},
+                    )
+                    login_res = client.post("/api/auth/login", json={"username": "admin", "password": "StrongPass99"})
+                headers = {"Authorization": f"Bearer {login_res.json()['token']}"}
+
+                client.post("/api/trades/clear", headers=headers)
+
+                # Open 2 paper trades (one balanced closed with profit, one ribbon left open)
+                with patch("routers.trading._get_cached_public_exchange") as m_ex, \
+                     patch("routers.trading._resolve_live_price", return_value=60310.0):
+                    m_ex.return_value.fetch_ohlcv.return_value = fake_klines
+                    t1 = client.post(
+                        "/api/simulate",
+                        json={"symbol": "BTCUSDT", "direction": "long", "entry_price": 60000.0, "strategy_mode": "balanced"},
+                        headers=headers,
+                    ).json()
+                    client.post(f"/api/trades/{t1['id']}/close", json={"exit_price": 60500.0}, headers=headers)
+
+                    t2 = client.post(
+                        "/api/simulate",
+                        json={"symbol": "BTCUSDT", "direction": "long", "entry_price": 60000.0, "strategy_mode": "ribbon"},
+                        headers=headers,
+                    ).json()
+
+                    # Equity of balanced before archive should be > 10000
+                    self.assertGreater(db_mod.get_paper_equity(strategy_mode="balanced"), 10000.0)
+
+                    # Archive all active trades
+                    arc_res = client.post(
+                        "/api/trades/archive",
+                        json={"title": "升级前测试存档"},
+                        headers=headers,
+                    )
+                    self.assertEqual(arc_res.status_code, 200, arc_res.text)
+                    arc = arc_res.json()
+                    self.assertEqual(arc["title"], "升级前测试存档")
+                    self.assertEqual(arc["total_trades"], 2)
+                    self.assertGreater(arc["total_pnl"], 0.0)
+
+                # Active trades, stats, and paper equities must all reset to initial state
+                active_trades = client.get("/api/trades", headers=headers).json()
+                self.assertEqual(len(active_trades), 0)
+                active_stats = client.get("/api/stats", headers=headers).json()
+                self.assertEqual(active_stats["total_trades"], 0)
+                self.assertAlmostEqual(db_mod.get_paper_equity(strategy_mode="balanced"), 10000.0, places=2)
+                self.assertAlmostEqual(db_mod.get_paper_equity(strategy_mode="ribbon"), 10000.0, places=2)
+
+                # Clear active trades must NOT wipe saved archives
+                client.post("/api/trades/clear", headers=headers)
+                arc_list = client.get("/api/trades/archives", headers=headers).json()
+                self.assertGreaterEqual(len(arc_list), 1)
+
+                detail = client.get(f"/api/trades/archives/{arc['id']}", headers=headers).json()
+                self.assertEqual(len(detail["trades"]), 2)
+                reasons = {t["close_reason"] for t in detail["trades"]}
+                self.assertIn("archived", reasons)
+
+                # Clean up test archive
+                del_res = client.delete(f"/api/trades/archives/{arc['id']}", headers=headers)
+                self.assertEqual(del_res.status_code, 200)
 
 
 def tearDownModule():

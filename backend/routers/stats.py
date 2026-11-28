@@ -25,7 +25,7 @@ def get_stats(
     symbol: Optional[str] = Query(None),
     days: int = Query(30, ge=1, le=365),
     is_paper: Optional[bool] = Query(None),
-    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic)$"),
+    strategy_mode: Optional[str] = Query(None, pattern="^(balanced|breakout|classic|ribbon)$"),
     strategy_modes: Optional[str] = Query(None, description="Comma-separated strategy modes or 'none'"),
     initial_equity: float = Query(10_000.0, gt=0),
 ):
@@ -48,13 +48,14 @@ def get_stats(
     q = db.query(Trade).filter(
         Trade.status == "closed",
         Trade.close_time >= since,
+        Trade.archive_id.is_(None),
     )
     if symbol and isinstance(symbol, str):
         q = q.filter(Trade.symbol == symbol.upper().strip())
     if is_paper is not None:
         q = q.filter(Trade.is_paper == is_paper)
     if strategy_modes is not None and strategy_modes.strip():
-        valid_set = {"balanced", "breakout", "classic"}
+        valid_set = {"balanced", "breakout", "classic", "ribbon"}
         modes = [m.strip().lower() for m in strategy_modes.split(",") if m.strip().lower() in valid_set]
         if not modes:
             return StatsResponse()

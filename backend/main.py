@@ -100,6 +100,7 @@ async def lifespan(app: FastAPI):
         "paper:balanced": None,
         "paper:breakout": None,
         "paper:classic": None,
+        "paper:ribbon": None,
         "live": None,
     }
     app.state.shared_paper_feed = None
